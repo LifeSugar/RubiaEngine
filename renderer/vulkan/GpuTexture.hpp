@@ -4,6 +4,7 @@
 #include "vulkan/Image.hpp"
 #include "vulkan/ImageView.hpp"
 #include "vulkan/UploadContext.hpp"
+#include "vulkan/VulkanUploadTypes.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -48,6 +49,10 @@ public:
         const Device& device,
         UploadContext& uploadContext,
         const CreateInfo& createInfo);
+    // Allocates an unpublished texture; bool() does not imply upload completion.
+    void allocate(const Device& device, const CreateInfo& createInfo);
+    static UploadRequest makeUploadRequest(std::shared_ptr<GpuTexture> texture,
+        std::shared_ptr<const asset::TextureAsset> source);
     void reset() noexcept;
 
     [[nodiscard]] VkFormat format() const noexcept { return format_; }
@@ -60,6 +65,7 @@ public:
     }
 
 private:
+    UploadContext::ImageUploadInfo uploadInfo(const asset::TextureAsset& asset) const;
     VkDevice device_ = VK_NULL_HANDLE;
     VkFormat format_ = VK_FORMAT_UNDEFINED;
     Image image_;

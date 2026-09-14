@@ -15,8 +15,10 @@ using render::ScenePreparationState;
 
 VulkanScenePreparation::VulkanScenePreparation(const Device& device, VulkanRenderer& renderer,
                                                RenderAssetCache& cache,
+                                               VulkanUploadService& uploads,
                                                render::SceneResourceRequest request)
-    : device_(device), renderer_(renderer), cache_(cache), request_(std::move(request))
+    : device_(device), renderer_(renderer), cache_(cache), request_(std::move(request)),
+      uploads_(uploads)
 {
 }
 
@@ -64,8 +66,6 @@ void VulkanScenePreparation::begin()
         // Preconditions on an empty renderer/cache are checked by the public
         // renderer entry point. From here on, all partial resources are ours.
         ownsResources_ = true;
-        pool_.create(device_, device_.graphicsQueueFamily(), VK_COMMAND_POOL_CREATE_TRANSIENT_BIT);
-        uploads_ = std::make_unique<UploadContext>(device_, pool_);
         cache_.beginUpload(device_, assets, request_.models);
         status_.total = cache_.pendingUploadCount();
         status_.state = ScenePreparationState::Uploading;
@@ -83,31 +83,13 @@ void VulkanScenePreparation::advance()
     {
         if (status_.state == ScenePreparationState::Uploading)
         {
-            if (!uploads_->pollBatch())
-            {
-                return;
-            }
-            status_.completed = status_.submitted;
+            cache_.prepareNext(device_, uploads_, request_.assets);
+            status_.completed = status_.total - cache_.pendingUploadCount();
+            status_.submitted = status_.completed + (cache_.hasSubmittedUpload(uploads_) ? 1 : 0);
             if (cache_.pendingUploadCount() == 0)
             {
-                releaseUploads();
                 status_.state = ScenePreparationState::PreparingPipelines;
-                return;
             }
-
-            // Soft budgets: one indivisible resource may exceed a limit.
-            const auto deadline = std::chrono::steady_clock::now() + 4ms;
-            uploads_->beginBatch();
-            std::size_t count = 0;
-            do
-            {
-                cache_.uploadNext(device_, *uploads_, *request_.assets);
-                ++count;
-            } while (cache_.pendingUploadCount() != 0 && count < 16 &&
-                     uploads_->stagedByteCount() < 16 * 1024 * 1024 &&
-                     std::chrono::steady_clock::now() < deadline);
-            uploads_->submitBatch();
-            status_.submitted = status_.total - cache_.pendingUploadCount();
         }
         else if (status_.state == ScenePreparationState::PreparingPipelines)
         {
@@ -127,6 +109,17 @@ void VulkanScenePreparation::advance()
     }
 }
 
+render::ScenePreparationStatus VulkanScenePreparation::status() const
+{
+    auto result = status_;
+    if (result.state == ScenePreparationState::Uploading)
+    {
+        result.completed = result.total - cache_.pendingUploadCount();
+        result.submitted = result.completed + (cache_.hasSubmittedUpload(uploads_) ? 1 : 0);
+    }
+    return result;
+}
+
 void VulkanScenePreparation::activate()
 {
     if (status_.state != ScenePreparationState::Ready)
@@ -140,21 +133,15 @@ void VulkanScenePreparation::activate()
     status_.state = ScenePreparationState::Activated;
 }
 
-void VulkanScenePreparation::releaseUploads() noexcept
-{
-    // Drains an in-flight batch, or discards unsubmitted commands, before any
-    // referenced destination or source is released. Normal advance only polls.
-    uploads_.reset();
-    pool_.reset();
-}
-
 void VulkanScenePreparation::discardResources() noexcept
 {
-    releaseUploads();
+    cache_.cancelPendingUpload(uploads_);
     if (ownsResources_)
     {
         ownsResources_ = false;
         renderer_.releaseSceneResources();
+        // releaseSceneResources waits for submitted frames; reclaim cancelled upload leases too.
+        uploads_.tick({0, 0, std::chrono::microseconds{0}});
         cache_.reset();
     }
     request_ = {};

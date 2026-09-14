@@ -1,6 +1,8 @@
 add_library(rubia_smoke_tests STATIC
     AppSmokeTests.cpp
     AppStartupTests.cpp
+    VulkanUploadTests.cpp
+    VulkanUploadTests.hpp
     AppSmokeTests.hpp
 )
 target_include_directories(rubia_smoke_tests PUBLIC

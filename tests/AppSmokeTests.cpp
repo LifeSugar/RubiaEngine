@@ -1182,6 +1182,29 @@ void AppSmokeTests::runRenderTest(
     {
         throw std::runtime_error("preparation request or cancellation destroyed the activated scene");
     }
+    // Incremental texture preparation while the existing scene keeps drawing.
+    asset::TextureAsset::CreateInfo incrementalInfo;
+    incrementalInfo.name = "Incremental upload during scene rendering";
+    incrementalInfo.width = incrementalInfo.height = 1;
+    incrementalInfo.format = asset::TextureFormat::RGBA8UNorm;
+    incrementalInfo.payload.assign(4, std::byte{0xff});
+    const auto incrementalHandle = app.assetManager.createTexture(incrementalInfo);
+    auto incremental = app.renderer.prepareTexture(app.renderAssets, incrementalHandle,
+        std::make_shared<const asset::TextureAsset>(incrementalInfo));
+    if (!incremental.accepted()) throw std::runtime_error(incremental.error);
+    const auto incrementalDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (std::chrono::steady_clock::now() < incrementalDeadline)
+    {
+        app.updateContentLoading();
+        app.imguiLayer.beginFrame();
+        app.drawGui(gui);
+        const auto result = app.renderer.render(app.makeRenderFrame(), app.renderAssets, app.imguiLayer.endFrame());
+        if (result == rhi::vulkan::VulkanRenderer::RenderResult::NeedsResize) app.recreateSwapChain(gui);
+        if (app.renderer.texturePreparationStatus(incremental.ticket).state == rhi::vulkan::UploadState::Completed) break;
+    }
+    if (!app.renderer.sceneReady() || !app.renderAssets.tryTexture(incrementalHandle))
+        throw std::runtime_error("incremental texture upload did not preserve the active scene");
+    app.renderer.releaseTexturePreparation(incremental.ticket);
     std::clog << "[Startup] GUI remained active for " << uploadFrames
         << " upload frames; failure, resize and retry passed\n";
     asset::TextureAssetHandle editorPreviewTexture{};

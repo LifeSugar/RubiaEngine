@@ -303,3 +303,40 @@ descriptor 的更新也必须考虑在途帧，不能只保证 image 存活。
 
 优先目标：让“运行中的渲染器安全地接收一张独立贴图上传”成为普通能力。
 先使所有权、增量更新、同步和回收正确，再增加并行度。
+
+
+## 8. 第一版实现进展（2026-09-14）
+
+前文记录的是设计时的状态，本节描述本轮已经实现的部分。
+
+- 新增 `VulkanUploadTypes` 和 `VulkanUploadService`。服务由 renderer 长期持有，
+  限定创建它的线程使用；请求与 GPU 批次分离，支持多请求排队、合批、跨批次推进。
+- `tryEnqueue` 只在 Accepted 时消费请求；QueueFull / InvalidRequest 保留原数据。
+  源数据和目标资源使用共享持有，不能在准备期间修改、reset 或移动。
+- `UploadContext::recordBufferUpload` / `recordImageUpload` 只记录已有目标的传输，
+  服务统一处理未提交批次失败。原同步包装接口继续保留。
+- `GpuTexture::allocate` / `Mesh::allocate` 创建目标，`makeUploadRequest` 组装传输。
+  对象存在不代表已上传；准备结果只在完成后发布到 cache。
+- renderer 提供独立 `prepareTexture`、状态、取消与 ticket 释放接口；
+  空编辑器和已激活场景都可以增量准备贴图，无需模型或 pipeline。
+- Demo 的纹理和 mesh 已改走共享服务。场景状态与 pipeline 准备继续由场景会话协调。
+- 服务票据 Completed 表示 GPU 传输完成；renderer 贴图接口 Completed 还保证已发布至 cache。
+  Cancelled 是请求终态，不表示在途 GPU 工作已经停止或临时资源已经释放。
+- 普通取消立即撤销后续需求，已提交批次持有数据直到 fence 完成。
+  `releaseTicket` 只删除终态记录；`drain` 显式等待完成；`shutdown` 取消排队并安全清理提交。
+- 默认软预算为每 tick 4 ms / 16 MiB / 16 operations；硬上限为 256 MiB staging、
+  512 MiB 活跃请求逻辑源数据量、1024 个未释放票据。共享 owner 可能保有更大 CPU 对象，
+  逻辑源数据上限不等同于整个进程的物理内存上限。
+- 第一版每个目标在一次请求中只接受一个 operation；拒绝同时在途的同一目标。
+  image 支持新建单采样 2D color image 的完整紧凑 mip/layer 数据，检查格式、范围、
+  offset 对齐和源数据长度；不支持任意旧布局或在用资源原地更新。
+
+当前保留的限制：一个在途上传批次、graphics queue、主线程录制、无 staging 池、
+无单 operation 分块；GPU cache 仍由 App 持有，Demo 适配器仍逐资源准备，
+材质仍为单模板，pipeline 同步创建，纹理重导入尚未迁移。
+这些是后续迭代内容，不应将本轮视为完整资源流式系统。
+
+验证新增于 `tests/VulkanUploadTests.cpp` 和现有启动/渲染 smoke tests：
+设备本地 buffer 数据与 offset 回读、跨批次请求、合批取消保活、队列容量与重试、
+排队取消、停止清理、线程约束、非法 image 源数据拒绝、空 GUI 贴图预览、
+已有场景绘制时增量贴图上传。真实驱动 OOM / device-lost 失败未进行故障注入。

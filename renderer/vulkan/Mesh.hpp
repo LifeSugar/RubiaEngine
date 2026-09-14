@@ -3,6 +3,7 @@
 #include "asset/MeshAsset.hpp"
 #include "vulkan/Buffer.hpp"
 #include "vulkan/UploadContext.hpp"
+#include "vulkan/VulkanUploadTypes.hpp"
 
 #include <vector>
 
@@ -33,6 +34,9 @@ public:
         UploadContext& uploadContext,
         const asset::MeshAsset& asset);
     /// Releases the GPU buffers and submesh metadata.
+    void allocate(const Device& device, const asset::MeshAsset& asset);
+    static UploadRequest makeUploadRequest(std::shared_ptr<Mesh> mesh,
+        std::shared_ptr<const asset::MeshAsset> source);
     void reset() noexcept;
     /// Binds the vertex and index buffers to a command buffer.
     void bind(VkCommandBuffer commandBuffer) const;

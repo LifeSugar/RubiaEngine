@@ -67,6 +67,8 @@ Buffer::Buffer(Buffer&& other) noexcept
       size_(std::exchange(other.size_, 0)),
       mappedData_(std::exchange(other.mappedData_, nullptr))
 {
+    ownerDevice_ = std::exchange(other.ownerDevice_, VK_NULL_HANDLE);
+    usage_ = std::exchange(other.usage_, 0);
 }
 
 Buffer& Buffer::operator=(Buffer&& other) noexcept
@@ -74,6 +76,8 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept
     if (this != &other)
     {
         reset();
+        ownerDevice_ = std::exchange(other.ownerDevice_, VK_NULL_HANDLE);
+        usage_ = std::exchange(other.usage_, 0);
 #if VK_RENDERER_USE_VMA
         allocator_ = std::exchange(other.allocator_, VK_NULL_HANDLE);
 #else
@@ -196,10 +200,14 @@ void Buffer::create(
     memory_ = newMemory;
 #endif
     size_ = size;
+    ownerDevice_ = device.get();
+    usage_ = usage;
 }
 
 void Buffer::reset() noexcept
 {
+    ownerDevice_ = VK_NULL_HANDLE;
+    usage_ = 0;
     unmap();
 
 #if VK_RENDERER_USE_VMA

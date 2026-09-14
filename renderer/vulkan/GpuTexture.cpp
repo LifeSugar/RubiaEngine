@@ -113,10 +113,15 @@ GpuTexture& GpuTexture::operator=(GpuTexture&& other) noexcept
     return *this;
 }
 
-void GpuTexture::create(
-    const Device& device,
-    UploadContext& uploadContext,
-    const CreateInfo& createInfo)
+void GpuTexture::create(const Device& device, UploadContext& uploadContext, const CreateInfo& createInfo)
+{
+    GpuTexture replacement;
+    replacement.allocate(device, createInfo);
+    uploadContext.uploadImage(replacement.uploadInfo(*createInfo.asset));
+    *this = std::move(replacement);
+}
+
+void GpuTexture::allocate(const Device& device, const CreateInfo& createInfo)
 {
     if (!device || createInfo.asset == nullptr ||
         !*createInfo.asset || createInfo.asset->mipLevels().empty())
@@ -135,37 +140,6 @@ void GpuTexture::create(
 
     const uint32_t mipCount =
         static_cast<uint32_t>(asset.mipLevels().size());
-    std::vector<VkBufferImageCopy> copyRegions;
-    copyRegions.reserve(mipCount);
-    for (uint32_t mipIndex = 0; mipIndex < mipCount; ++mipIndex)
-    {
-        const asset::TextureMipLevel& mip = asset.mipLevels()[mipIndex];
-        const uint32_t expectedWidth =
-            std::max(1u, asset.width() >> std::min(mipIndex, 31u));
-        const uint32_t expectedHeight =
-            std::max(1u, asset.height() >> std::min(mipIndex, 31u));
-        if (mip.width != expectedWidth || mip.height != expectedHeight)
-        {
-            throw std::invalid_argument(
-                "GpuTexture mip dimensions do not match the base image");
-        }
-
-        VkBufferImageCopy region{};
-        region.bufferOffset = static_cast<VkDeviceSize>(mip.byteOffset);
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.mipLevel = mipIndex;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent = {mip.width, mip.height, 1};
-        copyRegions.push_back(region);
-    }
-
-    if (asset.payload().size() >
-        std::numeric_limits<VkDeviceSize>::max())
-    {
-        throw std::overflow_error(
-            "GpuTexture payload exceeds the Vulkan address range");
-    }
-
     const VkFormat format = device.findSupportedFormat(
         {textureVkFormat(asset.format(), asset.colorSpace())},
         VK_IMAGE_TILING_OPTIMAL,
@@ -189,21 +163,6 @@ void GpuTexture::create(
         createInfo.viewRange,
         imageInfo.mipLevels,
         imageInfo.arrayLayers);
-
-    UploadContext::ImageUploadInfo uploadInfo{};
-    uploadInfo.sourceData = asset.payload().data();
-    uploadInfo.sourceSize =
-        static_cast<VkDeviceSize>(asset.payload().size());
-    uploadInfo.destination.image = replacement.image_.get();
-    uploadInfo.destination.format = format;
-    uploadInfo.destination.extent = imageInfo.extent;
-    uploadInfo.destination.mipLevels = mipCount;
-    uploadInfo.destination.arrayLayers = imageInfo.arrayLayers;
-    uploadInfo.copyRegions = std::move(copyRegions);
-    uploadInfo.destinationRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    uploadInfo.destinationRange.levelCount = mipCount;
-    uploadInfo.destinationRange.layerCount = 1;
-    uploadContext.uploadImage(uploadInfo);
 
     ImageView::CreateInfo viewInfo{};
     viewInfo.image = replacement.image_.get();
@@ -236,6 +195,69 @@ void GpuTexture::create(
     }
 
     *this = std::move(replacement);
+}
+
+UploadContext::ImageUploadInfo GpuTexture::uploadInfo(const asset::TextureAsset& asset) const
+{
+    const auto& desc = image_.description();
+    const auto mipCount = desc.mipLevels;
+    if (asset.width() != desc.extent.width || asset.height() != desc.extent.height ||
+        asset.mipLevels().size() != mipCount ||
+        textureVkFormat(asset.format(), asset.colorSpace()) != desc.format)
+    {
+        throw std::invalid_argument("texture upload source does not match allocated image");
+    }
+    std::vector<VkBufferImageCopy> copyRegions;
+    copyRegions.reserve(mipCount);
+    for (uint32_t mipIndex = 0; mipIndex < mipCount; ++mipIndex)
+    {
+        const asset::TextureMipLevel& mip = asset.mipLevels()[mipIndex];
+        const uint32_t expectedWidth = std::max(1u, asset.width() >> std::min(mipIndex, 31u));
+        const uint32_t expectedHeight = std::max(1u, asset.height() >> std::min(mipIndex, 31u));
+        if (mip.width != expectedWidth || mip.height != expectedHeight)
+        {
+            throw std::invalid_argument("GpuTexture mip dimensions do not match the base image");
+        }
+
+        VkBufferImageCopy region{};
+        region.bufferOffset = static_cast<VkDeviceSize>(mip.byteOffset);
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = mipIndex;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = {mip.width, mip.height, 1};
+        copyRegions.push_back(region);
+    }
+
+    if (asset.payload().size() > std::numeric_limits<VkDeviceSize>::max())
+    {
+        throw std::overflow_error("GpuTexture payload exceeds the Vulkan address range");
+    }
+
+    UploadContext::ImageUploadInfo info;
+    info.sourceData = asset.payload().data();
+    info.sourceSize = asset.payload().size();
+    info.destination = {image_.get(), desc.format, desc.extent, desc.mipLevels, desc.arrayLayers};
+    info.copyRegions = std::move(copyRegions);
+    info.destinationRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipCount, 0, 1};
+    return info;
+}
+
+UploadRequest GpuTexture::makeUploadRequest(std::shared_ptr<GpuTexture> texture,
+                                            std::shared_ptr<const asset::TextureAsset> source)
+{
+    if (!texture || !*texture || !source)
+    {
+        throw std::invalid_argument("missing texture upload owner");
+    }
+    auto info = texture->uploadInfo(*source);
+    ImageUpload op;
+    op.destination = std::shared_ptr<const Image>(texture, &texture->image_);
+    op.source = {source, source->payload().data(), source->payload().size()};
+    op.regions = std::move(info.copyRegions);
+    op.range = info.destinationRange;
+    UploadRequest request;
+    request.operations.emplace_back(std::move(op));
+    return request;
 }
 
 void GpuTexture::reset() noexcept

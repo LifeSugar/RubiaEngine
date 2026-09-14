@@ -1,4 +1,6 @@
 #include "AppSmokeTests.hpp"
+#include "VulkanUploadTests.hpp"
+#include <imgui.h>
 
 #include "EditorLayer.hpp"
 #include "render/SceneResourcePreparation.hpp"
@@ -48,6 +50,64 @@ void AppSmokeTests::runStartupTest()
         }
         app.recreateSwapChain(gui);
         draw();
+
+        runVulkanUploadTests(app.vulkanContext.device());
+
+        // Standalone incremental texture uploads: no model, material layout or pipeline.
+        {
+            auto sources = std::make_shared<asset::AssetManager>();
+            asset::TextureAsset::CreateInfo info;
+            info.name = "Standalone upload preview";
+            info.width = info.height = 2;
+            info.format = asset::TextureFormat::RGBA8UNorm;
+            info.payload.assign(16, std::byte{0xff});
+            auto first = sources->createTexture(info);
+            info.name = "Second standalone preview";
+            auto second = sources->createTexture(info);
+            auto prepare = [&](asset::TextureAssetHandle handle)
+            {
+                return app.renderer.prepareTexture(app.renderAssets, handle,
+                    std::shared_ptr<const asset::TextureAsset>(sources, &sources->texture(handle)));
+            };
+            auto a = prepare(first);
+            auto b = prepare(second);
+            if (!a.accepted() || !b.accepted() || app.renderAssets.tryTexture(first) || app.renderAssets.tryTexture(second))
+                throw std::runtime_error("standalone upload exposed an unready texture");
+            auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+            while (std::chrono::steady_clock::now() < limit)
+            {
+                // This is the normal App pump even while content loading is Idle.
+                app.updateContentLoading();
+                if (app.renderer.texturePreparationStatus(a.ticket).state == rhi::vulkan::UploadState::Completed &&
+                    app.renderer.texturePreparationStatus(b.ticket).state == rhi::vulkan::UploadState::Completed) break;
+                draw();
+            }
+            if (!app.renderAssets.tryTexture(first) || !app.renderAssets.tryTexture(second) || app.renderer.sceneReady())
+                throw std::runtime_error("standalone texture preparation required a scene or did not publish");
+            const auto firstView = app.renderAssets.texture(first).view();
+            auto preview = app.guiRenderBridge.preview(first);
+            if (!preview) throw std::runtime_error("standalone upload has no GUI preview");
+            app.imguiLayer.beginFrame();
+            ImGui::Begin("Standalone texture upload test");
+            ImGui::Image(ImTextureRef(static_cast<ImTextureID>(preview.textureId)), ImVec2(32, 32));
+            ImGui::End();
+            const auto previewResult = app.renderer.renderGui(app.imguiLayer.endFrame());
+            if (previewResult == rhi::vulkan::VulkanRenderer::RenderResult::NeedsResize)
+                app.recreateSwapChain(gui);
+            app.renderer.releaseTexturePreparation(a.ticket);
+            app.renderer.releaseTexturePreparation(b.ticket);
+            info.name = "Cancelled standalone preview";
+            auto third = sources->createTexture(info);
+            auto c = prepare(third);
+            app.renderer.cancelTexturePreparation(c.ticket);
+            app.renderer.releaseTexturePreparation(c.ticket);
+            app.updateContentLoading();
+            if (app.renderAssets.tryTexture(third) || app.renderAssets.texture(first).view() != firstView)
+                throw std::runtime_error("standalone cancellation damaged the cache");
+            app.renderer.waitIdle();
+            app.guiRenderBridge.invalidatePreview(first);
+            app.renderAssets.reset();
+        }
 
         // Cooperative cancellation also works before the worker gets scheduled.
         app.contentLoadConfig_ = config.demoContent;

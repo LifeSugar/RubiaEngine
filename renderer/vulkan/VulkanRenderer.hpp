@@ -7,6 +7,7 @@
 #include "vulkan/GraphicsPipeline.hpp"
 #include "render/RenderFrame.hpp"
 #include "render/SceneResourcePreparation.hpp"
+#include "vulkan/VulkanUploadService.hpp"
 #include "vulkan/RenderPass.hpp"
 #include "vulkan/RenderTarget.hpp"
 #include "vulkan/Sampler.hpp"
@@ -25,6 +26,7 @@ class Mesh;
 class RenderAssetCache;
 class VulkanContext;
 class VulkanScenePreparation;
+class GpuTexture;
 struct VulkanDrawList;
 
 // Owns the Vulkan objects and synchronization needed to execute one render
@@ -100,6 +102,16 @@ public:
         RenderAssetCache& renderAssets, render::SceneResourceRequest request);
     /// Polls uploads and advances one soft-budgeted batch or the pipeline stage.
     void advanceScenePreparation();
+    // Called once per frame, including when no scene is loading.
+    void advanceResourcePreparation();
+    // Initial, incremental texture preparation. Source remains immutable; cache
+    // must outlive the ticket (and all published GPU uses). No replacement here.
+    UploadEnqueueResult prepareTexture(RenderAssetCache& cache,
+        asset::TextureAssetHandle handle, std::shared_ptr<const asset::TextureAsset> source);
+    UploadStatus texturePreparationStatus(UploadTicket ticket) const;
+    void cancelTexturePreparation(UploadTicket ticket);
+    void releaseTexturePreparation(UploadTicket ticket);
+
     [[nodiscard]] render::ScenePreparationStatus scenePreparationStatus() const;
     /// Publishes ready GPU resources; caller then publishes matching CPU content.
     void activatePreparedScene();
@@ -277,7 +289,17 @@ private:
     /// Revision of the currently staged view GPU payload.
     uint64_t stagedViewGpuDataRevision_ = 0;
     // Destroy/cancel before scene objects, frame contexts, cache, or device.
-    std::unique_ptr<VulkanScenePreparation> scenePreparation_;
+    struct PendingTexturePreparation
+    {
+        RenderAssetCache* cache = nullptr;
+        asset::TextureAssetHandle handle;
+        std::shared_ptr<GpuTexture> texture;
+        bool published = false;
+        std::string error;
+    };
+    std::unique_ptr<VulkanUploadService> uploads_; //长期存在的上传服务。场景加载或者独立asset准备都使用此服务
+    std::map<uint64_t, PendingTexturePreparation> pendingTextures_;
+    std::unique_ptr<VulkanScenePreparation> scenePreparation_; 
 };
 
 } // namespace rubia::rhi::vulkan

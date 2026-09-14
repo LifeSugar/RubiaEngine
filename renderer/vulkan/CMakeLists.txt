@@ -51,6 +51,9 @@ add_library(rubia_rhi_vulkan STATIC
     TextureVkFormat.hpp
     UploadContext.cpp
     UploadContext.hpp
+    VulkanUploadTypes.hpp
+    VulkanUploadService.hpp
+    VulkanUploadService.cpp
     VmaImplementation.cpp
     VulkanApplicationGuiRenderBridge.cpp
     VulkanApplicationGuiRenderBridge.hpp

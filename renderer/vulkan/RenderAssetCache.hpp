@@ -6,6 +6,7 @@
 #include "vulkan/GpuMaterial.hpp"
 #include "vulkan/GpuTexture.hpp"
 #include "vulkan/Mesh.hpp"
+#include "vulkan/VulkanUploadService.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -42,6 +43,14 @@ public:
     void uploadNext(const Device& device, UploadContext& uploadContext,
         const asset::AssetManager& assets);
     [[nodiscard]] std::size_t pendingUploadCount() const noexcept;
+    // Scene preparation adapter. Publishes only fence-completed textures/meshes.
+    void prepareNext(const Device& device, VulkanUploadService& uploads,
+        std::shared_ptr<const asset::AssetManager> assets);
+    bool hasSubmittedUpload(const VulkanUploadService& uploads) const;
+    void cancelPendingUpload(VulkanUploadService& uploads);
+    void publishTexture(asset::TextureAssetHandle handle, GpuTexture texture);
+    bool empty() const noexcept;
+
     /// Builds a replacement without changing the live cache. This lets the
     /// caller finish disk/CPU validation before committing the GPU swap.
     [[nodiscard]] GpuTexture stageTextureReplacement(
@@ -76,6 +85,14 @@ public:
         return materialDescriptorSetLayout_.get();
     }
 private:
+    struct PendingUpload
+    {
+        std::shared_ptr<GpuTexture> texture;
+        std::shared_ptr<Mesh> mesh;
+        UploadRequest request;
+        UploadTicket ticket;
+    } pendingUpload_;
+
     struct TextureEntry
     {
         uint32_t generation = 0;

@@ -296,48 +296,69 @@ void UploadContext::discardBatch() noexcept
     stagedBytes_ = 0;
 }
 
-Buffer UploadContext::uploadBuffer(
-    const void* data,
-    VkDeviceSize size,
-    VkBufferUsageFlags destinationUsage)
+void UploadContext::validateBufferUpload(const BufferUploadInfo& info)
 {
-    if (data == nullptr || size == 0 || destinationUsage == 0 || submitted_)
+    if (!info.destination || !*info.destination || !info.sourceData || !info.sourceSize ||
+        info.sourceSize > std::numeric_limits<std::size_t>::max() ||
+        info.destinationOffset > info.destination->size() ||
+        info.sourceSize > info.destination->size() - info.destinationOffset ||
+        (info.destinationOffset % 4) != 0 || (info.sourceSize % 4) != 0 || !info.finalStages ||
+        !info.finalAccess || !(info.destination->usage() & VK_BUFFER_USAGE_TRANSFER_DST_BIT))
     {
-        throw std::invalid_argument("invalid buffer upload or a batch is still in flight");
+        throw std::invalid_argument("invalid buffer upload range, usage or synchronization");
     }
-    if (size > std::numeric_limits<std::size_t>::max())
+}
+
+void UploadContext::validateImageUploadInfo(const ImageUploadInfo& info)
+{
+    validateImageUpload(info);
+}
+
+void UploadContext::recordBufferUpload(const BufferUploadInfo& info)
+{
+    validateBufferUpload(info);
+    if (commandBuffer_ == VK_NULL_HANDLE || submitted_)
     {
-        throw std::overflow_error("upload buffer size exceeds the host address range");
+        throw std::logic_error("buffer recording requires an open upload batch");
     }
-    Buffer stagingBuffer(*device_, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    std::memcpy(stagingBuffer.map(), data, static_cast<std::size_t>(size));
-    stagingBuffer.unmap();
-    Buffer destinationBuffer(*device_, size,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT | destinationUsage,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    Buffer staging(*device_, info.sourceSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    std::memcpy(staging.map(), info.sourceData, static_cast<std::size_t>(info.sourceSize));
+    staging.unmap();
+    stagingBuffers_.push_back(std::move(staging));
+    stagedBytes_ += info.sourceSize;
+    VkBufferCopy copy{};
+    copy.dstOffset = info.destinationOffset;
+    copy.size = info.sourceSize;
+    vkCmdCopyBuffer(commandBuffer_, stagingBuffers_.back().get(), info.destination->get(), 1,
+                    &copy);
+    VkBufferMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = info.finalAccess;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer = info.destination->get();
+    barrier.offset = info.destinationOffset;
+    barrier.size = info.sourceSize;
+    vkCmdPipelineBarrier(commandBuffer_, VK_PIPELINE_STAGE_TRANSFER_BIT, info.finalStages, 0, 0,
+                         nullptr, 1, &barrier, 0, nullptr);
+}
+
+Buffer UploadContext::uploadBuffer(const void* data, VkDeviceSize size,
+                                   VkBufferUsageFlags destinationUsage)
+{
+    Buffer destination(*device_, size, destinationUsage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     const bool synchronous = commandBuffer_ == VK_NULL_HANDLE;
     try
     {
-        if (synchronous) beginBatch();
-        stagingBuffers_.push_back(std::move(stagingBuffer));
-        stagedBytes_ += size;
-        VkBufferCopy region{};
-        region.size = size;
-        vkCmdCopyBuffer(commandBuffer_, stagingBuffers_.back().get(),
-            destinationBuffer.get(), 1, &region);
-        // The next graphics submissions may consume these buffers as vertices,
-        // indices or shader data. Publish transfer writes before those reads.
-        VkBufferMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.buffer = destinationBuffer.get();
-        barrier.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(commandBuffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+        if (synchronous)
+        {
+            beginBatch();
+        }
+        recordBufferUpload({&destination, 0, data, size, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                            VK_ACCESS_MEMORY_READ_BIT});
         if (synchronous)
         {
             submitBatch();
@@ -349,13 +370,36 @@ Buffer UploadContext::uploadBuffer(
         discardBatch();
         throw;
     }
-    return destinationBuffer;
+    return destination;
 }
 
-void UploadContext::uploadImage(const ImageUploadInfo& uploadInfo)
+void UploadContext::uploadImage(const ImageUploadInfo& info)
+{
+    const bool synchronous = commandBuffer_ == VK_NULL_HANDLE;
+    try
+    {
+        if (synchronous)
+        {
+            beginBatch();
+        }
+        recordImageUpload(info);
+        if (synchronous)
+        {
+            submitBatch();
+            waitBatch();
+        }
+    }
+    catch (...)
+    {
+        discardBatch();
+        throw;
+    }
+}
+
+void UploadContext::recordImageUpload(const ImageUploadInfo& uploadInfo)
 {
     validateImageUpload(uploadInfo);
-    if (submitted_)
+    if (submitted_ || commandBuffer_ == VK_NULL_HANDLE)
     {
         throw std::logic_error("an upload batch is still in flight");
     }
@@ -363,76 +407,39 @@ void UploadContext::uploadImage(const ImageUploadInfo& uploadInfo)
     {
         throw std::overflow_error("upload image size exceeds the host address range");
     }
-    Buffer stagingBuffer(*device_, uploadInfo.sourceSize,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    Buffer stagingBuffer(*device_, uploadInfo.sourceSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     std::memcpy(stagingBuffer.map(), uploadInfo.sourceData,
-        static_cast<std::size_t>(uploadInfo.sourceSize));
+                static_cast<std::size_t>(uploadInfo.sourceSize));
     stagingBuffer.unmap();
-    const bool synchronous = commandBuffer_ == VK_NULL_HANDLE;
-    try
-    {
-        if (synchronous) beginBatch();
-        stagingBuffers_.push_back(std::move(stagingBuffer));
-        stagedBytes_ += uploadInfo.sourceSize;
-        VkImageMemoryBarrier toTransfer{};
-        toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        toTransfer.oldLayout = uploadInfo.oldLayout;
-        toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toTransfer.image = uploadInfo.destination.image;
-        toTransfer.subresourceRange = uploadInfo.destinationRange;
-        toTransfer.srcAccessMask = uploadInfo.sourceAccessMask;
-        toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(
-            commandBuffer_,
-            uploadInfo.sourceStageMask,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0,
-            0,
-            nullptr,
-            0,
-            nullptr,
-            1,
-            &toTransfer);
+    stagingBuffers_.push_back(std::move(stagingBuffer));
+    stagedBytes_ += uploadInfo.sourceSize;
+    VkImageMemoryBarrier toTransfer{};
+    toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toTransfer.oldLayout = uploadInfo.oldLayout;
+    toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransfer.image = uploadInfo.destination.image;
+    toTransfer.subresourceRange = uploadInfo.destinationRange;
+    toTransfer.srcAccessMask = uploadInfo.sourceAccessMask;
+    toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(commandBuffer_, uploadInfo.sourceStageMask, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &toTransfer);
 
-        vkCmdCopyBufferToImage(
-            commandBuffer_,
-            stagingBuffers_.back().get(),
-            uploadInfo.destination.image,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            static_cast<uint32_t>(uploadInfo.copyRegions.size()),
-            uploadInfo.copyRegions.data());
+    vkCmdCopyBufferToImage(commandBuffer_, stagingBuffers_.back().get(),
+                           uploadInfo.destination.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           static_cast<uint32_t>(uploadInfo.copyRegions.size()),
+                           uploadInfo.copyRegions.data());
 
-        VkImageMemoryBarrier toFinal = toTransfer;
-        toFinal.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        toFinal.newLayout = uploadInfo.finalLayout;
-        toFinal.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        toFinal.dstAccessMask = uploadInfo.finalAccessMask;
-        vkCmdPipelineBarrier(
-            commandBuffer_,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            uploadInfo.finalStageMask,
-            0,
-            0,
-            nullptr,
-            0,
-            nullptr,
-            1,
-            &toFinal);
-
-        if (synchronous)
-        {
-            submitBatch();
-            waitBatch();
-        }
-    }
-    catch (...)
-    {
-        discardBatch();
-        throw;
-    }
+    VkImageMemoryBarrier toFinal = toTransfer;
+    toFinal.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toFinal.newLayout = uploadInfo.finalLayout;
+    toFinal.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toFinal.dstAccessMask = uploadInfo.finalAccessMask;
+    vkCmdPipelineBarrier(commandBuffer_, VK_PIPELINE_STAGE_TRANSFER_BIT, uploadInfo.finalStageMask,
+                         0, 0, nullptr, 0, nullptr, 1, &toFinal);
 }
 
 } // namespace rubia::rhi::vulkan

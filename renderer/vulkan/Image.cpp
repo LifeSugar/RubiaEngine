@@ -61,6 +61,8 @@ Image::Image(Image&& other) noexcept
       memory_(std::exchange(other.memory_, VK_NULL_HANDLE))
 #endif
 {
+    ownerDevice_ = std::exchange(other.ownerDevice_, VK_NULL_HANDLE);
+    description_ = std::exchange(other.description_, CreateInfo{});
 }
 
 Image& Image::operator=(Image&& other) noexcept
@@ -68,6 +70,8 @@ Image& Image::operator=(Image&& other) noexcept
     if (this != &other)
     {
         reset();
+        ownerDevice_ = std::exchange(other.ownerDevice_, VK_NULL_HANDLE);
+        description_ = std::exchange(other.description_, CreateInfo{});
 #if VK_RENDERER_USE_VMA
         allocator_ = std::exchange(other.allocator_, VK_NULL_HANDLE);
 #else
@@ -200,10 +204,14 @@ void Image::create(const Device& device, const CreateInfo& createInfo)
     image_ = newImage;
     memory_ = newMemory;
 #endif
+    ownerDevice_ = device.get();
+    description_ = createInfo;
 }
 
 void Image::reset() noexcept
 {
+    ownerDevice_ = VK_NULL_HANDLE;
+    description_ = {};
 #if VK_RENDERER_USE_VMA
     if (allocator_ != VK_NULL_HANDLE && image_ != VK_NULL_HANDLE)
     {

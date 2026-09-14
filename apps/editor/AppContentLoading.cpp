@@ -56,6 +56,7 @@ void App::updateContentLoading()
     using namespace std::chrono_literals;
     try
     {
+        renderer.advanceResourcePreparation();
         if (contentLoadStatus_.state == ContentLoadState::Preparing)
         {
             if (contentLoadFuture_.wait_for(0ms) != std::future_status::ready)
@@ -86,7 +87,6 @@ void App::updateContentLoading()
         if (contentLoadStatus_.state == ContentLoadState::Uploading ||
             contentLoadStatus_.state == ContentLoadState::Finalizing)
         {
-            renderer.advanceScenePreparation();
             const auto status = renderer.scenePreparationStatus();
             if (status.state == render::ScenePreparationState::Failed)
             {

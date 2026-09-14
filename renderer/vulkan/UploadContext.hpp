@@ -42,6 +42,18 @@ namespace rubia::rhi::vulkan
             VkAccessFlags finalAccessMask = VK_ACCESS_SHADER_READ_BIT;
         };
 
+        struct BufferUploadInfo
+        {
+            const Buffer* destination = nullptr;
+            VkDeviceSize destinationOffset = 0;
+
+            const void* sourceData = nullptr;
+            VkDeviceSize sourceSize = 0;
+
+            VkPipelineStageFlags finalStages = 0;
+            VkAccessFlags finalAccess = 0;
+        };
+
         /// Uploads are synchronous unless the caller explicitly starts a batch.
         UploadContext(const Device &device, CommandPool &commandPool);
         ~UploadContext();
@@ -65,13 +77,19 @@ namespace rubia::rhi::vulkan
             VkDeviceSize size,
             VkBufferUsageFlags destinationUsage);
 
+        // Recording only: an explicit batch must be open. Caller owns rollback.
+        static void validateBufferUpload(const BufferUploadInfo& info);
+        static void validateImageUploadInfo(const ImageUploadInfo& info);
+        void recordBufferUpload(const BufferUploadInfo& info);
+        void recordImageUpload(const ImageUploadInfo& info);
+
         /// Uploads one or more buffer regions into an existing image.
         void uploadImage(const ImageUploadInfo& uploadInfo);
 
     private:
-        /// Non-owning device used for allocation and queue submission.
+        /// 借用VKDevice
         const Device *device_ = nullptr;
-        /// Non-owning command pool used for transfer command buffers.
+        /// 借用cmdPool
         CommandPool *commandPool_ = nullptr;
         VkCommandBuffer commandBuffer_ = VK_NULL_HANDLE;
         VkFence fence_ = VK_NULL_HANDLE;

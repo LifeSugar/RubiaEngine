@@ -273,6 +273,132 @@ void RenderAssetCache::uploadNext(
     }
 }
 
+bool RenderAssetCache::empty() const noexcept
+{
+    return textures_.empty() && materials_.empty() && meshes_.empty() &&
+           materialDescriptorSetLayout_.get() == VK_NULL_HANDLE && !pendingUpload_.ticket;
+}
+
+void RenderAssetCache::publishTexture(asset::TextureAssetHandle handle, GpuTexture texture)
+{
+    if (!handle || !texture)
+    {
+        throw std::invalid_argument("invalid texture publication");
+    }
+    if (handle.index < textures_.size() && textures_[handle.index].texture)
+    {
+        throw std::logic_error("initial texture publication cannot replace an existing slot");
+    }
+    if (handle.index >= textures_.size())
+    {
+        textures_.resize(static_cast<std::size_t>(handle.index) + 1);
+    }
+    textures_[handle.index].texture = std::move(texture);
+    textures_[handle.index].generation = handle.generation;
+}
+
+bool RenderAssetCache::hasSubmittedUpload(const VulkanUploadService& uploads) const
+{
+    return pendingUpload_.ticket && uploads.query(pendingUpload_.ticket).submittedBytes != 0;
+}
+
+void RenderAssetCache::cancelPendingUpload(VulkanUploadService& uploads)
+{
+    if (pendingUpload_.ticket)
+    {
+        uploads.cancel(pendingUpload_.ticket);
+        uploads.releaseTicket(pendingUpload_.ticket);
+    }
+    pendingUpload_ = {};
+}
+
+void RenderAssetCache::prepareNext(const Device& device, VulkanUploadService& uploads,
+                                   std::shared_ptr<const asset::AssetManager> assets)
+{
+    if (pendingUpload_.ticket)
+    {
+        const auto status = uploads.query(pendingUpload_.ticket);
+        if (status.state == UploadState::Failed || status.state == UploadState::Cancelled)
+        {
+            throw std::runtime_error("scene upload failed or cancelled: " + status.error);
+        }
+        if (status.state != UploadState::Completed)
+        {
+            return;
+        }
+        // Completion drops every service-side source/destination reference before moving wrappers.
+        uploads.releaseTicket(pendingUpload_.ticket);
+        pendingUpload_.ticket = {};
+        if (pendingUpload_.texture)
+        {
+            const auto handle = pendingTextures_[uploadedTextures_];
+            publishTexture(handle, std::move(*pendingUpload_.texture));
+            ++uploadedTextures_;
+        }
+        else
+        {
+            const auto handle = pendingMeshes_[uploadedMeshes_];
+            meshes_[handle.index].mesh = std::move(*pendingUpload_.mesh);
+            meshes_[handle.index].generation = handle.generation;
+            ++uploadedMeshes_;
+        }
+        pendingUpload_ = {};
+        return;
+    }
+    if (!pendingUpload_.texture && !pendingUpload_.mesh)
+    {
+        if (uploadedTextures_ < pendingTextures_.size())
+        {
+            const auto& cpu = assets->texture(pendingTextures_[uploadedTextures_]);
+            pendingUpload_.texture = std::make_shared<GpuTexture>();
+            GpuTexture::CreateInfo info;
+            info.asset = &cpu;
+            pendingUpload_.texture->allocate(device, info);
+            pendingUpload_.request = GpuTexture::makeUploadRequest(
+                pendingUpload_.texture, std::shared_ptr<const asset::TextureAsset>(assets, &cpu));
+        }
+        else if (uploadedMaterials_ < pendingMaterials_.size())
+        {
+            const auto handle = pendingMaterials_[uploadedMaterials_];
+            const auto& material = assets->material(handle);
+            const auto& layout = assets->materialTemplate(material.materialTemplate());
+            std::vector<const GpuTexture*> textures;
+            for (auto textureHandle : material.textures())
+            {
+                textures.push_back(&texture(textureHandle));
+            }
+            auto& entry = materials_[handle.index];
+            entry.material.create(device, material, layout, textures,
+                                  uploadMaterialSets_[uploadedMaterials_]);
+            entry.generation = handle.generation;
+            ++uploadedMaterials_;
+            return;
+        }
+        else if (uploadedMeshes_ < pendingMeshes_.size())
+        {
+            const auto& cpu = assets->mesh(pendingMeshes_[uploadedMeshes_]);
+            pendingUpload_.mesh = std::make_shared<Mesh>();
+            pendingUpload_.mesh->allocate(device, cpu);
+            pendingUpload_.request = Mesh::makeUploadRequest(
+                pendingUpload_.mesh, std::shared_ptr<const asset::MeshAsset>(assets, &cpu));
+        }
+        else
+        {
+            return;
+        }
+    }
+    const auto result = uploads.tryEnqueue(pendingUpload_.request);
+    if (result.code == UploadEnqueueCode::QueueFull)
+    {
+        return;
+    }
+    if (!result.accepted())
+    {
+        throw std::runtime_error(result.error);
+    }
+    pendingUpload_.ticket = result.ticket;
+}
+
 GpuTexture RenderAssetCache::stageTextureReplacement(
     const Device& device,
     UploadContext& uploadContext,
@@ -354,6 +480,8 @@ GpuTexture RenderAssetCache::commitTextureReplacement(
 
 void RenderAssetCache::reset() noexcept
 {
+    // Preparation owner cancels its ticket before reset. Submitted work retains its own leases.
+    pendingUpload_ = {};
     pendingTextures_.clear();
     pendingMaterials_.clear();
     pendingMeshes_.clear();
