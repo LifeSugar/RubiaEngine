@@ -142,6 +142,28 @@ void runVulkanUploadTests(const Device& device)
             "batch cancellation leaked leases or damaged another request");
     uploads.releaseTicket(d.ticket);
 
+    // Cancel a partially completed request: the not-yet-submitted target is
+    // released, completed progress stays stable and no second operation executes.
+    auto remainder = destination(device);
+    std::weak_ptr<Buffer> weakRemainder = remainder;
+    auto partial = request(destination(device), bytes);
+    auto last = request(remainder, bytes);
+    partial.operations.push_back(std::move(last.operations.front()));
+    remainder.reset();
+    auto p = uploads.tryEnqueue(partial);
+    require(p.accepted(), "partial cancellation enqueue failed");
+    uploads.tick({16, 1, std::chrono::seconds(1)});
+    device.waitIdle();
+    uploads.tick({0, 0, std::chrono::microseconds{0}});
+    require(uploads.query(p.ticket).completedBytes == 16,
+            "first partial operation did not complete");
+    uploads.cancel(p.ticket);
+    uploads.drain();
+    require(weakRemainder.expired() && uploads.query(p.ticket).submittedBytes == 16 &&
+                uploads.query(p.ticket).state == UploadState::Cancelled,
+            "partial cancellation submitted or retained the remaining operation");
+    uploads.releaseTicket(p.ticket);
+
     // Queue rejection preserves data; queued cancellation requires no GPU work.
     VulkanUploadService bounded(device, {64, 16, 1});
     auto queuedTarget = destination(device);
@@ -198,5 +220,39 @@ void runVulkanUploadTests(const Device& device)
     UploadRequest badImage{{imageOp}};
     require(uploads.tryEnqueue(badImage).code == UploadEnqueueCode::InvalidRequest,
             "image upload accepted a truncated payload");
+
+    imageOp.source = {bytes, bytes->data(), bytes->size()};
+    auto rejectImage = [&](ImageUpload op, const char* message)
+    {
+        UploadRequest request{{std::move(op)}};
+        require(uploads.tryEnqueue(request).code == UploadEnqueueCode::InvalidRequest &&
+                    request.operations.size() == 1,
+                message);
+    };
+    auto invalidMip = imageOp;
+    invalidMip.regions[0].imageSubresource.mipLevel = 1;
+    rejectImage(invalidMip, "out-of-range mip accepted");
+    auto invalidLayer = imageOp;
+    invalidLayer.regions[0].imageSubresource.baseArrayLayer = 1;
+    rejectImage(invalidLayer, "out-of-range layer accepted");
+    auto duplicate = imageOp;
+    duplicate.regions.push_back(duplicate.regions.front());
+    rejectImage(duplicate, "duplicate image region accepted");
+    auto invalidSync = imageOp;
+    invalidSync.finalStages = 0;
+    rejectImage(invalidSync, "missing image synchronization accepted");
+    auto invalidUsage = imageOp;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    invalidUsage.destination = std::make_shared<Image>(device, imageInfo);
+    rejectImage(invalidUsage, "shader read layout accepted without sampled/input attachment usage");
+
+    // The same description accepted by validation must reach the GPU successfully.
+    UploadRequest validImage{{imageOp}};
+    const auto valid = uploads.tryEnqueue(validImage);
+    require(valid.accepted(), "valid image upload rejected by unified validation");
+    uploads.drain();
+    require(uploads.query(valid.ticket).state == UploadState::Completed,
+            "valid image upload failed after enqueue");
+    uploads.releaseTicket(valid.ticket);
 }
 } // namespace rubia::test

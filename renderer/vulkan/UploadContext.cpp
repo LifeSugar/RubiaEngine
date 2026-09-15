@@ -1,8 +1,10 @@
 #include "vulkan/UploadContext.hpp"
+#include "vulkan/TextureVkFormat.hpp"
 
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -10,179 +12,96 @@ namespace rubia::rhi::vulkan
 {
 namespace
 {
-
-bool rangeFits(
-    uint32_t base,
-    uint32_t count,
-    uint32_t available) noexcept
+bool rangeFits(uint32_t base, uint32_t count, uint32_t available) noexcept
 {
     return count != 0 && base <= available && count <= available - base;
 }
-
-uint32_t mipDimension(uint32_t base, uint32_t mipLevel) noexcept
+void validateSource(const UploadBytes& source)
 {
-    return std::max(1u, base >> std::min(mipLevel, 31u));
-}
-
-bool rangeContains(
-    uint32_t outerBase,
-    uint32_t outerCount,
-    uint32_t innerBase,
-    uint32_t innerCount) noexcept
-{
-    if (innerCount == 0 || innerBase < outerBase)
+    if (!source.owner || !source.data || !source.size)
     {
-        return false;
-    }
-    const uint32_t relativeBase = innerBase - outerBase;
-    return relativeBase <= outerCount &&
-        innerCount <= outerCount - relativeBase;
-}
-
-void validateUploadDescription(
-    const UploadContext::ImageUploadInfo& uploadInfo)
-{
-    if (uploadInfo.sourceData == nullptr ||
-        uploadInfo.sourceSize == 0)
-    {
-        throw std::invalid_argument(
-            "image upload source data must not be empty");
-    }
-    if (uploadInfo.copyRegions.empty() ||
-        uploadInfo.copyRegions.size() >
-            std::numeric_limits<uint32_t>::max())
-    {
-        throw std::invalid_argument(
-            "image upload must contain a valid number of copy regions");
-    }
-    if (uploadInfo.destination.image == VK_NULL_HANDLE ||
-        uploadInfo.destination.format == VK_FORMAT_UNDEFINED ||
-        uploadInfo.destination.extent.width == 0 ||
-        uploadInfo.destination.extent.height == 0 ||
-        uploadInfo.destination.extent.depth == 0 ||
-        uploadInfo.destination.mipLevels == 0 ||
-        uploadInfo.destination.arrayLayers == 0)
-    {
-        throw std::invalid_argument(
-            "image upload destination is incomplete");
-    }
-    if (uploadInfo.sourceStageMask == 0 ||
-        uploadInfo.finalLayout == VK_IMAGE_LAYOUT_UNDEFINED ||
-        uploadInfo.finalStageMask == 0)
-    {
-        throw std::invalid_argument(
-            "image upload final synchronization state is invalid");
+        throw std::invalid_argument("upload requires an owned, nonempty source");
     }
 }
-
-void validateDestinationRange(
-    const UploadContext::ImageUploadInfo& uploadInfo)
-{
-    const VkImageSubresourceRange& range = uploadInfo.destinationRange;
-    if (range.aspectMask == 0 ||
-        !rangeFits(
-            range.baseMipLevel,
-            range.levelCount,
-            uploadInfo.destination.mipLevels) ||
-        !rangeFits(
-            range.baseArrayLayer,
-            range.layerCount,
-            uploadInfo.destination.arrayLayers))
-    {
-        throw std::invalid_argument(
-            "image upload destination range is invalid");
-    }
-}
-
-void validateCopySubresource(
-    const VkImageSubresourceLayers& subresource,
-    const VkImageSubresourceRange& destinationRange)
-{
-    if (subresource.aspectMask == 0 ||
-        (subresource.aspectMask & destinationRange.aspectMask) !=
-            subresource.aspectMask)
-    {
-        throw std::invalid_argument(
-            "image upload copy aspect is outside the destination range");
-    }
-    if (!rangeContains(
-            destinationRange.baseMipLevel,
-            destinationRange.levelCount,
-            subresource.mipLevel,
-            1))
-    {
-        throw std::invalid_argument(
-            "image upload copy mip is outside the destination range");
-    }
-    if (!rangeContains(
-            destinationRange.baseArrayLayer,
-            destinationRange.layerCount,
-            subresource.baseArrayLayer,
-            subresource.layerCount))
-    {
-        throw std::invalid_argument(
-            "image upload copy layers are outside the destination range");
-    }
-}
-
-void validateCopyExtent(
-    const VkBufferImageCopy& region,
-    const UploadContext::ImageDestination& destination)
-{
-    if (region.imageOffset.x < 0 ||
-        region.imageOffset.y < 0 ||
-        region.imageOffset.z < 0 ||
-        region.imageExtent.width == 0 ||
-        region.imageExtent.height == 0 ||
-        region.imageExtent.depth == 0)
-    {
-        throw std::invalid_argument(
-            "image upload copy offset or extent is invalid");
-    }
-
-    const uint32_t mipLevel = region.imageSubresource.mipLevel;
-    const VkExtent3D mipExtent{
-        mipDimension(destination.extent.width, mipLevel),
-        mipDimension(destination.extent.height, mipLevel),
-        mipDimension(destination.extent.depth, mipLevel)};
-    if (static_cast<uint64_t>(region.imageOffset.x) +
-            region.imageExtent.width > mipExtent.width ||
-        static_cast<uint64_t>(region.imageOffset.y) +
-            region.imageExtent.height > mipExtent.height ||
-        static_cast<uint64_t>(region.imageOffset.z) +
-            region.imageExtent.depth > mipExtent.depth)
-    {
-        throw std::invalid_argument(
-            "image upload copy region exceeds its destination mip");
-    }
-}
-
-void validateCopyRegion(
-    const VkBufferImageCopy& region,
-    const UploadContext::ImageUploadInfo& uploadInfo)
-{
-    if (region.bufferOffset >= uploadInfo.sourceSize)
-    {
-        throw std::invalid_argument(
-            "image upload copy offset is outside the source buffer");
-    }
-    validateCopySubresource(
-        region.imageSubresource,
-        uploadInfo.destinationRange);
-    validateCopyExtent(region, uploadInfo.destination);
-}
-
-void validateImageUpload(const UploadContext::ImageUploadInfo& uploadInfo)
-{
-    validateUploadDescription(uploadInfo);
-    validateDestinationRange(uploadInfo);
-    for (const VkBufferImageCopy& region : uploadInfo.copyRegions)
-    {
-        validateCopyRegion(region, uploadInfo);
-    }
-}
-
 } // namespace
+
+void UploadContext::validateBufferUpload(const BufferUpload& op)
+{
+    validateSource(op.source);
+    if (!op.destination || !*op.destination || op.destinationOffset > op.destination->size() ||
+        op.source.size > op.destination->size() - op.destinationOffset ||
+        op.destinationOffset % 4 || op.source.size % 4 || !op.finalStages || !op.finalAccess ||
+        !(op.destination->usage() & VK_BUFFER_USAGE_TRANSFER_DST_BIT))
+    {
+        throw std::invalid_argument("invalid buffer upload range, usage or synchronization");
+    }
+}
+
+void UploadContext::validateImageUpload(const ImageUpload& op)
+{
+    validateSource(op.source);
+    if (!op.destination || !*op.destination)
+    {
+        throw std::invalid_argument("image upload requires an existing destination");
+    }
+    const auto& d = op.destination->description();
+    if (d.type != VK_IMAGE_TYPE_2D || d.samples != VK_SAMPLE_COUNT_1_BIT ||
+        d.initialLayout != VK_IMAGE_LAYOUT_UNDEFINED ||
+        !(d.usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
+        op.range.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT ||
+        !rangeFits(op.range.baseMipLevel, op.range.levelCount, d.mipLevels) ||
+        !rangeFits(op.range.baseArrayLayer, op.range.layerCount, d.arrayLayers) ||
+        !op.finalStages || !op.finalAccess ||
+        (op.finalLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+         op.finalLayout != VK_IMAGE_LAYOUT_GENERAL) ||
+        (op.finalLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+         !(d.usage & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT))))
+    {
+        throw std::invalid_argument(
+            "image upload requires a new 2D color image and valid range/use");
+    }
+    if (op.regions.empty() || op.regions.size() > std::numeric_limits<uint32_t>::max())
+    {
+        throw std::invalid_argument("invalid image upload region count");
+    }
+    const auto mapping = textureFormatFromVk(d.format);
+    if (!mapping)
+    {
+        throw std::invalid_argument("unsupported upload image format");
+    }
+    const auto format = asset::textureFormatInfo(mapping->format);
+    std::set<std::pair<uint32_t, uint32_t>> levels;
+    for (const auto& r : op.regions)
+    {
+        const auto mip = r.imageSubresource.mipLevel;
+        const auto layer = r.imageSubresource.baseArrayLayer;
+        if (r.imageSubresource.aspectMask != op.range.aspectMask || mip < op.range.baseMipLevel ||
+            mip - op.range.baseMipLevel >= op.range.levelCount || layer < op.range.baseArrayLayer ||
+            layer - op.range.baseArrayLayer >= op.range.layerCount)
+        {
+            throw std::invalid_argument("image copy is outside the upload subresource range");
+        }
+        const uint32_t w = std::max(1u, d.extent.width >> std::min(mip, 31u));
+        const uint32_t h = std::max(1u, d.extent.height >> std::min(mip, 31u));
+        if (r.bufferRowLength || r.bufferImageHeight || r.imageOffset.x || r.imageOffset.y ||
+            r.imageOffset.z || r.imageExtent.width != w || r.imageExtent.height != h ||
+            r.imageExtent.depth != 1 || r.imageSubresource.layerCount != 1 || r.bufferOffset % 4 ||
+            r.bufferOffset % format.bytesPerBlock || !levels.emplace(mip, layer).second)
+        {
+            throw std::invalid_argument(
+                "image upload requires unique, full, tightly packed mip layers");
+        }
+        const auto bytes = asset::textureMipByteSize(mapping->format, w, h);
+        if (r.bufferOffset > op.source.size || bytes > op.source.size - r.bufferOffset)
+        {
+            throw std::invalid_argument("image copy exceeds source bytes");
+        }
+    }
+    if (uint64_t(op.range.levelCount) * op.range.layerCount != levels.size())
+    {
+        throw std::invalid_argument("image upload must initialize every subresource in its range");
+    }
+}
 
 UploadContext::UploadContext(const Device& device, CommandPool& commandPool)
     : device_(&device),
@@ -296,40 +215,23 @@ void UploadContext::discardBatch() noexcept
     stagedBytes_ = 0;
 }
 
-void UploadContext::validateBufferUpload(const BufferUploadInfo& info)
-{
-    if (!info.destination || !*info.destination || !info.sourceData || !info.sourceSize ||
-        info.sourceSize > std::numeric_limits<std::size_t>::max() ||
-        info.destinationOffset > info.destination->size() ||
-        info.sourceSize > info.destination->size() - info.destinationOffset ||
-        (info.destinationOffset % 4) != 0 || (info.sourceSize % 4) != 0 || !info.finalStages ||
-        !info.finalAccess || !(info.destination->usage() & VK_BUFFER_USAGE_TRANSFER_DST_BIT))
-    {
-        throw std::invalid_argument("invalid buffer upload range, usage or synchronization");
-    }
-}
-
-void UploadContext::validateImageUploadInfo(const ImageUploadInfo& info)
-{
-    validateImageUpload(info);
-}
-
-void UploadContext::recordBufferUpload(const BufferUploadInfo& info)
+void UploadContext::recordBufferUpload(const BufferUpload& info)
 {
     validateBufferUpload(info);
-    if (commandBuffer_ == VK_NULL_HANDLE || submitted_)
+    if (commandBuffer_ == VK_NULL_HANDLE || submitted_ ||
+        info.destination->ownerDevice() != device_->get())
     {
         throw std::logic_error("buffer recording requires an open upload batch");
     }
-    Buffer staging(*device_, info.sourceSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    Buffer staging(*device_, info.source.size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    std::memcpy(staging.map(), info.sourceData, static_cast<std::size_t>(info.sourceSize));
+    std::memcpy(staging.map(), info.source.data, static_cast<std::size_t>(info.source.size));
     staging.unmap();
     stagingBuffers_.push_back(std::move(staging));
-    stagedBytes_ += info.sourceSize;
+    stagedBytes_ += info.source.size;
     VkBufferCopy copy{};
     copy.dstOffset = info.destinationOffset;
-    copy.size = info.sourceSize;
+    copy.size = info.source.size;
     vkCmdCopyBuffer(commandBuffer_, stagingBuffers_.back().get(), info.destination->get(), 1,
                     &copy);
     VkBufferMemoryBarrier barrier{};
@@ -340,106 +242,52 @@ void UploadContext::recordBufferUpload(const BufferUploadInfo& info)
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.buffer = info.destination->get();
     barrier.offset = info.destinationOffset;
-    barrier.size = info.sourceSize;
+    barrier.size = info.source.size;
     vkCmdPipelineBarrier(commandBuffer_, VK_PIPELINE_STAGE_TRANSFER_BIT, info.finalStages, 0, 0,
                          nullptr, 1, &barrier, 0, nullptr);
 }
 
-Buffer UploadContext::uploadBuffer(const void* data, VkDeviceSize size,
-                                   VkBufferUsageFlags destinationUsage)
-{
-    Buffer destination(*device_, size, destinationUsage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    const bool synchronous = commandBuffer_ == VK_NULL_HANDLE;
-    try
-    {
-        if (synchronous)
-        {
-            beginBatch();
-        }
-        recordBufferUpload({&destination, 0, data, size, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                            VK_ACCESS_MEMORY_READ_BIT});
-        if (synchronous)
-        {
-            submitBatch();
-            waitBatch();
-        }
-    }
-    catch (...)
-    {
-        discardBatch();
-        throw;
-    }
-    return destination;
-}
-
-void UploadContext::uploadImage(const ImageUploadInfo& info)
-{
-    const bool synchronous = commandBuffer_ == VK_NULL_HANDLE;
-    try
-    {
-        if (synchronous)
-        {
-            beginBatch();
-        }
-        recordImageUpload(info);
-        if (synchronous)
-        {
-            submitBatch();
-            waitBatch();
-        }
-    }
-    catch (...)
-    {
-        discardBatch();
-        throw;
-    }
-}
-
-void UploadContext::recordImageUpload(const ImageUploadInfo& uploadInfo)
+void UploadContext::recordImageUpload(const ImageUpload& uploadInfo)
 {
     validateImageUpload(uploadInfo);
-    if (submitted_ || commandBuffer_ == VK_NULL_HANDLE)
+    if (submitted_ || commandBuffer_ == VK_NULL_HANDLE ||
+        uploadInfo.destination->ownerDevice() != device_->get())
     {
         throw std::logic_error("an upload batch is still in flight");
     }
-    if (uploadInfo.sourceSize > std::numeric_limits<std::size_t>::max())
-    {
-        throw std::overflow_error("upload image size exceeds the host address range");
-    }
-    Buffer stagingBuffer(*device_, uploadInfo.sourceSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    Buffer stagingBuffer(*device_, uploadInfo.source.size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    std::memcpy(stagingBuffer.map(), uploadInfo.sourceData,
-                static_cast<std::size_t>(uploadInfo.sourceSize));
+    std::memcpy(stagingBuffer.map(), uploadInfo.source.data,
+                static_cast<std::size_t>(uploadInfo.source.size));
     stagingBuffer.unmap();
     stagingBuffers_.push_back(std::move(stagingBuffer));
-    stagedBytes_ += uploadInfo.sourceSize;
+    stagedBytes_ += uploadInfo.source.size;
     VkImageMemoryBarrier toTransfer{};
     toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    toTransfer.oldLayout = uploadInfo.oldLayout;
+    toTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toTransfer.image = uploadInfo.destination.image;
-    toTransfer.subresourceRange = uploadInfo.destinationRange;
-    toTransfer.srcAccessMask = uploadInfo.sourceAccessMask;
+    toTransfer.image = uploadInfo.destination->get();
+    toTransfer.subresourceRange = uploadInfo.range;
+    toTransfer.srcAccessMask = 0;
     toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(commandBuffer_, uploadInfo.sourceStageMask, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &toTransfer);
+    vkCmdPipelineBarrier(commandBuffer_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toTransfer);
 
     vkCmdCopyBufferToImage(commandBuffer_, stagingBuffers_.back().get(),
-                           uploadInfo.destination.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           static_cast<uint32_t>(uploadInfo.copyRegions.size()),
-                           uploadInfo.copyRegions.data());
+                           uploadInfo.destination->get(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           static_cast<uint32_t>(uploadInfo.regions.size()),
+                           uploadInfo.regions.data());
 
     VkImageMemoryBarrier toFinal = toTransfer;
     toFinal.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     toFinal.newLayout = uploadInfo.finalLayout;
     toFinal.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    toFinal.dstAccessMask = uploadInfo.finalAccessMask;
-    vkCmdPipelineBarrier(commandBuffer_, VK_PIPELINE_STAGE_TRANSFER_BIT, uploadInfo.finalStageMask,
-                         0, 0, nullptr, 0, nullptr, 1, &toFinal);
+    toFinal.dstAccessMask = uploadInfo.finalAccess;
+    vkCmdPipelineBarrier(commandBuffer_, VK_PIPELINE_STAGE_TRANSFER_BIT, uploadInfo.finalStages, 0,
+                         0, nullptr, 0, nullptr, 1, &toFinal);
 }
 
 } // namespace rubia::rhi::vulkan

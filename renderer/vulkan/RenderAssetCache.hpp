@@ -28,20 +28,11 @@ public:
     RenderAssetCache(RenderAssetCache&&) = delete;
     RenderAssetCache& operator=(RenderAssetCache&&) = delete;
 
-    void create(
-        const Device& device,
-        UploadContext& uploadContext,
-        const asset::AssetManager& assets,
-        const std::vector<asset::ModelAssetHandle>& models);
     /// Establishes the material interface without requiring a model instance.
     void initialize(const Device& device, const asset::MaterialTemplateAsset& materialTemplate);
-    /// Allocates cache slots and descriptors; leaves resource uploads to uploadNext.
+    /// Allocates cache slots and descriptors; leaves resource uploads to prepareNext.
     void beginUpload(const Device& device, const asset::AssetManager& assets,
         const std::vector<asset::ModelAssetHandle>& models);
-    /// Prepares one texture, material or mesh. An explicit UploadContext batch
-    /// lets the caller submit it and poll completion between GUI frames.
-    void uploadNext(const Device& device, UploadContext& uploadContext,
-        const asset::AssetManager& assets);
     [[nodiscard]] std::size_t pendingUploadCount() const noexcept;
     // Scene preparation adapter. Publishes only fence-completed textures/meshes.
     void prepareNext(const Device& device, VulkanUploadService& uploads,
@@ -51,12 +42,6 @@ public:
     void publishTexture(asset::TextureAssetHandle handle, GpuTexture texture);
     bool empty() const noexcept;
 
-    /// Builds a replacement without changing the live cache. This lets the
-    /// caller finish disk/CPU validation before committing the GPU swap.
-    [[nodiscard]] GpuTexture stageTextureReplacement(
-        const Device& device,
-        UploadContext& uploadContext,
-        const asset::TextureAsset& replacement) const;
     /// Commits a staged texture under the existing handle and rewrites every
     /// cached material descriptor that references it. The caller must ensure
     /// no submitted frame is using the old descriptors/resources.

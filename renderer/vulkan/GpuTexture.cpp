@@ -77,14 +77,6 @@ VkImageSubresourceRange resolveViewRange(
 
 } // namespace
 
-GpuTexture::GpuTexture(
-    const Device& device,
-    UploadContext& uploadContext,
-    const CreateInfo& createInfo)
-{
-    create(device, uploadContext, createInfo);
-}
-
 GpuTexture::~GpuTexture()
 {
     reset();
@@ -111,14 +103,6 @@ GpuTexture& GpuTexture::operator=(GpuTexture&& other) noexcept
         sampler_ = std::exchange(other.sampler_, VK_NULL_HANDLE);
     }
     return *this;
-}
-
-void GpuTexture::create(const Device& device, UploadContext& uploadContext, const CreateInfo& createInfo)
-{
-    GpuTexture replacement;
-    replacement.allocate(device, createInfo);
-    uploadContext.uploadImage(replacement.uploadInfo(*createInfo.asset));
-    *this = std::move(replacement);
 }
 
 void GpuTexture::allocate(const Device& device, const CreateInfo& createInfo)
@@ -197,9 +181,15 @@ void GpuTexture::allocate(const Device& device, const CreateInfo& createInfo)
     *this = std::move(replacement);
 }
 
-UploadContext::ImageUploadInfo GpuTexture::uploadInfo(const asset::TextureAsset& asset) const
+UploadRequest GpuTexture::makeUploadRequest(std::shared_ptr<GpuTexture> texture,
+                                            std::shared_ptr<const asset::TextureAsset> source)
 {
-    const auto& desc = image_.description();
+    if (!texture || !*texture || !source)
+    {
+        throw std::invalid_argument("missing texture upload owner");
+    }
+    const auto& asset = *source;
+    const auto& desc = texture->image_.description();
     const auto mipCount = desc.mipLevels;
     if (asset.width() != desc.extent.width || asset.height() != desc.extent.height ||
         asset.mipLevels().size() != mipCount ||
@@ -233,28 +223,11 @@ UploadContext::ImageUploadInfo GpuTexture::uploadInfo(const asset::TextureAsset&
         throw std::overflow_error("GpuTexture payload exceeds the Vulkan address range");
     }
 
-    UploadContext::ImageUploadInfo info;
-    info.sourceData = asset.payload().data();
-    info.sourceSize = asset.payload().size();
-    info.destination = {image_.get(), desc.format, desc.extent, desc.mipLevels, desc.arrayLayers};
-    info.copyRegions = std::move(copyRegions);
-    info.destinationRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipCount, 0, 1};
-    return info;
-}
-
-UploadRequest GpuTexture::makeUploadRequest(std::shared_ptr<GpuTexture> texture,
-                                            std::shared_ptr<const asset::TextureAsset> source)
-{
-    if (!texture || !*texture || !source)
-    {
-        throw std::invalid_argument("missing texture upload owner");
-    }
-    auto info = texture->uploadInfo(*source);
     ImageUpload op;
     op.destination = std::shared_ptr<const Image>(texture, &texture->image_);
-    op.source = {source, source->payload().data(), source->payload().size()};
-    op.regions = std::move(info.copyRegions);
-    op.range = info.destinationRange;
+    op.source = {source, asset.payload().data(), asset.payload().size()};
+    op.regions = std::move(copyRegions);
+    op.range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipCount, 0, 1};
     UploadRequest request;
     request.operations.emplace_back(std::move(op));
     return request;

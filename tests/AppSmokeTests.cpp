@@ -1,22 +1,22 @@
 #include "AppSmokeTests.hpp"
 
 #include "ApplicationGui.hpp"
-#include "render/ApplicationGuiRenderBridge.hpp"
+#include "RuntimeGui.hpp"
 #include "asset/AssetId.hpp"
 #include "content/DemoContent.hpp"
-#include "texture/KtxTextureImporter.hpp"
-#include "texture/KtxTextureCooker.hpp"
+#include "render/ApplicationGuiRenderBridge.hpp"
 #include "render/CullingSystem.hpp"
 #include "render/MaterialKey.hpp"
 #include "render/PipelineVariantKey.hpp"
 #include "render/RenderFrameBuilder.hpp"
 #include "render/RenderItemComparator.hpp"
 #include "render/SceneRenderExtractor.hpp"
-#include "RuntimeGui.hpp"
+#include "texture/KtxTextureCooker.hpp"
+#include "texture/KtxTextureImporter.hpp"
 #include "vulkan/CommandPool.hpp"
 #include "vulkan/GpuTexture.hpp"
-#include "vulkan/UploadContext.hpp"
 #include "vulkan/VulkanDrawListCompiler.hpp"
+#include "vulkan/VulkanUploadService.hpp"
 
 #include <imgui.h>
 #include <ktx.h>
@@ -888,18 +888,27 @@ void validateKtxTextureImportAndUpload(const rhi::vulkan::Device& device)
             "Basis-to-BC7 KTX2 transcode produced invalid asset metadata");
     }
 
-    rhi::vulkan::CommandPool commandPool(
-        device,
-        device.graphicsQueueFamily(),
-        VK_COMMAND_POOL_CREATE_TRANSIENT_BIT);
-    rhi::vulkan::UploadContext uploadContext(device, commandPool);
-
-    const asset::TextureAsset texture(std::move(textureInfo));
+    rhi::vulkan::VulkanUploadService uploads(device);
+    auto texture = std::make_shared<const asset::TextureAsset>(std::move(textureInfo));
     rhi::vulkan::GpuTexture::CreateInfo gpuTextureInfo{};
-    gpuTextureInfo.asset = &texture;
+    gpuTextureInfo.asset = texture.get();
     gpuTextureInfo.viewRange.baseMipLevel = 1;
     gpuTextureInfo.viewRange.levelCount = 2;
-    const rhi::vulkan::GpuTexture gpuTexture(device, uploadContext, gpuTextureInfo);
+    auto target = std::make_shared<rhi::vulkan::GpuTexture>();
+    target->allocate(device, gpuTextureInfo);
+    auto request = rhi::vulkan::GpuTexture::makeUploadRequest(target, texture);
+    const auto result = uploads.tryEnqueue(request);
+    if (!result.accepted())
+    {
+        throw std::runtime_error("BC7 upload request rejected: " + result.error);
+    }
+    uploads.drain();
+    if (uploads.query(result.ticket).state != rhi::vulkan::UploadState::Completed)
+    {
+        throw std::runtime_error("BC7 upload failed");
+    }
+    uploads.releaseTicket(result.ticket);
+    const auto& gpuTexture = *target;
     if (!gpuTexture || gpuTexture.format() != VK_FORMAT_BC7_UNORM_BLOCK)
     {
         throw std::runtime_error(
@@ -956,11 +965,10 @@ void validateStableTextureAssetReplacement()
     }
 }
 
-void validateGpuTextureReplacement(
-    const rhi::vulkan::Device& device,
-    asset::AssetManager& assets,
-    rhi::vulkan::RenderAssetCache& renderAssets,
-    asset::TextureAssetHandle handle)
+void validateGpuTextureReplacement(rhi::vulkan::VulkanRenderer& renderer,
+                                   const rhi::vulkan::Device& device, asset::AssetManager& assets,
+                                   rhi::vulkan::RenderAssetCache& renderAssets,
+                                   asset::TextureAssetHandle handle)
 {
     const rhi::vulkan::GpuTexture* originalGpu = renderAssets.tryTexture(handle);
     if (originalGpu == nullptr)
@@ -970,26 +978,16 @@ void validateGpuTextureReplacement(
     }
     const VkImageView originalView = originalGpu->view();
 
-    asset::TextureAsset replacementAsset(cloneTextureCreateInfo(
-        assets.texture(handle),
-        "GPU replacement texture"));
-    rhi::vulkan::CommandPool commandPool(
-        device,
-        device.graphicsQueueFamily(),
-        VK_COMMAND_POOL_CREATE_TRANSIENT_BIT);
-    rhi::vulkan::UploadContext uploadContext(device, commandPool);
-    rhi::vulkan::GpuTexture staged = renderAssets.stageTextureReplacement(
-        device,
-        uploadContext,
-        replacementAsset);
+    auto replacementAsset = std::make_shared<asset::TextureAsset>(
+        cloneTextureCreateInfo(assets.texture(handle), "GPU replacement texture"));
+    rhi::vulkan::GpuTexture staged = renderer.uploadTextureAndWait(replacementAsset);
+    renderer.waitIdle(); // Descriptor replacement must not overlap submitted draws.
     rhi::vulkan::GpuTexture previousGpu = renderAssets.commitTextureReplacement(
         device,
         assets,
         handle,
         std::move(staged));
-    asset::TextureAsset previousAsset = assets.replaceTexture(
-        handle,
-        std::move(replacementAsset));
+    asset::TextureAsset previousAsset = assets.replaceTexture(handle, std::move(*replacementAsset));
 
     if (!previousGpu || !previousAsset || !assets.contains(handle) ||
         renderAssets.tryTexture(handle) == nullptr ||
@@ -1233,11 +1231,8 @@ void AppSmokeTests::runRenderTest(
         throw std::runtime_error(
             "render test found no uploaded source-backed texture");
     }
-    validateGpuTextureReplacement(
-        app.vulkanContext.device(),
-        app.assetManager,
-        app.renderAssets,
-        editorPreviewTexture);
+    validateGpuTextureReplacement(app.renderer, app.vulkanContext.device(), app.assetManager,
+                                  app.renderAssets, editorPreviewTexture);
     if (config.outputMode == rhi::vulkan::VulkanRenderer::OutputMode::Editor)
     {
         const importer::texture::TextureImportRecord* before =

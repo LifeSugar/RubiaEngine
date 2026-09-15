@@ -424,11 +424,16 @@ void VulkanRenderer::advanceResourcePreparation()
     for (auto& pair : pendingTextures_)
     {
         auto& pending = pair.second;
-        if (pending.published || !pending.error.empty())
+        if (pending.published || pending.cancelled || !pending.error.empty())
         {
             continue;
         }
         const auto status = uploads_->query({pair.first});
+        if (status.state == UploadState::Failed || status.state == UploadState::Cancelled)
+        {
+            pending.texture.reset();
+            continue;
+        }
         if (status.state == UploadState::Completed)
         {
             try
@@ -489,11 +494,58 @@ UploadEnqueueResult VulkanRenderer::prepareTexture(
     return result;
 }
 
+GpuTexture VulkanRenderer::uploadTextureAndWait(std::shared_ptr<const asset::TextureAsset> source)
+{
+    if (!uploads_ || !source || !*source ||
+        (scenePreparation_ && scenePreparation_->ownsResources()))
+    {
+        throw std::logic_error(
+            "blocking texture upload requires valid assets and no scene preparation");
+    }
+    auto texture = std::make_shared<GpuTexture>();
+    GpuTexture::CreateInfo info;
+    info.asset = source.get();
+    texture->allocate(context_->device(), info);
+    auto request = GpuTexture::makeUploadRequest(texture, std::move(source));
+    auto result = uploads_->tryEnqueue(request);
+    if (result.code == UploadEnqueueCode::QueueFull)
+    {
+        uploads_->drain();
+        result = uploads_->tryEnqueue(request);
+    }
+    if (!result.accepted())
+    {
+        throw std::runtime_error(result.error.empty() ? "texture upload queue is full"
+                                                      : result.error);
+    }
+    try
+    {
+        uploads_->drain();
+        const auto status = uploads_->query(result.ticket);
+        if (status.state != UploadState::Completed)
+        {
+            throw std::runtime_error("texture upload failed: " + status.error);
+        }
+    }
+    catch (...)
+    {
+        uploads_->cancel(result.ticket);
+        uploads_->releaseTicket(result.ticket);
+        throw;
+    }
+    uploads_->releaseTicket(result.ticket);
+    return std::move(*texture);
+}
+
 UploadStatus VulkanRenderer::texturePreparationStatus(UploadTicket ticket) const
 {
     const auto& pending = pendingTextures_.at(ticket.value);
     auto status = uploads_->query(ticket);
-    if (!pending.error.empty())
+    if (pending.cancelled)
+    {
+        status.state = UploadState::Cancelled;
+    }
+    else if (!pending.error.empty())
     {
         status.state = UploadState::Failed;
         status.error = pending.error;
@@ -507,11 +559,15 @@ UploadStatus VulkanRenderer::texturePreparationStatus(UploadTicket ticket) const
 void VulkanRenderer::cancelTexturePreparation(UploadTicket ticket)
 {
     auto& pending = pendingTextures_.at(ticket.value);
-    uploads_->cancel(ticket);
-    if (!pending.published)
+    if (uploadFinished(texturePreparationStatus(ticket).state))
     {
-        pending.texture.reset();
+        return;
     }
+    uploads_->cancel(ticket);
+    // A blocking drain may have completed the upload without publishing it.
+    // Service completion is immutable; preparation cancellation is tracked here.
+    pending.cancelled = true;
+    pending.texture.reset();
 }
 void VulkanRenderer::releaseTexturePreparation(UploadTicket ticket)
 {

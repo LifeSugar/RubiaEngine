@@ -1,5 +1,4 @@
 #include "vulkan/VulkanUploadService.hpp"
-#include "vulkan/TextureVkFormat.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -18,75 +17,6 @@ const UploadBytes& source(const UploadOperation& op)
 const void* target(const UploadOperation& op)
 {
     return std::visit([](const auto& value) -> const void* { return value.destination.get(); }, op);
-}
-UploadContext::BufferUploadInfo info(const BufferUpload& op)
-{
-    return {op.destination.get(), op.destinationOffset, op.source.data,
-            op.source.size,       op.finalStages,       op.finalAccess};
-}
-UploadContext::ImageUploadInfo info(const ImageUpload& op)
-{
-    const auto& desc = op.destination->description();
-    UploadContext::ImageUploadInfo out;
-    out.destination = {op.destination->get(), desc.format, desc.extent, desc.mipLevels,
-                       desc.arrayLayers};
-    out.sourceData = op.source.data;
-    out.sourceSize = op.source.size;
-    out.copyRegions = op.regions;
-    out.destinationRange = op.range;
-    out.finalLayout = op.finalLayout;
-    out.finalStageMask = op.finalStages;
-    out.finalAccessMask = op.finalAccess;
-    return out;
-}
-void validate(const BufferUpload& op)
-{
-    UploadContext::validateBufferUpload(info(op));
-}
-void validate(const ImageUpload& op)
-{
-    const auto& d = op.destination->description();
-    if (d.type != VK_IMAGE_TYPE_2D || d.samples != VK_SAMPLE_COUNT_1_BIT ||
-        d.initialLayout != VK_IMAGE_LAYOUT_UNDEFINED ||
-        !(d.usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
-        op.range.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT ||
-        (op.finalLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
-         op.finalLayout != VK_IMAGE_LAYOUT_GENERAL))
-    {
-        throw std::invalid_argument("image upload requires a new single-sample 2D color image");
-    }
-    UploadContext::validateImageUploadInfo(info(op));
-    auto mapping = textureFormatFromVk(d.format);
-    if (!mapping)
-    {
-        throw std::invalid_argument("unsupported upload image format");
-    }
-    auto format = asset::textureFormatInfo(mapping->format);
-    std::set<std::pair<uint32_t, uint32_t>> levels;
-    for (const auto& r : op.regions)
-    {
-        const auto mip = r.imageSubresource.mipLevel;
-        const uint32_t w = std::max(1u, d.extent.width >> std::min(mip, 31u));
-        const uint32_t h = std::max(1u, d.extent.height >> std::min(mip, 31u));
-        if (r.bufferRowLength || r.bufferImageHeight || r.imageOffset.x || r.imageOffset.y ||
-            r.imageOffset.z || r.imageExtent.width != w || r.imageExtent.height != h ||
-            r.imageExtent.depth != 1 || r.imageSubresource.layerCount != 1 || r.bufferOffset % 4 ||
-            r.bufferOffset % format.bytesPerBlock ||
-            !levels.emplace(mip, r.imageSubresource.baseArrayLayer).second)
-        {
-            throw std::invalid_argument(
-                "v1 image uploads require unique, full, tightly packed mip layers");
-        }
-        const auto bytes = asset::textureMipByteSize(mapping->format, w, h);
-        if (r.bufferOffset > op.source.size || bytes > op.source.size - r.bufferOffset)
-        {
-            throw std::invalid_argument("image copy exceeds source bytes");
-        }
-    }
-    if (uint64_t(op.range.levelCount) * op.range.layerCount != levels.size())
-    {
-        throw std::invalid_argument("image upload must initialize every subresource in its range");
-    }
 }
 } // namespace
 
@@ -146,7 +76,15 @@ UploadEnqueueResult VulkanUploadService::tryEnqueue(UploadRequest& request)
                     {
                         throw std::invalid_argument("invalid upload destination or wrong device");
                     }
-                    validate(value);
+                    using T = std::decay_t<decltype(value)>;
+                    if constexpr (std::is_same_v<T, BufferUpload>)
+                    {
+                        UploadContext::validateBufferUpload(value);
+                    }
+                    else
+                    {
+                        UploadContext::validateImageUpload(value);
+                    }
                 },
                 op);
             if (!destinations.insert(target(op)).second)
@@ -337,11 +275,11 @@ void VulkanUploadService::tick(const UploadBudget& budget)
                     using T = std::decay_t<decltype(value)>;
                     if constexpr (std::is_same_v<T, BufferUpload>)
                     {
-                        uploadsContext_.recordBufferUpload(info(value));
+                        uploadsContext_.recordBufferUpload(value);
                     }
                     else
                     {
-                        uploadsContext_.recordImageUpload(info(value));
+                        uploadsContext_.recordImageUpload(value);
                     }
                 },
                 op);

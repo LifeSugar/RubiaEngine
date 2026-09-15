@@ -2,7 +2,6 @@
 
 #include "asset/MeshAsset.hpp"
 #include "vulkan/Buffer.hpp"
-#include "vulkan/UploadContext.hpp"
 #include "vulkan/VulkanUploadTypes.hpp"
 
 #include <vector>
@@ -16,11 +15,6 @@ class Mesh final
 public:
     /// Creates an empty GPU mesh.
     Mesh() = default;
-    /// Uploads mesh data into device-local vertex and index buffers.
-    Mesh(
-        UploadContext& uploadContext,
-        const asset::MeshAsset& asset);
-
     Mesh(const Mesh&) = delete;
     Mesh& operator=(const Mesh&) = delete;
 
@@ -29,11 +23,7 @@ public:
     /// Replaces this mesh by taking another mesh's resources.
     Mesh& operator=(Mesh&&) noexcept = default;
 
-    /// Creates or replaces the GPU buffers from CPU-side mesh data.
-    void create(
-        UploadContext& uploadContext,
-        const asset::MeshAsset& asset);
-    /// Releases the GPU buffers and submesh metadata.
+    /// Allocates unpublished GPU buffers; upload completion is tracked separately.
     void allocate(const Device& device, const asset::MeshAsset& asset);
     static UploadRequest makeUploadRequest(std::shared_ptr<Mesh> mesh,
         std::shared_ptr<const asset::MeshAsset> source);

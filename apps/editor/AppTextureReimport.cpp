@@ -1,8 +1,6 @@
 #include "App.hpp"
 
 #include "texture/KtxTextureCooker.hpp"
-#include "vulkan/CommandPool.hpp"
-#include "vulkan/UploadContext.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -202,16 +200,10 @@ void App::processPendingTextureReimport()
                 // already completed on the worker thread.
                 renderer.waitIdle();
                 const rhi::vulkan::Device& device = vulkanContext.device();
-                rhi::vulkan::CommandPool uploadCommandPool(
-                    device,
-                    device.graphicsQueueFamily(),
-                    VK_COMMAND_POOL_CREATE_TRANSIENT_BIT);
-                rhi::vulkan::UploadContext uploadContext(device, uploadCommandPool);
+                auto replacementAsset =
+                    std::make_shared<asset::TextureAsset>(std::move(prepared.replacementAsset));
                 rhi::vulkan::GpuTexture replacementGpu =
-                    renderAssets.stageTextureReplacement(
-                        device,
-                        uploadContext,
-                        prepared.replacementAsset);
+                    renderer.uploadTextureAndWait(replacementAsset);
 
                 cookedFile.install();
                 guiRenderBridge.invalidatePreview(
@@ -225,10 +217,8 @@ void App::processPendingTextureReimport()
                         std::move(replacementGpu));
                 try
                 {
-                    asset::TextureAsset previousAsset =
-                        assetManager.replaceTexture(
-                            prepared.request.texture,
-                            std::move(prepared.replacementAsset));
+                    asset::TextureAsset previousAsset = assetManager.replaceTexture(
+                        prepared.request.texture, std::move(*replacementAsset));
                     static_cast<void>(previousAsset);
                 }
                 catch (...)

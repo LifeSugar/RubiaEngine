@@ -104,6 +104,41 @@ void AppSmokeTests::runStartupTest()
             app.updateContentLoading();
             if (app.renderAssets.tryTexture(third) || app.renderAssets.texture(first).view() != firstView)
                 throw std::runtime_error("standalone cancellation damaged the cache");
+            // A synchronous upload drains shared work, but publication still belongs
+            // to the renderer pump. Cancelling in this interval must never publish
+            // or dereference a released texture; another completed request survives.
+            auto fourth = sources->createTexture(info);
+            auto fifth = sources->createTexture(info);
+            auto d = prepare(fourth);
+            auto e = prepare(fifth);
+            if (!d.accepted() || !e.accepted())
+            {
+                throw std::runtime_error("completion cancellation test enqueue failed");
+            }
+            auto unpublished = app.renderer.uploadTextureAndWait(
+                std::shared_ptr<const asset::TextureAsset>(sources, &sources->texture(first)));
+            if (!unpublished || app.renderAssets.tryTexture(fourth) ||
+                app.renderer.texturePreparationStatus(d.ticket).state !=
+                    rhi::vulkan::UploadState::Uploading)
+            {
+                throw std::runtime_error("drain published standalone texture prematurely");
+            }
+            app.renderer.cancelTexturePreparation(d.ticket);
+            if (app.renderer.texturePreparationStatus(d.ticket).state !=
+                rhi::vulkan::UploadState::Cancelled)
+            {
+                throw std::runtime_error("completed but unpublished upload did not cancel");
+            }
+            // Keep the cancelled record for a pump to cover accidental re-publication.
+            app.updateContentLoading();
+            if (app.renderAssets.tryTexture(fourth) || !app.renderAssets.tryTexture(fifth) ||
+                app.renderer.texturePreparationStatus(e.ticket).state !=
+                    rhi::vulkan::UploadState::Completed)
+            {
+                throw std::runtime_error("completion cancellation damaged another texture");
+            }
+            app.renderer.releaseTexturePreparation(d.ticket);
+            app.renderer.releaseTexturePreparation(e.ticket);
             app.renderer.waitIdle();
             app.guiRenderBridge.invalidatePreview(first);
             app.renderAssets.reset();

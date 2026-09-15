@@ -61,28 +61,6 @@ RenderAssetCache::~RenderAssetCache()
     reset();
 }
 
-void RenderAssetCache::create(
-    const Device& device,
-    UploadContext& uploadContext,
-    const asset::AssetManager& assets,
-    const std::vector<asset::ModelAssetHandle>& models)
-{
-    beginUpload(device, assets, models);
-    try
-    {
-        while (pendingUploadCount() != 0)
-        {
-            uploadNext(device, uploadContext, assets);
-        }
-    }
-    catch (...)
-    {
-        uploadContext.discardBatch();
-        reset();
-        throw;
-    }
-}
-
 void RenderAssetCache::beginUpload(
     const Device& device,
     const asset::AssetManager& assets,
@@ -232,47 +210,6 @@ std::size_t RenderAssetCache::pendingUploadCount() const noexcept
         pendingMeshes_.size() - uploadedMeshes_;
 }
 
-void RenderAssetCache::uploadNext(
-    const Device& device,
-    UploadContext& uploadContext,
-    const asset::AssetManager& assets)
-{
-    if (uploadedTextures_ < pendingTextures_.size())
-    {
-        const auto handle = pendingTextures_[uploadedTextures_];
-        TextureEntry& entry = textures_[handle.index];
-        GpuTexture::CreateInfo info{};
-        info.asset = &assets.texture(handle);
-        entry.texture.create(device, uploadContext, info);
-        entry.generation = handle.generation;
-        ++uploadedTextures_;
-    }
-    else if (uploadedMaterials_ < pendingMaterials_.size())
-    {
-        const auto handle = pendingMaterials_[uploadedMaterials_];
-        const auto& materialAsset = assets.material(handle);
-        const auto& materialTemplate = assets.materialTemplate(materialAsset.materialTemplate());
-        std::vector<const GpuTexture*> materialTextures;
-        for (auto textureHandle : materialAsset.textures())
-        {
-            materialTextures.push_back(&texture(textureHandle));
-        }
-        MaterialEntry& entry = materials_[handle.index];
-        entry.material.create(device, materialAsset, materialTemplate,
-            materialTextures, uploadMaterialSets_[uploadedMaterials_]);
-        entry.generation = handle.generation;
-        ++uploadedMaterials_;
-    }
-    else if (uploadedMeshes_ < pendingMeshes_.size())
-    {
-        const auto handle = pendingMeshes_[uploadedMeshes_];
-        MeshEntry& entry = meshes_[handle.index];
-        entry.mesh.create(uploadContext, assets.mesh(handle));
-        entry.generation = handle.generation;
-        ++uploadedMeshes_;
-    }
-}
-
 bool RenderAssetCache::empty() const noexcept
 {
     return textures_.empty() && materials_.empty() && meshes_.empty() &&
@@ -397,16 +334,6 @@ void RenderAssetCache::prepareNext(const Device& device, VulkanUploadService& up
         throw std::runtime_error(result.error);
     }
     pendingUpload_.ticket = result.ticket;
-}
-
-GpuTexture RenderAssetCache::stageTextureReplacement(
-    const Device& device,
-    UploadContext& uploadContext,
-    const asset::TextureAsset& replacement) const
-{
-    GpuTexture::CreateInfo createInfo{};
-    createInfo.asset = &replacement;
-    return GpuTexture(device, uploadContext, createInfo);
 }
 
 GpuTexture RenderAssetCache::commitTextureReplacement(

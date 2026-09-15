@@ -45,7 +45,7 @@ GUI 只访问主线程的资源。在完成移交之前，资源面板和场景�
   shader 的创建与具体模型导入分开；`load()` 保留同步组合入口供 CPU 测试使用。
 - `RenderAssetCache::initialize()`：根据材质模板建立布局，不要求存在模型。
   `beginUpload()` 准备 Demo 的资源列表和描述符；`prepareNext()` 通过共享服务准备资源。
-  `uploadNext()` 保留给旧的同步组合接口。
+  旧 `create()` / `uploadNext()` 同步路径已删除。
 - `AppContentLoading.cpp`：管理 Preparing、Uploading、Finalizing、Ready、Failed
   应用状态，负责 CPU 工作线程、提交准备请求、展示状态、结果移交和请求取消。
   不创建命令池、不操作上传批次、不查询 fence、不构造 Vulkan pipeline。
@@ -53,14 +53,20 @@ GUI 只访问主线程的资源。在完成移交之前，资源面板和场景�
 当前一个 renderer 同时管理一个场景准备会话，只接受空场景和空 RenderAssetCache；
 失败或取消后可以重新开始，已有场景不会被新请求覆盖。cache 仍由应用持有，
 必须比 renderer 活得更久；本次边界调整尚未包含 cache 所有权迁移、场景热切换、
-纹理重导入或 App 整体的 RHI 抽象。独立贴图可以在空编辑器或已激活场景中准备，
+App 整体的 RHI 抽象。纹理重导入的传输已接入共享服务，但替换事务仍同步执行。独立贴图可以在空编辑器或已激活场景中准备，
 但不能与尚未激活的 Demo 场景准备同时操作缓存。
 
 ## 上传与生命周期
 
-`UploadContext` 默认保留同步调用方式；显式 `beginBatch()` 时只记录命令，
-由 `submitBatch()` 提交、`pollBatch()` 查询 fence。staging buffer 和命令缓冲
-保留到该批次完成。调用者必须让目标 GPU 资源存活到 fence 完成。
+`UploadContext` 只提供显式批次和 `recordBufferUpload(BufferUpload)` /
+`recordImageUpload(ImageUpload)`，与服务共用描述及校验；旧 Info 类型与同步包装已删除。
+由 `submitBatch()` 提交、`pollBatch()` 查询 fence，staging 与命令缓冲保留到批次完成。
+服务在整个执行期间持有目标引用；源数据在录制阶段复制到 staging。
+
+纹理重导入调用 `VulkanRenderer::uploadTextureAndWait()`，通过同一个服务入队并 drain，
+返回尚未发布的新纹理，内部 ticket 自动释放。它可能推进其他已接收上传，但不提前发布
+独立纹理。App 不再创建上传 CommandPool / UploadContext；缓存替换、descriptor 更新及
+CPU/磁盘事务仍由原提交流程完成，替换前等待已有渲染结束。
 
 共享服务的请求持有不可变 CPU 来源和目标 GPU 对象的引用，入队只接管数据，
 实际 staging 拷贝在 tick 中执行。独立贴图和 mesh 上传完成前不对 cache 查询可见。
@@ -75,6 +81,8 @@ GUI 只访问主线程的资源。在完成移交之前，资源面板和场景�
 预算在完整 operation 之间检查；分配 GPU 对象、单次 staging 拷贝和 pipeline 创建仍可能
 使主线程超时。此版本不提供传输线程、staging 页池或大资源分块。
 普通上传取消不等待 GPU，在途批次继续持有所需对象；场景整体取消仍保留原有阻塞清理。
+独立纹理还单独记录准备取消状态：即便传输已被 drain 完成，尚未发布的纹理仍可取消，
+后续 pump 不会访问被释放的纹理，也不会把它重新发布。
 
 关闭窗口时先请求 CPU 取消并 join，再等待尚未完成的上传 fence，然后释放
 目标资源、GUI 和 Vulkan。取消检查位于导入阶段之间及贴图解码前；单次文件

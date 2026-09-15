@@ -1,8 +1,6 @@
 #pragma once
 
 #include "vulkan/Buffer.hpp"
-#include "vulkan/CommandPool.hpp"
-#include "vulkan/Device.hpp"
 #include "vulkan/Image.hpp"
 
 #include <cstddef>

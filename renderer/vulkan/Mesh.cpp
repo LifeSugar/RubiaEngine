@@ -25,54 +25,6 @@ VkDeviceSize checkedBufferSize(
 
 } // namespace
 
-Mesh::Mesh(
-    UploadContext& uploadContext,
-    const asset::MeshAsset& asset)
-{
-    create(uploadContext, asset);
-}
-
-void Mesh::create(
-    UploadContext& uploadContext,
-    const asset::MeshAsset& asset)
-{
-    if (asset.empty())
-    {
-        throw std::invalid_argument("cannot create a Mesh from an empty mesh asset");
-    }
-
-    const VkDeviceSize vertexSize = checkedBufferSize(
-        asset.vertices().size(),
-        sizeof(asset::Vertex),
-        "mesh vertex data");
-
-    std::vector<asset::SubmeshData> newSubmeshes = asset.submeshes();
-    const math::Aabb newLocalBounds = asset.localBounds();
-    Buffer newVertexBuffer = uploadContext.uploadBuffer(
-        asset.vertices().data(),
-        vertexSize,
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-
-    Buffer newIndexBuffer;
-    if (!asset.indices().empty())
-    {
-        const VkDeviceSize indexSize = checkedBufferSize(
-            asset.indices().size(),
-            sizeof(uint32_t),
-            "mesh index data");
-        newIndexBuffer = uploadContext.uploadBuffer(
-            asset.indices().data(),
-            indexSize,
-            VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-    }
-
-    reset();
-    vertexBuffer_ = std::move(newVertexBuffer);
-    indexBuffer_ = std::move(newIndexBuffer);
-    submeshes_ = std::move(newSubmeshes);
-    localBounds_ = newLocalBounds;
-}
-
 void Mesh::allocate(const Device& device, const asset::MeshAsset& asset)
 {
     if (asset.empty())

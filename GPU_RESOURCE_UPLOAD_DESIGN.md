@@ -340,3 +340,38 @@ descriptor 的更新也必须考虑在途帧，不能只保证 image 存活。
 设备本地 buffer 数据与 offset 回读、跨批次请求、合批取消保活、队列容量与重试、
 排队取消、停止清理、线程约束、非法 image 源数据拒绝、空 GUI 贴图预览、
 已有场景绘制时增量贴图上传。真实驱动 OOM / device-lost 失败未进行故障注入。
+
+
+## 9. 上传接口清理与链路复核（2026-09-15）
+
+第 8 节是第一版实现时的状态。本轮完成以下收敛：
+
+- 删除 UploadContext 的 ImageDestination / ImageUploadInfo / BufferUploadInfo，
+  直接消费 VulkanUploadTypes 的 BufferUpload / ImageUpload；校验集中在 Context，
+  Service 入队与录制共用，去掉双向字段转换及重复的 image 区域拷贝。
+- 删除 UploadContext::uploadBuffer / uploadImage、GpuTexture 同步构造/create、
+  Mesh 同步构造/create、RenderAssetCache::create / uploadNext / stageTextureReplacement。
+- GpuTexture 直接生成统一请求。image 仅初始化新建 2D color 目标，校验完整 mip/layer、
+  格式与字节长度、对齐、最终访问及 shader-read 布局所需的 usage。
+- 重导入通过 Renderer::uploadTextureAndWait 使用长期上传服务，返回已完成但尚未发布的
+  新纹理。方法显式阻塞并可能排空其他请求，负责释放自身 ticket；调用方仍须保证旧
+  descriptor 不在使用中，再进行 GPU/CPU/磁盘替换。当前保持原有同步替换事务。
+- App 不再创建上传命令池和 UploadContext；仍有 Vulkan cache/descriptor 提交依赖，
+  本轮不等同于完成整个 App 的 RHI 抽象。
+
+生命周期复核：
+
+1. 入队失败不消费请求；接受后 service 保留源数据与目标。
+2. 录制前 Part 先持有操作；录制失败回滚整个未提交批次。
+3. Context 保留 staging/command buffer 到 fence 完成，Service 再结算并释放 Part。
+4. 完成后才把纹理/mesh 移入 cache。单独 ticket 保留到调用方接收终态。
+5. 取消部分请求不影响同批其他请求；未提交操作释放，在途操作继续保活。
+6. 补上“传输完成但尚未发布”的取消状态，避免同步 drain 后取消导致后续 pump
+   解引用空纹理或误发布；失败请求也释放准备层的目标引用。
+7. 设备/缓存必须覆盖服务和在途工作生命周期，源与目标在保留期间不可被外部修改。
+
+验证扩展：原有 buffer 回读、批次取消、容量、启动、运行与编辑器测试继续使用；
+新增部分完成后取消、image mip/layer/重复区域/同步与 usage 校验、完成未发布时取消且
+另一纹理正常发布。BC7 多 mip 与 GPU 替换测试已迁到新接口。
+仍不覆盖真实驱动 OOM/device-lost 故障注入；仍为单线程录制、一个在途批次，
+没有 staging 池、operation 分块或异步 descriptor 热替换。

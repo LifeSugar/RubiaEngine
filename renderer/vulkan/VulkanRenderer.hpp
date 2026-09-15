@@ -108,6 +108,11 @@ public:
     // must outlive the ticket (and all published GPU uses). No replacement here.
     UploadEnqueueResult prepareTexture(RenderAssetCache& cache,
         asset::TextureAssetHandle handle, std::shared_ptr<const asset::TextureAsset> source);
+    // Explicit blocking path for transactional replacement. Uses the shared service;
+    // drains accepted uploads and returns an unpublished texture. Caller synchronizes
+    // existing descriptor users before committing replacement into the live cache.
+    [[nodiscard]] GpuTexture uploadTextureAndWait(
+        std::shared_ptr<const asset::TextureAsset> source);
     UploadStatus texturePreparationStatus(UploadTicket ticket) const;
     void cancelTexturePreparation(UploadTicket ticket);
     void releaseTexturePreparation(UploadTicket ticket);
@@ -295,6 +300,7 @@ private:
         asset::TextureAssetHandle handle;
         std::shared_ptr<GpuTexture> texture;
         bool published = false;
+        bool cancelled = false;
         std::string error;
     };
     std::unique_ptr<VulkanUploadService> uploads_; //长期存在的上传服务。场景加载或者独立asset准备都使用此服务
