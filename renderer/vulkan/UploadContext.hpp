@@ -43,7 +43,7 @@ private:
     CommandPool* commandPool_ = nullptr;
     VkCommandBuffer commandBuffer_ = VK_NULL_HANDLE;
     VkFence fence_ = VK_NULL_HANDLE;
-    bool submitted_ = false;
+    bool submitted_ = false;  //命理已提交；但是还没有完成他的回收
     std::vector<Buffer> stagingBuffers_;
     VkDeviceSize stagedBytes_ = 0;
 };

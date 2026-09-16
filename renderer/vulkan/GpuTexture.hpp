@@ -1,3 +1,8 @@
+/*
+负责资源组合和生命周期
+负责资产到GPU的适配
+负责描述上传需求
+*/
 #pragma once
 
 #include "asset/TextureAsset.hpp"

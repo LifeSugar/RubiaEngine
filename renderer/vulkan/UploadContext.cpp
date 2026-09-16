@@ -45,6 +45,7 @@ void UploadContext::validateImageUpload(const ImageUpload& op)
         throw std::invalid_argument("image upload requires an existing destination");
     }
     const auto& d = op.destination->description();
+    //这里可需要修改，太怪了
     if (d.type != VK_IMAGE_TYPE_2D || d.samples != VK_SAMPLE_COUNT_1_BIT ||
         d.initialLayout != VK_IMAGE_LAYOUT_UNDEFINED ||
         !(d.usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
