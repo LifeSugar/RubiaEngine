@@ -60,6 +60,11 @@ App 整体的 RHI 抽象。纹理重导入的传输已接入共享服务，但�
 
 `UploadContext` 只提供显式批次和 `recordBufferUpload(BufferUpload)` /
 `recordImageUpload(ImageUpload)`，与服务共用描述及校验；旧 Info 类型与同步包装已删除。
+完整纹理的资源描述与上传策略由 `TextureUploadBuilder` 从 CPU asset 构建，
+`GpuTexture` 只管理 Image / ImageView / Sampler。
+`ImageUpload` 显式提供 before/after 状态；共享 `UploadValidation` 支持 2D color image
+区域、mip、数组层和带 padding 的复制，不要求完整覆盖。已有 image 的布局与渲染访问协调
+由调用方负责；当前没有自动状态跟踪或跨队列同步。Cancelled 也不代表已提交 copy 被撤销。
 由 `submitBatch()` 提交、`pollBatch()` 查询 fence，staging 与命令缓冲保留到批次完成。
 服务在整个执行期间持有目标引用；源数据在录制阶段复制到 staging。
 
@@ -102,7 +107,8 @@ ctest --test-dir build/debug-vs -C Debug --output-on-failure
 
 GPU 测试默认不注册，避免无图形环境下自动失败。它们也可以直接执行：
 
-- `--startup-test`：设备本地 buffer 上传回读、多操作请求、批次合并与取消、容量与重试、
+- `--startup-test`：设备本地 buffer/image 上传回读、已有 image 局部更新与未覆盖内容保留、
+  多 mip/数组层/padding/BC7 边缘复制、多操作请求、批次合并与取消、容量与重试、
   独立贴图上传和 ImGui 预览，以及空 GUI、空场景 resize、CPU 取消、缺失模型、重复请求拒绝、
   上传取消与重启、Ready 时 resize 与取消、CPU 来源生命周期和上传中关闭。
 - `--render-test` / `--editor-test`：缺失 shader 后的 GUI 和 resize、测试代码发起重试、上传中

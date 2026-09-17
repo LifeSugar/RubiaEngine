@@ -1,4 +1,5 @@
 #include "AppSmokeTests.hpp"
+#include "vulkan/TextureUploadBuilder.hpp"
 
 #include "ApplicationGui.hpp"
 #include "RuntimeGui.hpp"
@@ -890,13 +891,12 @@ void validateKtxTextureImportAndUpload(const rhi::vulkan::Device& device)
 
     rhi::vulkan::VulkanUploadService uploads(device);
     auto texture = std::make_shared<const asset::TextureAsset>(std::move(textureInfo));
-    rhi::vulkan::GpuTexture::CreateInfo gpuTextureInfo{};
-    gpuTextureInfo.asset = texture.get();
+    auto gpuTextureInfo = rhi::vulkan::makeTextureCreateInfo(*texture);
     gpuTextureInfo.viewRange.baseMipLevel = 1;
     gpuTextureInfo.viewRange.levelCount = 2;
     auto target = std::make_shared<rhi::vulkan::GpuTexture>();
     target->allocate(device, gpuTextureInfo);
-    auto request = rhi::vulkan::GpuTexture::makeUploadRequest(target, texture);
+    auto request = rhi::vulkan::makeTextureUploadRequest(target, texture);
     const auto result = uploads.tryEnqueue(request);
     if (!result.accepted())
     {

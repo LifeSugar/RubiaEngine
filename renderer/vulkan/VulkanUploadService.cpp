@@ -1,4 +1,5 @@
 #include "vulkan/VulkanUploadService.hpp"
+#include "vulkan/UploadValidation.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -42,6 +43,7 @@ void VulkanUploadService::checkThread() const
     }
 }
 
+//请求Upload，入队
 UploadEnqueueResult VulkanUploadService::tryEnqueue(UploadRequest& request)
 {
     checkThread();
@@ -79,11 +81,11 @@ UploadEnqueueResult VulkanUploadService::tryEnqueue(UploadRequest& request)
                     using T = std::decay_t<decltype(value)>;
                     if constexpr (std::is_same_v<T, BufferUpload>)
                     {
-                        UploadContext::validateBufferUpload(value);
+                        validateBufferUpload(value);
                     }
                     else
                     {
-                        UploadContext::validateImageUpload(value);
+                        validateImageUpload(value);
                     }
                 },
                 op);
@@ -91,7 +93,7 @@ UploadEnqueueResult VulkanUploadService::tryEnqueue(UploadRequest& request)
             {
                 throw std::invalid_argument("v1 allows one operation per target in a request");
             }
-            // Do not record overlapping initializations, including cancelled in-flight work.
+            // Serialize target writes, including cancelled in-flight work.
             for (const auto& pair : records_)
             {
                 for (const auto& pending : pair.second->request.operations)
@@ -111,6 +113,10 @@ UploadEnqueueResult VulkanUploadService::tryEnqueue(UploadRequest& request)
             }
             bytes += data.size;
         }
+    }
+    catch (const UnsupportedUpload& e)
+    {
+        return {UploadEnqueueCode::UnsupportedRequest, {}, e.what()};
     }
     catch (const std::exception& e)
     {
@@ -142,11 +148,15 @@ UploadEnqueueResult VulkanUploadService::tryEnqueue(UploadRequest& request)
     ++nextTicket_;
     return {UploadEnqueueCode::Accepted, {id}, {}};
 }
+
+//取回结果
 UploadStatus VulkanUploadService::query(UploadTicket ticket) const
 {
     checkThread();
     return records_.at(ticket.value)->status;
 }
+
+//清空请求
 void VulkanUploadService::retire(const std::shared_ptr<Record>& record)
 {
     if (record->accounted)
@@ -156,6 +166,7 @@ void VulkanUploadService::retire(const std::shared_ptr<Record>& record)
     }
     record->request.operations.clear();
 }
+//取消请求，但是可能已经交给gpu
 void VulkanUploadService::cancel(UploadTicket ticket)
 {
     checkThread();

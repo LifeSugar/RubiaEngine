@@ -1,28 +1,26 @@
 /*
 负责资源组合和生命周期
-负责资产到GPU的适配
-负责描述上传需求
+资产适配和完整纹理上传策略位于 TextureUploadBuilder
 */
 #pragma once
 
-#include "asset/TextureAsset.hpp"
 #include "vulkan/Image.hpp"
 #include "vulkan/ImageView.hpp"
-#include "vulkan/VulkanUploadTypes.hpp"
 
 #include <vulkan/vulkan.h>
 
 namespace rubia::rhi::vulkan
 {
 
-/// Vulkan sampling resources created from one source-independent TextureAsset.
+/// Owns an image, sampling view and sampler; no asset or upload policy.
 class GpuTexture final
 {
 public:
-    /// Source asset and sampling view used to create one GPU texture.
+    /// Backend resource descriptions used to create one GPU texture.
     struct CreateInfo
     {
-        const asset::TextureAsset* asset = nullptr;
+        Image::CreateInfo image;
+        VkSamplerCreateInfo sampler{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
         VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D;
         VkComponentMapping components{
             VK_COMPONENT_SWIZZLE_IDENTITY,
@@ -47,10 +45,12 @@ public:
 
     // Allocates an unpublished texture; bool() does not imply upload completion.
     void allocate(const Device& device, const CreateInfo& createInfo);
-    static UploadRequest makeUploadRequest(std::shared_ptr<GpuTexture> texture,
-        std::shared_ptr<const asset::TextureAsset> source);
     void reset() noexcept;
 
+    [[nodiscard]] const Image& image() const noexcept
+    {
+        return image_;
+    }
     [[nodiscard]] VkFormat format() const noexcept { return format_; }
     [[nodiscard]] VkImageView view() const noexcept { return view_.get(); }
     [[nodiscard]] VkSampler sampler() const noexcept { return sampler_; }

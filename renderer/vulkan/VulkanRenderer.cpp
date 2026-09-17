@@ -1,4 +1,5 @@
 #include "vulkan/VulkanRenderer.hpp"
+#include "vulkan/TextureUploadBuilder.hpp"
 
 #include "vulkan/GpuMaterial.hpp"
 #include "vulkan/Mesh.hpp"
@@ -472,10 +473,9 @@ UploadEnqueueResult VulkanRenderer::prepareTexture(
         }
     }
     auto texture = std::make_shared<GpuTexture>();
-    GpuTexture::CreateInfo info;
-    info.asset = source.get();
+    auto info = makeTextureCreateInfo(*source);
     texture->allocate(context_->device(), info);
-    auto request = GpuTexture::makeUploadRequest(texture, std::move(source));
+    auto request = makeTextureUploadRequest(texture, std::move(source));
     auto result = uploads_->tryEnqueue(request);
     if (result.accepted())
     {
@@ -503,10 +503,9 @@ GpuTexture VulkanRenderer::uploadTextureAndWait(std::shared_ptr<const asset::Tex
             "blocking texture upload requires valid assets and no scene preparation");
     }
     auto texture = std::make_shared<GpuTexture>();
-    GpuTexture::CreateInfo info;
-    info.asset = source.get();
+    auto info = makeTextureCreateInfo(*source);
     texture->allocate(context_->device(), info);
-    auto request = GpuTexture::makeUploadRequest(texture, std::move(source));
+    auto request = makeTextureUploadRequest(texture, std::move(source));
     auto result = uploads_->tryEnqueue(request);
     if (result.code == UploadEnqueueCode::QueueFull)
     {

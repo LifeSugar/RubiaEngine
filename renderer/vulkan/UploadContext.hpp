@@ -29,9 +29,6 @@ public:
         return stagedBytes_;
     }
 
-    // Same description and validation for queued requests and command recording.
-    static void validateBufferUpload(const BufferUpload& upload);
-    static void validateImageUpload(const ImageUpload& upload);
     // Recording only; an explicit batch must be open. Caller owns rollback.
     void recordBufferUpload(const BufferUpload& upload);
     void recordImageUpload(const ImageUpload& upload);

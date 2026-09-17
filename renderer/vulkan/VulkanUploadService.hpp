@@ -10,8 +10,10 @@
 namespace rubia::rhi::vulkan
 {
 // Render-thread-only. Device outlives service. Sources/targets may not be
-// mutated, reset or moved while retained. No live resource updates in v1.
-//保存上传需求，根据预算选择本帧处理的操作；组织并提交GPU命令，查询上传操作情况；保留上传期间不能释放的数据和资源
+// mutated, reset or moved while retained. Image updates require caller-managed states
+// and exclusive access until GPU completion; Cancelled alone does not imply completion.
+// All work uses the graphics queue; no cross-queue ownership transfer or state tracking.
+// 保存上传需求，根据预算选择本帧处理的操作；组织并提交GPU命令，查询上传操作情况；保留上传期间不能释放的数据和资源
 class VulkanUploadService final
 {
 public:

@@ -36,6 +36,15 @@ namespace rubia::rhi::vulkan
         VkAccessFlags finalAccess = 0;
     };
 
+    // State of every subresource in ImageUpload::range at the upload boundary.
+    // Explicit stages are required; Image::initialLayout is not a runtime state tracker.
+    struct ImageAccessState
+    {
+        VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkPipelineStageFlags stages = 0;
+        VkAccessFlags access = 0;
+    };
+
     //描述“把数据写入哪张GPU Texture”，只描述传输
     struct ImageUpload
     {
@@ -46,11 +55,10 @@ namespace rubia::rhi::vulkan
         std::vector<VkBufferImageCopy> regions;
         VkImageSubresourceRange range{};
 
-        VkImageLayout finalLayout =
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        VkPipelineStageFlags finalStages = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        VkAccessFlags finalAccess = VK_ACCESS_SHADER_READ_BIT;
+        // Caller supplies the actual prior use and the intended next use.
+        // UNDEFINED explicitly discards contents across range, including uncopied pixels.
+        ImageAccessState before;
+        ImageAccessState after;
     };
 
     //这里统一表示一种上传操作
@@ -99,6 +107,7 @@ namespace rubia::rhi::vulkan
         Accepted, //service接收请求
         QueueFull,//队列容量不足，保留请求，稍后重试
         InvalidRequest,//请求不符合要求
+        UnsupportedRequest, // valid Vulkan capability outside this service's supported subset
         ServiceFailed//service 挂了
     };
     //提交请求后接收的状态，service 接收请返回 uploads_->tryEnqueue(request);

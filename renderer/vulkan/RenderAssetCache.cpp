@@ -1,4 +1,5 @@
 #include "vulkan/RenderAssetCache.hpp"
+#include "vulkan/TextureUploadBuilder.hpp"
 
 #include "vulkan/Device.hpp"
 
@@ -288,10 +289,9 @@ void RenderAssetCache::prepareNext(const Device& device, VulkanUploadService& up
         {
             const auto& cpu = assets->texture(pendingTextures_[uploadedTextures_]);
             pendingUpload_.texture = std::make_shared<GpuTexture>();
-            GpuTexture::CreateInfo info;
-            info.asset = &cpu;
+            auto info = makeTextureCreateInfo(cpu);
             pendingUpload_.texture->allocate(device, info);
-            pendingUpload_.request = GpuTexture::makeUploadRequest(
+            pendingUpload_.request = makeTextureUploadRequest(
                 pendingUpload_.texture, std::shared_ptr<const asset::TextureAsset>(assets, &cpu));
         }
         else if (uploadedMaterials_ < pendingMaterials_.size())

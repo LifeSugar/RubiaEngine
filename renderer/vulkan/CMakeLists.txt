@@ -49,6 +49,10 @@ add_library(rubia_rhi_vulkan STATIC
     SwapchainResources.hpp
     TextureVkFormat.cpp
     TextureVkFormat.hpp
+    TextureUploadBuilder.cpp
+    TextureUploadBuilder.hpp
+    UploadValidation.cpp
+    UploadValidation.hpp
     UploadContext.cpp
     UploadContext.hpp
     VulkanUploadTypes.hpp

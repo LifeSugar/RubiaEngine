@@ -375,3 +375,70 @@ descriptor 的更新也必须考虑在途帧，不能只保证 image 存活。
 另一纹理正常发布。BC7 多 mip 与 GPU 替换测试已迁到新接口。
 仍不覆盖真实驱动 OOM/device-lost 故障注入；仍为单线程录制、一个在途批次，
 没有 staging 池、operation 分块或异步 descriptor 热替换。
+
+
+## 10. 上传描述、完整纹理策略与执行器分离（2026-09-17）
+
+本节替代第 8、9 节中“只支持新建完整 image”和“校验集中在 Context”的限制描述。
+
+### 当前边界
+
+- `GpuTexture`：只持有 Image / ImageView / Sampler，根据 Vulkan 创建描述分配资源，
+  不再引用 TextureAsset，也不生成上传请求。
+- `TextureUploadBuilder`：资产适配器。`makeTextureCreateInfo` 转换格式与采样配置；
+  `makeTextureUploadRequest` 为新建、尚未发布的 2D 纹理构建完整 mip 上传。
+  它明确选择 UNDEFINED → transfer write → fragment shader sampling，并负责完整纹理策略。
+- `ImageUpload`：描述目标、源数据、copy regions、barrier range，以及显式 `before/after`。
+  `ImageAccessState` 包含 layout / stages / access。默认 stages 为零，遗漏状态会被拒绝。
+- `UploadValidation`：Service 入队和 Context 录制共用的结构校验。只检查可从描述得出的
+  范围、usage、源数据跨度、格式块对齐、常见 stage/access 配对及已支持能力。
+  不根据 Image 的创建布局推断运行时布局，不要求覆盖整个 mip 或整个 barrier range。
+- `VulkanUploadService`：持有源/目标、检查设备与 owner、调度请求、批次和 ticket；
+  `UnsupportedRequest` 区分尚未支持的能力，`InvalidRequest` 表示描述或服务使用约束不满足。
+  所有拒绝均保留请求；同一目标仍不允许同时有多个待完成操作。
+- `UploadContext`：按描述创建 staging、复制 CPU 字节、录制两道 barrier 与 copy，
+  提交并管理 fence。第一道为 before → TRANSFER_DST，第二道为 TRANSFER_DST → after。
+  两道分别处理复制前后的访问依赖；不固定第一道 oldLayout 为 UNDEFINED。
+
+### 支持的 image 复制
+
+单采样 2D color image，包含 mip 和数组层；允许局部矩形、同一 mip 多个不重叠区域、
+非零 bufferOffset、bufferRowLength / bufferImageHeight、多层复制。
+支持的格式块元数据直接使用 VkFormat，包含常用 R/RG/RGBA、BGRA 与 BC1–BC7，
+不再经过 CPU TextureFormat 反向映射；其他格式、3D、depth/stencil 等明确返回 UnsupportedRequest。
+边界布局支持 UNDEFINED（仅 before）、GENERAL、TRANSFER_SRC/DST、SHADER_READ_ONLY、COLOR_ATTACHMENT。
+
+源数据长度按实际最后一个被读取的块计算，包含行/层之间 padding，不要求末行之后的 padding。
+BC 区域的起点按块对齐，接触 mip 边缘时允许 extent 小于完整块；普通 R8 在 graphics queue
+上按单字节对齐，不额外强制 4 字节对齐。重叠目标区域、越界或溢出均拒绝。
+
+### 调用方必须提供的同步契约
+
+`before` 必须描述 barrier range 内所有子资源在这次上传前的真实状态。
+范围中状态不一致时，由调用方先统一状态或分次安排上传；当前 service 不做状态跟踪。
+复制区域可以小于 barrier range，但若 before=UNDEFINED，则整个 range 的旧内容都可以被丢弃。
+要保留未覆盖像素，必须提供实际旧布局及先前访问范围。
+
+本轮只使用 graphics queue。调用方负责之前访问与上传的排序，并在 GPU 完成前阻止后续
+渲染或其他写入访问该目标；service 不能发现渲染器之外的资源访问，也不转移 queue ownership。
+这提供了已有 image 的区域传输能力，尚未提供自动协调在用纹理的更新调度器。
+
+取消未提交操作不改 GPU 状态；取消已经提交的操作不会撤回 copy，也不会恢复旧布局。
+Cancelled 或 releaseTicket 不代表 GPU 已停，原地更新的调用方必须等已提交工作完成（如 drain），
+再根据操作是否已提交处理 after 状态。失败时不能盲目假设 before/after，需进入资源恢复流程。
+BufferUpload 本轮保持原有边界，没有增加 buffer 原地更新的 before 依赖描述。
+
+### 验证
+
+`VulkanUploadTests` 增加真实 GPU image 回读：完整多 mip/数组初始化、已有 image 局部更新、
+有 padding 的多层源布局、同 mip 两个区域、未修改像素与 mip 保留、子范围更新、R8 字节偏移、
+BC7 非整块边缘更新。非法范围、源数据截断/溢出、块对齐、同步描述和未支持能力分别验证。
+现有取消、批次、容量、完整 BC7 资产上传及启动/运行/编辑器测试继续覆盖原链路。
+仍未做真实驱动 OOM/device-lost 故障注入，也没有多队列或自动资源状态跟踪。
+
+参考 Vulkan 规范：[VkBufferImageCopy](https://docs.vulkan.org/refpages/latest/refpages/source/VkBufferImageCopy.html)、
+[vkCmdCopyBufferToImage](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdCopyBufferToImage.html)。
+
+本轮验证结果：`cmake --build --preset debug-vs --parallel 1` 构建通过；
+`ctest --test-dir build/debug-vs -C Debug --output-on-failure` 全部 5 项通过。
+GPU 测试日志未发现 Vulkan VUID/validation error；存在环境中 RenderDoc/OBS 重复注册层的 loader 警告。

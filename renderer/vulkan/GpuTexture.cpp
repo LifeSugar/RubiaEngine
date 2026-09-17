@@ -1,47 +1,16 @@
 #include "vulkan/GpuTexture.hpp"
 
 #include "vulkan/Device.hpp"
-#include "vulkan/TextureVkFormat.hpp"
 
 #include <algorithm>
 #include <cstddef>
-#include <limits>
 #include <stdexcept>
 #include <utility>
-#include <vector>
 
 namespace rubia::rhi::vulkan
 {
 namespace
 {
-
-VkFilter textureFilter(asset::TextureFilter filter)
-{
-    return filter == asset::TextureFilter::Nearest
-        ? VK_FILTER_NEAREST
-        : VK_FILTER_LINEAR;
-}
-
-VkSamplerMipmapMode mipFilter(asset::TextureFilter filter)
-{
-    return filter == asset::TextureFilter::Nearest
-        ? VK_SAMPLER_MIPMAP_MODE_NEAREST
-        : VK_SAMPLER_MIPMAP_MODE_LINEAR;
-}
-
-VkSamplerAddressMode addressMode(asset::TextureAddressMode mode)
-{
-    switch (mode)
-    {
-    case asset::TextureAddressMode::Repeat:
-        return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    case asset::TextureAddressMode::MirroredRepeat:
-        return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
-    case asset::TextureAddressMode::ClampToEdge:
-        return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    }
-    return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-}
 
 VkImageSubresourceRange resolveViewRange(
     VkImageSubresourceRange range,
@@ -107,40 +76,17 @@ GpuTexture& GpuTexture::operator=(GpuTexture&& other) noexcept
 
 void GpuTexture::allocate(const Device& device, const CreateInfo& createInfo)
 {
-    if (!device || createInfo.asset == nullptr ||
-        !*createInfo.asset || createInfo.asset->mipLevels().empty())
+    if (!device || createInfo.image.format == VK_FORMAT_UNDEFINED ||
+        createInfo.sampler.sType != VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO)
     {
-        throw std::invalid_argument(
-            "cannot create GpuTexture from incomplete inputs");
+        throw std::invalid_argument("cannot create GpuTexture from incomplete inputs");
     }
-    const asset::TextureAsset& asset = *createInfo.asset;
-
-    if (asset.mipLevels().size() >
-        std::numeric_limits<uint32_t>::max())
-    {
-        throw std::overflow_error(
-            "GpuTexture mip count exceeds the Vulkan limit");
-    }
-
-    const uint32_t mipCount =
-        static_cast<uint32_t>(asset.mipLevels().size());
-    const VkFormat format = device.findSupportedFormat(
-        {textureVkFormat(asset.format(), asset.colorSpace())},
-        VK_IMAGE_TILING_OPTIMAL,
-        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+    const auto& imageInfo = createInfo.image;
+    const VkFormat format = device.findSupportedFormat({imageInfo.format}, imageInfo.tiling,
+                                                       VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
     GpuTexture replacement;
     replacement.device_ = device.get();
     replacement.format_ = format;
-    Image::CreateInfo imageInfo{};
-    imageInfo.extent = {
-        asset.width(),
-        asset.height(),
-        1};
-    imageInfo.mipLevels = mipCount;
-    imageInfo.format = format;
-    imageInfo.usage =
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    imageInfo.memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     replacement.image_.create(device, imageInfo);
 
     const VkImageSubresourceRange viewRange = resolveViewRange(
@@ -156,19 +102,8 @@ void GpuTexture::allocate(const Device& device, const CreateInfo& createInfo)
     viewInfo.subresourceRange = viewRange;
     replacement.view_.create(device.get(), viewInfo);
 
-    const asset::TextureSamplerDesc& sourceSampler = asset.sampler();
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = textureFilter(sourceSampler.magFilter);
-    samplerInfo.minFilter = textureFilter(sourceSampler.minFilter);
-    samplerInfo.mipmapMode = mipFilter(sourceSampler.mipFilter);
-    samplerInfo.addressModeU = addressMode(sourceSampler.addressU);
-    samplerInfo.addressModeV = addressMode(sourceSampler.addressV);
-    samplerInfo.addressModeW = addressMode(sourceSampler.addressW);
-    samplerInfo.anisotropyEnable = VK_FALSE;
-    samplerInfo.maxAnisotropy = 1.0f;
-    samplerInfo.minLod = 0.0f;
-    samplerInfo.maxLod = static_cast<float>(viewRange.levelCount - 1);
+    VkSamplerCreateInfo samplerInfo = createInfo.sampler;
+    samplerInfo.maxLod = std::min(samplerInfo.maxLod, static_cast<float>(viewRange.levelCount - 1));
     if (vkCreateSampler(
             device.get(),
             &samplerInfo,
@@ -179,58 +114,6 @@ void GpuTexture::allocate(const Device& device, const CreateInfo& createInfo)
     }
 
     *this = std::move(replacement);
-}
-
-UploadRequest GpuTexture::makeUploadRequest(std::shared_ptr<GpuTexture> texture,
-                                            std::shared_ptr<const asset::TextureAsset> source)
-{
-    if (!texture || !*texture || !source)
-    {
-        throw std::invalid_argument("missing texture upload owner");
-    }
-    const auto& asset = *source;
-    const auto& desc = texture->image_.description();
-    const auto mipCount = desc.mipLevels;
-    if (asset.width() != desc.extent.width || asset.height() != desc.extent.height ||
-        asset.mipLevels().size() != mipCount ||
-        textureVkFormat(asset.format(), asset.colorSpace()) != desc.format)
-    {
-        throw std::invalid_argument("texture upload source does not match allocated image");
-    }
-    std::vector<VkBufferImageCopy> copyRegions;
-    copyRegions.reserve(mipCount);
-    for (uint32_t mipIndex = 0; mipIndex < mipCount; ++mipIndex)
-    {
-        const asset::TextureMipLevel& mip = asset.mipLevels()[mipIndex];
-        const uint32_t expectedWidth = std::max(1u, asset.width() >> std::min(mipIndex, 31u));
-        const uint32_t expectedHeight = std::max(1u, asset.height() >> std::min(mipIndex, 31u));
-        if (mip.width != expectedWidth || mip.height != expectedHeight)
-        {
-            throw std::invalid_argument("GpuTexture mip dimensions do not match the base image");
-        }
-
-        VkBufferImageCopy region{};
-        region.bufferOffset = static_cast<VkDeviceSize>(mip.byteOffset);
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.mipLevel = mipIndex;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent = {mip.width, mip.height, 1};
-        copyRegions.push_back(region);
-    }
-
-    if (asset.payload().size() > std::numeric_limits<VkDeviceSize>::max())
-    {
-        throw std::overflow_error("GpuTexture payload exceeds the Vulkan address range");
-    }
-
-    ImageUpload op;
-    op.destination = std::shared_ptr<const Image>(texture, &texture->image_);
-    op.source = {source, asset.payload().data(), asset.payload().size()};
-    op.regions = std::move(copyRegions);
-    op.range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipCount, 0, 1};
-    UploadRequest request;
-    request.operations.emplace_back(std::move(op));
-    return request;
 }
 
 void GpuTexture::reset() noexcept
