@@ -66,7 +66,7 @@ void UploadContext::submitBatch()
     }
     submitted_ = true;
 }
-
+//轮询
 bool UploadContext::pollBatch()
 {
     if (!submitted_)

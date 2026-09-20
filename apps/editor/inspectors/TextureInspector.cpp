@@ -87,9 +87,10 @@ bool drawEnumCombo(
         ? "Unknown"
         : current->second;
 
-    ImGui::TextDisabled("%s", label);
-    ImGui::SameLine(140.0f);
-    ImGui::SetNextItemWidth(-1.0f);
+    if (!widgets::beginPropertyRow(label, true))
+    {
+        return false;
+    }
     bool changed = false;
     if (ImGui::BeginCombo(id, preview))
     {
@@ -108,14 +109,19 @@ bool drawEnumCombo(
         }
         ImGui::EndCombo();
     }
+    widgets::endPropertyRow();
     return changed;
 }
 
 bool drawCheckbox(const char* label, const char* id, bool& value)
 {
-    ImGui::TextDisabled("%s", label);
-    ImGui::SameLine(140.0f);
-    return ImGui::Checkbox(id, &value);
+    if (!widgets::beginPropertyRow(label, true))
+    {
+        return false;
+    }
+    const bool changed = ImGui::Checkbox(id, &value);
+    widgets::endPropertyRow();
+    return changed;
 }
 
 bool drawUIntSlider(
@@ -126,15 +132,17 @@ bool drawUIntSlider(
     int maximum)
 {
     int editable = static_cast<int>(value);
-    ImGui::TextDisabled("%s", label);
-    ImGui::SameLine(140.0f);
-    ImGui::SetNextItemWidth(-1.0f);
-    if (!ImGui::SliderInt(id, &editable, minimum, maximum))
+    if (!widgets::beginPropertyRow(label, true))
     {
         return false;
     }
-    value = static_cast<uint32_t>(editable);
-    return true;
+    const bool changed = ImGui::SliderInt(id, &editable, minimum, maximum);
+    widgets::endPropertyRow();
+    if (changed)
+    {
+        value = static_cast<uint32_t>(editable);
+    }
+    return changed;
 }
 
 void drawValidationMessage(const char* message)
@@ -266,9 +274,9 @@ std::optional<importer::texture::TextureReimportRequest> TextureInspector::draw(
         320.0f);
 
     ImGui::SeparatorText("Current Result");
-    ImGui::TextDisabled("Size");
-    ImGui::SameLine(140.0f);
-    ImGui::Text("%u x %u", texture.width(), texture.height());
+    const std::string dimensions = std::to_string(texture.width()) +
+        " x " + std::to_string(texture.height());
+    drawProperty("Size", dimensions.c_str());
     drawProperty("Format", textureFormatName(texture.format()));
     drawProperty(
         "Transfer Function",
@@ -284,10 +292,8 @@ std::optional<importer::texture::TextureReimportRequest> TextureInspector::draw(
     {
         drawProperty("Source", importRecord->sourcePath.string().c_str());
         drawProperty("Cooked KTX2", importRecord->cookedPath.string().c_str());
-        ImGui::TextDisabled("Revision");
-        ImGui::SameLine(140.0f);
-        ImGui::Text("%llu", static_cast<unsigned long long>(
-            importRecord->revision));
+        const std::string revision = std::to_string(importRecord->revision);
+        drawProperty("Revision", revision.c_str());
         if (importRecord->reimporting)
         {
             ImGui::TextDisabled(
@@ -341,13 +347,14 @@ std::optional<importer::texture::TextureReimportRequest> TextureInspector::draw(
         draft.transferFunction = asset::TextureColorSpace::Linear;
         draft.transcodeFormat = asset::TextureFormat::BC5UNorm;
     }
-    ImGui::TextDisabled("Input Swizzle");
-    ImGui::SameLine(140.0f);
-    ImGui::SetNextItemWidth(-1.0f);
-    ImGui::InputText(
-        "##TextureInputSwizzle",
-        draft.inputSwizzle.data(),
-        draft.inputSwizzle.size());
+    if (beginPropertyRow("Input Swizzle", true))
+    {
+        ImGui::InputText(
+            "##TextureInputSwizzle",
+            draft.inputSwizzle.data(),
+            draft.inputSwizzle.size());
+        endPropertyRow();
+    }
     drawUIntSlider(
         "Threads",
         "##TextureThreads",
@@ -384,16 +391,17 @@ std::optional<importer::texture::TextureReimportRequest> TextureInspector::draw(
             draft.uastcRdo);
         if (draft.uastcRdo)
         {
-            ImGui::TextDisabled("RDO Scalar");
-            ImGui::SameLine(140.0f);
-            ImGui::SetNextItemWidth(-1.0f);
-            ImGui::SliderFloat(
-                "##TextureUastcRdoScalar",
-                &draft.uastcRdoQualityScalar,
-                0.001f,
-                50.0f,
-                "%.3f",
-                ImGuiSliderFlags_Logarithmic);
+            if (beginPropertyRow("RDO Scalar", true))
+            {
+                ImGui::SliderFloat(
+                    "##TextureUastcRdoScalar",
+                    &draft.uastcRdoQualityScalar,
+                    0.001f,
+                    50.0f,
+                    "%.3f",
+                    ImGuiSliderFlags_Logarithmic);
+                endPropertyRow();
+            }
             drawUIntSlider(
                 "RDO Dictionary",
                 "##TextureUastcRdoDictionary",

@@ -18,6 +18,7 @@ public:
     UploadContext(const UploadContext&) = delete;
     UploadContext& operator=(const UploadContext&) = delete;
 
+    //beginCMDbuffer
     void beginBatch();
     void submitBatch();
     [[nodiscard]] bool pollBatch();

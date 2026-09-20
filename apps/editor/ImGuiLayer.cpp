@@ -1,4 +1,5 @@
 #include "ImGuiLayer.hpp"
+#include "EditorTheme.hpp"
 
 #include "vulkan/VulkanContext.hpp"
 #include "vulkan/Window.hpp"
@@ -7,6 +8,7 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
 
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 
@@ -16,6 +18,32 @@ namespace
 {
 
 constexpr uint32_t kImGuiDescriptorCapacity = 64;
+
+void loadEditorFont(ImGuiIO& io)
+{
+    constexpr float fontSize = 16.0f;
+    const std::filesystem::path relativePath =
+        "assets/fonts/FiraCode/FiraCode-Regular.ttf";
+    const std::filesystem::path candidates[] = {
+        relativePath,
+        std::filesystem::path(PROJECT_SOURCE_DIR) / relativePath};
+
+    ImFontConfig fontConfig;
+    fontConfig.Flags |= ImFontFlags_NoLoadError;
+    for (const auto& path : candidates)
+    {
+        if (ImFont* font = io.Fonts->AddFontFromFileTTF(
+                path.u8string().c_str(), fontSize, &fontConfig))
+        {
+            io.FontDefault = font;
+            return;
+        }
+    }
+
+    std::cerr << "[ImGui] Could not load Fira Code; using the default font\n";
+    fontConfig.SizePixels = fontSize;
+    io.FontDefault = io.Fonts->AddFontDefault(&fontConfig);
+}
 
 void reportVulkanResult(VkResult result)
 {
@@ -71,7 +99,8 @@ void ImGuiLayer::create(const CreateInfo& createInfo)
         io.IniFilename = iniFilename_.empty()
             ? nullptr
             : iniFilename_.c_str();
-        ImGui::StyleColorsDark();
+        applyEditorTheme(themeSettings_);
+        loadEditorFont(io);
 
         if (!ImGui_ImplGlfw_InitForVulkan(
                 createInfo.window->nativeHandle(),

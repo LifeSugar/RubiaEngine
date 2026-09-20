@@ -21,6 +21,9 @@ target_link_libraries(rubia_smoke_tests
 target_link_libraries(VulkanApp PRIVATE rubia_smoke_tests)
 
 if(BUILD_TESTING)
+    add_executable(editor_theme_tests EditorThemeTests.cpp)
+    target_link_libraries(editor_theme_tests PRIVATE Rubia::Editor imgui)
+    add_test(NAME editor-theme-test COMMAND editor_theme_tests)
     add_executable(shader_program_tests ShaderProgramTests.cpp)
     target_link_libraries(shader_program_tests PRIVATE Rubia::Engine rubia_project_options)
     add_test(NAME shader-program-test COMMAND shader_program_tests)

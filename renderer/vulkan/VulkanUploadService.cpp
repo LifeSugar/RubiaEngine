@@ -187,6 +187,8 @@ void VulkanUploadService::releaseTicket(UploadTicket ticket)
     }
     records_.erase(ticket.value);
 }
+
+//结束batch上传后，更新Record中的状态
 void VulkanUploadService::finishBatch()
 {
     for (auto& part : batch_)
@@ -206,6 +208,7 @@ void VulkanUploadService::finishBatch()
     }
     batch_.clear();
 }
+//失败哦
 void VulkanUploadService::failService(const std::string& error)
 {
     serviceError_ = error;

@@ -23,7 +23,9 @@ public:
     VulkanUploadService& operator=(const VulkanUploadService&) = delete;
 
     // Consumes only on Accepted. Rejection leaves request intact.
+    //将request 注册到 Upload queue
     UploadEnqueueResult tryEnqueue(UploadRequest& request);
+    //询问注册的request完成进度
     UploadStatus query(UploadTicket ticket) const;
     void cancel(UploadTicket ticket);
     void releaseTicket(UploadTicket ticket); // Terminal tickets only.

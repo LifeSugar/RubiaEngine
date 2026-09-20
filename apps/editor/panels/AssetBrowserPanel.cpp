@@ -70,7 +70,7 @@ std::vector<importer::texture::TextureReimportRequest> AssetBrowserPanel::draw(
     const asset::AssetManager& assets,
     const importer::texture::TextureImportRegistry* textureImports,
     EditorSelection& selection,
-    bool* open) const
+    bool* open)
 {
     std::vector<importer::texture::TextureReimportRequest> reimports;
     const bool visible = ImGui::Begin("Assets", open);
@@ -82,11 +82,19 @@ std::vector<importer::texture::TextureReimportRequest> AssetBrowserPanel::draw(
 
     const GlobalTextureReimportBatch batch =
         collectTextureReimports(assets, textureImports);
+    const float searchWidth = ImGui::GetContentRegionAvail().x - ImGui::GetFontSize() * 22.0f;
+    ImGui::SetNextItemWidth(searchWidth > ImGui::GetFontSize() * 12.0f ? searchWidth : -1.0f);
+    ImGui::InputTextWithHint("##AssetSearch", "Search assets...", search_.data(), search_.size());
+    const ImGuiTextFilter filter(search_.data());
+    if (searchWidth > ImGui::GetFontSize() * 12.0f)
+    {
+        ImGui::SameLine();
+    }
     const bool reimportDisabled = batch.requests.empty() || batch.busy;
     ImGui::BeginDisabled(reimportDisabled);
     const std::string buttonLabel =
         "Reimport All (" + std::to_string(batch.requests.size()) + ")";
-    if (ImGui::Button(buttonLabel.c_str(), ImVec2(-1.0f, 0.0f)))
+    if (ImGui::Button(buttonLabel.c_str()))
     {
         reimports = batch.requests;
     }
@@ -108,6 +116,14 @@ std::vector<importer::texture::TextureReimportRequest> AssetBrowserPanel::draw(
         }
     }
 
+    ImGui::Separator();
+    const int columns = ImGui::GetContentRegionAvail().x > ImGui::GetFontSize() * 42.0f ? 3 : 1;
+    if (!ImGui::BeginTable("##AssetCategories", columns, ImGuiTableFlags_SizingStretchSame))
+    {
+        ImGui::End();
+        return reimports;
+    }
+    ImGui::TableNextColumn();
     const std::vector<asset::ModelAssetHandle> models = assets.modelHandles();
     const std::string modelHeader =
         "Models (" + std::to_string(models.size()) + ")";
@@ -115,10 +131,13 @@ std::vector<importer::texture::TextureReimportRequest> AssetBrowserPanel::draw(
             modelHeader.c_str(),
             ImGuiTreeNodeFlags_DefaultOpen))
     {
+        ImGui::PushID("Models");
         for (asset::ModelAssetHandle handle : models)
         {
-            pushHandleId(handle);
             const asset::ModelAsset& model = assets.model(handle);
+            if (!filter.PassFilter(widgets::displayName(model.name(), "Unnamed Model")))
+                continue;
+            pushHandleId(handle);
             if (ImGui::Selectable(
                     widgets::displayName(
                         model.name(),
@@ -129,8 +148,10 @@ std::vector<importer::texture::TextureReimportRequest> AssetBrowserPanel::draw(
             }
             popHandleId();
         }
+        ImGui::PopID();
     }
 
+    ImGui::TableNextColumn();
     const std::vector<asset::MaterialAssetHandle> materials =
         assets.materialHandles();
     const std::string materialHeader =
@@ -139,10 +160,13 @@ std::vector<importer::texture::TextureReimportRequest> AssetBrowserPanel::draw(
             materialHeader.c_str(),
             ImGuiTreeNodeFlags_DefaultOpen))
     {
+        ImGui::PushID("Materials");
         for (asset::MaterialAssetHandle handle : materials)
         {
-            pushHandleId(handle);
             const asset::MaterialAsset& material = assets.material(handle);
+            if (!filter.PassFilter(widgets::displayName(material.name(), "Unnamed Material")))
+                continue;
+            pushHandleId(handle);
             if (ImGui::Selectable(
                     widgets::displayName(
                         material.name(),
@@ -153,8 +177,10 @@ std::vector<importer::texture::TextureReimportRequest> AssetBrowserPanel::draw(
             }
             popHandleId();
         }
+        ImGui::PopID();
     }
 
+    ImGui::TableNextColumn();
     const std::vector<asset::TextureAssetHandle> textures =
         assets.textureHandles();
     const std::string textureHeader =
@@ -163,10 +189,13 @@ std::vector<importer::texture::TextureReimportRequest> AssetBrowserPanel::draw(
             textureHeader.c_str(),
             ImGuiTreeNodeFlags_DefaultOpen))
     {
+        ImGui::PushID("Textures");
         for (asset::TextureAssetHandle handle : textures)
         {
-            pushHandleId(handle);
             const asset::TextureAsset& texture = assets.texture(handle);
+            if (!filter.PassFilter(widgets::displayName(texture.name(), "Unnamed Texture")))
+                continue;
+            pushHandleId(handle);
             if (ImGui::Selectable(
                     widgets::displayName(
                         texture.name(),
@@ -189,7 +218,9 @@ std::vector<importer::texture::TextureReimportRequest> AssetBrowserPanel::draw(
             }
             popHandleId();
         }
+        ImGui::PopID();
     }
+    ImGui::EndTable();
 
     ImGui::End();
     return reimports;

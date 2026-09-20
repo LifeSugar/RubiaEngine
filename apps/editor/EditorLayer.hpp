@@ -38,6 +38,7 @@ private:
     bool showSceneViewport_ = true;
     bool showRendererStats_ = true;
     bool showConsole_ = true;
+    bool showPreferences_ = false;
 };
 
 } // namespace rubia::editor

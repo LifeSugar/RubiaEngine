@@ -7,6 +7,8 @@ add_library(rubia_editor STATIC
     AppTextureReimport.cpp
     EditorLayer.cpp
     EditorLayer.hpp
+    EditorTheme.cpp
+    EditorTheme.hpp
     EditorFwd.hpp
     EditorSelection.cpp
     EditorSelection.hpp
@@ -33,6 +35,8 @@ add_library(rubia_editor STATIC
     content/ContentLoadStatus.hpp
     panels/InspectorPanel.cpp
     panels/InspectorPanel.hpp
+    panels/PreferencesPanel.cpp
+    panels/PreferencesPanel.hpp
     panels/SceneHierarchyPanel.cpp
     panels/SceneHierarchyPanel.hpp
     panels/TransformPanel.cpp

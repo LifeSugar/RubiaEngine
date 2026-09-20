@@ -1,6 +1,7 @@
 #pragma once
 
 #include "EditorFwd.hpp"
+#include "EditorTheme.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -61,6 +62,7 @@ private:
 
     rhi::vulkan::VulkanContext* context_ = nullptr;
     ImGuiContext* imguiContext_ = nullptr;
+    EditorThemeSettings themeSettings_;
     std::string iniFilename_;
     uint32_t minImageCount_ = 2;
     bool platformBackendInitialized_ = false;

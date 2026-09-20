@@ -54,7 +54,12 @@ namespace rubia::editor
             Overloaded{
                 [](std::monostate) -> std::optional<InspectorTarget>
                 {
-                    ImGui::TextDisabled("Select an object to inspect");
+                    ImGui::Spacing();
+                    ImGui::SeparatorText("Nothing selected");
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                        ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                    ImGui::TextWrapped("Select an object in the scene hierarchy or an asset below to view its properties.");
+                    ImGui::PopStyleColor();
                     return std::nullopt;
                 },
                 [&](SceneNodeTarget target)

@@ -242,6 +242,8 @@ void SceneHierarchyPanel::draw(
     }
 
     const std::vector<scene::SceneNode>& nodes = scene.nodes();
+    ImGui::TextDisabled("%zu objects", nodes.size());
+    ImGui::Separator();
     if (const SceneNodeTarget* target =
             std::get_if<SceneNodeTarget>(&selection.target());
         target != nullptr && target->nodeIndex >= nodes.size())
@@ -308,6 +310,10 @@ void SceneHierarchyPanel::draw(
 
     if (sceneOpen)
     {
+        if (nodes.empty())
+        {
+            ImGui::TextDisabled("No objects in this scene");
+        }
         std::function<void(uint32_t)> drawNode =
             [&](uint32_t nodeIndex)
             {
