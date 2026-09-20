@@ -16,11 +16,6 @@ namespace
 
 void validateTextures(const std::vector<const GpuTexture*>& textures)
 {
-    if (textures.empty())
-    {
-        throw std::invalid_argument(
-            "GpuMaterial requires at least one texture");
-    }
     for (const GpuTexture* texture : textures)
     {
         if (texture == nullptr || !*texture)

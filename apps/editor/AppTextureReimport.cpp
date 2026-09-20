@@ -206,36 +206,40 @@ void App::processPendingTextureReimport()
                     renderer.uploadTextureAndWait(replacementAsset);
 
                 cookedFile.install();
-                guiRenderBridge.invalidatePreview(
-                    prepared.request.texture);
+                guiRenderBridge.invalidatePreview(prepared.request.texture);
 
-                rhi::vulkan::GpuTexture previousGpu =
-                    renderAssets.commitTextureReplacement(
-                        device,
-                        assetManager,
-                        prepared.request.texture,
-                        std::move(replacementGpu));
+                auto previousVersion = assetManager.version(prepared.request.texture);
+                // CPU content may already be newer than the resident GPU version.
+                previousVersion.contentRevision =
+                    renderAssets
+                        .inspectPreparation({&renderAssets, previousVersion.handle,
+                                             previousVersion.contentRevision,
+                                             assetManager.domain()})
+                        .resident;
+                rhi::vulkan::GpuTexture previousGpu = renderAssets.commitTextureReplacement(
+                    device, assetManager, prepared.request.texture, std::move(replacementGpu));
                 try
                 {
                     asset::TextureAsset previousAsset = assetManager.replaceTexture(
                         prepared.request.texture, std::move(*replacementAsset));
                     static_cast<void>(previousAsset);
+                    renderAssets.setTextureVersion(assetManager.domain(),
+                                                   assetManager.version(prepared.request.texture));
                 }
                 catch (...)
                 {
                     rhi::vulkan::GpuTexture failedReplacement =
                         renderAssets.commitTextureReplacement(
-                            device,
-                            assetManager,
-                            prepared.request.texture,
-                            std::move(previousGpu));
+                            device, assetManager, prepared.request.texture, std::move(previousGpu));
                     static_cast<void>(failedReplacement);
+                    if (previousVersion)
+                    {
+                        renderAssets.setTextureVersion(assetManager.domain(), previousVersion);
+                    }
                     throw;
                 }
 
-                textureImports.markSucceeded(
-                    prepared.request.texture,
-                    prepared.request.settings);
+                textureImports.markSucceeded(prepared.request.texture, prepared.request.settings);
                 cookedFile.finish();
                 std::clog
                     << "[Assets] Reimported texture "

@@ -127,22 +127,22 @@ render::ApplicationGuiTexture VulkanApplicationGuiRenderBridge::preview(
         return {};
     }
 
-    const auto existing = std::find_if(
-        previewTextures_.begin(),
-        previewTextures_.end(),
-        [texture](const TextureEntry& entry)
-        {
-            return entry.texture == texture;
-        });
+    const GpuTexture* gpuTexture = renderAssets_->tryTexture(texture);
+    const auto publication = renderAssets_->texturePublication(texture);
+    const auto existing =
+        std::find_if(previewTextures_.begin(), previewTextures_.end(),
+                     [texture](const TextureEntry& entry) { return entry.texture == texture; });
     if (existing != previewTextures_.end())
     {
-        return {
-            reinterpret_cast<std::uintptr_t>(existing->descriptor)
-        };
+        if (gpuTexture && existing->publication == publication)
+        {
+            return {reinterpret_cast<std::uintptr_t>(existing->descriptor)};
+        }
+        // The descriptor may still be referenced by an earlier submitted GUI frame.
+        renderer_->waitIdle();
+        invalidatePreview(texture);
     }
-
-    const GpuTexture* gpuTexture = renderAssets_->tryTexture(texture);
-    if (gpuTexture == nullptr)
+    if (!gpuTexture)
     {
         return {};
     }
@@ -156,7 +156,7 @@ render::ApplicationGuiTexture VulkanApplicationGuiRenderBridge::preview(
             "failed to register texture preview with ImGui");
     }
 
-    previewTextures_.push_back({texture, descriptor});
+    previewTextures_.push_back({texture, descriptor, publication});
     return {reinterpret_cast<std::uintptr_t>(descriptor)};
 }
 

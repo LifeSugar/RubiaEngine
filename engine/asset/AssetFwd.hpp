@@ -1,6 +1,7 @@
 #pragma once
 
 #include "asset/AssetHandle.hpp"
+#include <variant>
 
 namespace rubia::asset
 {
@@ -21,4 +22,16 @@ using ShaderAssetHandle = AssetHandle<ShaderAsset>;
 using ShaderProgramAssetHandle = AssetHandle<ShaderProgramAsset>;
 using TextureAssetHandle = AssetHandle<TextureAsset>;
 
+using AnyAssetHandle =
+    std::variant<TextureAssetHandle, MeshAssetHandle, ShaderAssetHandle, ShaderProgramAssetHandle,
+                 MaterialTemplateAssetHandle, MaterialAssetHandle, ModelAssetHandle>;
+struct AssetDependencyVersion
+{
+    AnyAssetHandle handle;
+    AssetContentRevision revision = 0;
+};
+inline bool operator==(const AssetDependencyVersion& a, const AssetDependencyVersion& b)
+{
+    return a.handle == b.handle && a.revision == b.revision;
+}
 } // namespace rubia::asset

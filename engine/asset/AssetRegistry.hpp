@@ -7,6 +7,7 @@
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -23,7 +24,8 @@ public:
     [[nodiscard]] Handle insert(Asset asset)
     {
         uint32_t index = 0;
-        if (freeIndices_.empty())
+        const bool append = freeIndices_.empty();
+        if (append)
         {
             if (slots_.size() >= kInvalidAssetIndex)
             {
@@ -35,11 +37,26 @@ public:
         else
         {
             index = freeIndices_.back();
-            freeIndices_.pop_back();
         }
 
         Slot& slot = slots_[index];
-        slot.asset.emplace(std::move(asset));
+        try
+        {
+            slot.asset.emplace(std::move(asset));
+        }
+        catch (...)
+        {
+            if (append)
+            {
+                slots_.pop_back();
+            }
+            throw;
+        }
+        if (!append)
+        {
+            freeIndices_.pop_back();
+        }
+        slot.contentRevision = 1;
         ++size_;
         return {index, slot.generation};
     }
@@ -66,17 +83,48 @@ public:
         return *slots_[handle.index].asset;
     }
 
-    /// Replaces an asset without changing its handle generation. The caller
-    /// constructs and validates the candidate before entering this method.
-    [[nodiscard]] Asset replace(Handle handle, Asset replacement)
+    [[nodiscard]] AssetContentRevision contentRevision(Handle handle) const
     {
         if (!contains(handle))
         {
             throw std::out_of_range("asset handle is invalid or stale");
         }
+        return slots_[handle.index].contentRevision;
+    }
 
+    [[nodiscard]] AssetVersion<Asset> version(Handle handle) const
+    {
+        return {handle, contentRevision(handle)};
+    }
+
+    [[nodiscard]] bool isCurrent(AssetVersion<Asset> version) const noexcept
+    {
+        return contains(version.handle) &&
+               slots_[version.handle.index].contentRevision == version.contentRevision;
+    }
+
+    /// Replaces an asset without changing its handle generation. The caller
+    /// constructs and validates the candidate before entering this method.
+    /// Each successful replacement advances the revision, including restoring old content.
+    [[nodiscard]] Asset replace(Handle handle, Asset replacement)
+    {
+        // Commit and return must not throw after the old content has been changed.
+        static_assert(std::is_nothrow_move_constructible_v<Asset> &&
+                          std::is_nothrow_swappable_v<Asset>,
+                      "asset replacement requires nonthrowing move construction and swap");
+        if (!contains(handle))
+        {
+            throw std::out_of_range("asset handle is invalid or stale");
+        }
+
+        Slot& slot = slots_[handle.index];
+        if (slot.contentRevision == std::numeric_limits<AssetContentRevision>::max())
+        {
+            throw std::overflow_error("asset content revision exhausted");
+        }
         std::optional<Asset> candidate(std::move(replacement));
-        slots_[handle.index].asset.swap(candidate);
+        slot.asset.swap(candidate);
+        ++slot.contentRevision;
         return std::move(*candidate);
     }
 
@@ -89,6 +137,7 @@ public:
 
         Slot& slot = slots_[handle.index];
         slot.asset.reset();
+        slot.contentRevision = kInvalidAssetContentRevision;
         slot.generation = nextGeneration(slot.generation);
         freeIndices_.push_back(handle.index);
         --size_;
@@ -105,6 +154,7 @@ public:
         {
             Slot& slot = slots_[index];
             slot.asset.reset();
+            slot.contentRevision = kInvalidAssetContentRevision;
             slot.generation = nextGeneration(slot.generation);
             freeIndices_.push_back(index);
         }
@@ -135,6 +185,7 @@ private:
     {
         std::optional<Asset> asset;
         uint32_t generation = 1;
+        AssetContentRevision contentRevision = kInvalidAssetContentRevision;
     };
 
     [[nodiscard]] static uint32_t nextGeneration(uint32_t generation) noexcept

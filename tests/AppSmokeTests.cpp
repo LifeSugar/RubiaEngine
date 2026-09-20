@@ -988,6 +988,7 @@ void validateGpuTextureReplacement(rhi::vulkan::VulkanRenderer& renderer,
         handle,
         std::move(staged));
     asset::TextureAsset previousAsset = assets.replaceTexture(handle, std::move(*replacementAsset));
+    renderAssets.setTextureVersion(assets.domain(), assets.version(handle));
 
     if (!previousGpu || !previousAsset || !assets.contains(handle) ||
         renderAssets.tryTexture(handle) == nullptr ||
@@ -1176,10 +1177,18 @@ void AppSmokeTests::runRenderTest(
     catch (const std::logic_error&) { replacementRejected = true; }
     app.renderer.cancelScenePreparation();
     if (!replacementRejected || !app.renderer.sceneReady() ||
-        app.renderAssets.materialDescriptorSetLayout() == VK_NULL_HANDLE)
+        !app.renderAssets.materialTemplate(app.demoContent.materialTemplate))
     {
         throw std::runtime_error("preparation request or cancellation destroyed the activated scene");
     }
+    // The default scene must publish through the same versioned preparation cache.
+    const auto loadedModel = app.renderer.prepareModel(
+        app.renderAssets, app.assetManager.snapshot(app.demoContent.model));
+    if (!loadedModel.accepted() || loadedModel.disposition !=
+            rhi::vulkan::ResourcePreparationDisposition::CacheHit ||
+        !app.renderAssets.shaderProgram(app.demoContent.presentProgram))
+        throw std::runtime_error("default scene bypassed generic asset preparation");
+    app.renderer.releaseResourcePreparation(loadedModel.ticket);
     // Incremental texture preparation while the existing scene keeps drawing.
     asset::TextureAsset::CreateInfo incrementalInfo;
     incrementalInfo.name = "Incremental upload during scene rendering";
@@ -1187,8 +1196,8 @@ void AppSmokeTests::runRenderTest(
     incrementalInfo.format = asset::TextureFormat::RGBA8UNorm;
     incrementalInfo.payload.assign(4, std::byte{0xff});
     const auto incrementalHandle = app.assetManager.createTexture(incrementalInfo);
-    auto incremental = app.renderer.prepareTexture(app.renderAssets, incrementalHandle,
-        std::make_shared<const asset::TextureAsset>(incrementalInfo));
+    auto incremental =
+        app.renderer.prepareTexture(app.renderAssets, app.assetManager.snapshot(incrementalHandle));
     if (!incremental.accepted()) throw std::runtime_error(incremental.error);
     const auto incrementalDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
     while (std::chrono::steady_clock::now() < incrementalDeadline)
@@ -1198,11 +1207,15 @@ void AppSmokeTests::runRenderTest(
         app.drawGui(gui);
         const auto result = app.renderer.render(app.makeRenderFrame(), app.renderAssets, app.imguiLayer.endFrame());
         if (result == rhi::vulkan::VulkanRenderer::RenderResult::NeedsResize) app.recreateSwapChain(gui);
-        if (app.renderer.texturePreparationStatus(incremental.ticket).state == rhi::vulkan::UploadState::Completed) break;
+        if (app.renderer.resourcePreparationStatus(incremental.ticket).state ==
+            rhi::vulkan::ResourcePreparationState::Ready)
+        {
+            break;
+        }
     }
     if (!app.renderer.sceneReady() || !app.renderAssets.tryTexture(incrementalHandle))
         throw std::runtime_error("incremental texture upload did not preserve the active scene");
-    app.renderer.releaseTexturePreparation(incremental.ticket);
+    app.renderer.releaseResourcePreparation(incremental.ticket);
     std::clog << "[Startup] GUI remained active for " << uploadFrames
         << " upload frames; failure, resize and retry passed\n";
     asset::TextureAssetHandle editorPreviewTexture{};
@@ -1231,6 +1244,67 @@ void AppSmokeTests::runRenderTest(
         throw std::runtime_error(
             "render test found no uploaded source-backed texture");
     }
+    // Scene publication records the same domain/version used by standalone requests,
+    // even after the prepared AssetManager has been moved into App.
+    auto cached = app.renderer.prepareTexture(app.renderAssets,
+                                              app.assetManager.snapshot(editorPreviewTexture));
+    if (!cached.accepted() ||
+        cached.disposition != rhi::vulkan::ResourcePreparationDisposition::CacheHit)
+    {
+        throw std::runtime_error("scene texture did not participate in versioned cache reuse");
+    }
+    app.renderer.releaseResourcePreparation(cached.ticket);
+    const auto oldView = app.renderAssets.texture(editorPreviewTexture).view();
+    static_cast<void>(app.guiRenderBridge.preview(editorPreviewTexture));
+    auto updateInfo = cloneTextureCreateInfo(app.assetManager.texture(editorPreviewTexture),
+                                             "Versioned scene texture replacement");
+    static_cast<void>(app.assetManager.replaceTexture(editorPreviewTexture,
+                                                      asset::TextureAsset(std::move(updateInfo))));
+    const auto update = app.renderer.prepareTexture(
+        app.renderAssets, app.assetManager.snapshot(editorPreviewTexture));
+    if (!update.accepted())
+    {
+        throw std::runtime_error(update.error);
+    }
+    const auto updateDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    bool updateReady = false;
+    while (std::chrono::steady_clock::now() < updateDeadline)
+    {
+        app.updateContentLoading();
+        // GUI refresh is automatic; this path deliberately does not call invalidatePreview.
+        const auto updatedPreview = app.guiRenderBridge.preview(editorPreviewTexture);
+        if (!updatedPreview)
+        {
+            throw std::runtime_error("updated texture preview disappeared");
+        }
+        app.imguiLayer.beginFrame();
+        app.drawGui(gui);
+        ImGui::Begin("Versioned texture update test");
+        ImGui::Image(ImTextureRef(static_cast<ImTextureID>(updatedPreview.textureId)),
+                     ImVec2(32, 32));
+        ImGui::End();
+        const auto drawResult =
+            app.renderer.render(app.makeRenderFrame(), app.renderAssets, app.imguiLayer.endFrame());
+        if (drawResult == rhi::vulkan::VulkanRenderer::RenderResult::NeedsResize)
+        {
+            app.recreateSwapChain(gui);
+        }
+        const auto state = app.renderer.resourcePreparationStatus(update.ticket);
+        if (state.state == rhi::vulkan::ResourcePreparationState::Failed)
+        {
+            throw std::runtime_error(state.error);
+        }
+        if (state.state == rhi::vulkan::ResourcePreparationState::Ready)
+        {
+            updateReady = true;
+            break;
+        }
+    }
+    if (!updateReady || app.renderAssets.texture(editorPreviewTexture).view() == oldView)
+    {
+        throw std::runtime_error("versioned scene texture was not replaced");
+    }
+    app.renderer.releaseResourcePreparation(update.ticket);
     validateGpuTextureReplacement(app.renderer, app.vulkanContext.device(), app.assetManager,
                                   app.renderAssets, editorPreviewTexture);
     if (config.outputMode == rhi::vulkan::VulkanRenderer::OutputMode::Editor)

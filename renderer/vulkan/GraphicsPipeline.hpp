@@ -3,6 +3,7 @@
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -10,6 +11,7 @@ namespace rubia::rhi::vulkan
 {
 
 class Device;
+class GpuShaderProgram;
 
 /// Owns a graphics pipeline and its pipeline layout.
 class GraphicsPipeline final
@@ -20,6 +22,8 @@ public:
     {
         /// Render pass whose subpass layout the pipeline targets.
         VkRenderPass renderPass = VK_NULL_HANDLE;
+        /// Reuses prepared shader modules when supplied; SPIR-V fields are the fallback.
+        std::shared_ptr<const GpuShaderProgram> program;
         /// CPU-owned SPIR-V imported by the Asset layer.
         std::vector<uint32_t> vertexShaderSpirv;
         std::string vertexEntryPoint = "main";

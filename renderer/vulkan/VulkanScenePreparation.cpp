@@ -4,21 +4,20 @@
 #include "vulkan/DefaultPipelineFactory.hpp"
 #include "vulkan/RenderAssetCache.hpp"
 #include "vulkan/VulkanRenderer.hpp"
+#include "vulkan/VulkanResourcePreparation.hpp"
 
-#include <chrono>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace rubia::rhi::vulkan
 {
 using render::ScenePreparationState;
 
-VulkanScenePreparation::VulkanScenePreparation(const Device& device, VulkanRenderer& renderer,
-                                               RenderAssetCache& cache,
-                                               VulkanUploadService& uploads,
+VulkanScenePreparation::VulkanScenePreparation(VulkanRenderer& renderer, RenderAssetCache& cache,
+                                               VulkanResourcePreparation& preparations,
                                                render::SceneResourceRequest request)
-    : device_(device), renderer_(renderer), cache_(cache), request_(std::move(request)),
-      uploads_(uploads)
+    : renderer_(renderer), cache_(cache), preparations_(preparations), request_(std::move(request))
 {
 }
 
@@ -63,12 +62,23 @@ void VulkanScenePreparation::begin()
             }
         }
 
+        if (assets.materialTemplate(request_.materialTemplate).parameterBlock().descriptor.set != 1)
+        {
+            throw std::invalid_argument(
+                "Vulkan scene materials currently require descriptor set 1");
+        }
+        for (auto model : request_.models)
+        {
+            roots_.push_back({assets.snapshot(model), {}, false});
+        }
+        roots_.push_back({assets.snapshot(request_.materialTemplate), {}, false});
+        roots_.push_back({assets.snapshot(request_.presentProgram), {}, false});
+
         // Preconditions on an empty renderer/cache are checked by the public
         // renderer entry point. From here on, all partial resources are ours.
         ownsResources_ = true;
-        cache_.beginUpload(device_, assets, request_.models);
-        status_.total = cache_.pendingUploadCount();
-        status_.state = ScenePreparationState::Uploading;
+        status_.total = roots_.size();
+        status_.state = ScenePreparationState::PreparingResources;
     }
     catch (const std::exception& error)
     {
@@ -78,28 +88,85 @@ void VulkanScenePreparation::begin()
 
 void VulkanScenePreparation::advance()
 {
-    using namespace std::chrono_literals;
     try
     {
-        if (status_.state == ScenePreparationState::Uploading)
+        if (status_.state == ScenePreparationState::PreparingResources)
         {
-            cache_.prepareNext(device_, uploads_, request_.assets);
-            status_.completed = status_.total - cache_.pendingUploadCount();
-            status_.submitted = status_.completed + (cache_.hasSubmittedUpload(uploads_) ? 1 : 0);
-            if (cache_.pendingUploadCount() == 0)
+            for (auto& root : roots_)
+            {
+                if (root.ready)
+                {
+                    continue;
+                }
+                if (!root.ticket)
+                {
+                    const auto result = std::visit(
+                        [&](const auto& source) -> ResourcePreparationResult
+                        {
+                            using T = std::decay_t<decltype(source)>;
+                            if constexpr (std::is_same_v<T,
+                                                         asset::AssetSnapshot<asset::ModelAsset>>)
+                            {
+                                return preparations_.prepareModel(cache_, source);
+                            }
+                            else if constexpr (std::is_same_v<T, asset::AssetSnapshot<
+                                                                     asset::MaterialTemplateAsset>>)
+                            {
+                                return preparations_.prepareMaterialTemplate(cache_, source);
+                            }
+                            else if constexpr (std::is_same_v<T, asset::AssetSnapshot<
+                                                                     asset::ShaderProgramAsset>>)
+                            {
+                                return preparations_.prepareShaderProgram(cache_, source);
+                            }
+                            else
+                            {
+                                throw std::logic_error("invalid scene preparation root");
+                            }
+                        },
+                        *root.source);
+                    if (result.code == ResourcePreparationCode::QueueFull)
+                    {
+                        break;
+                    }
+                    if (!result.accepted())
+                    {
+                        throw std::runtime_error(result.error);
+                    }
+                    root.ticket = result.ticket;
+                    root.source.reset();
+                }
+                const auto progress = preparations_.status(root.ticket);
+                if (progress.state == ResourcePreparationState::Failed ||
+                    progress.state == ResourcePreparationState::Cancelled)
+                {
+                    throw std::runtime_error("scene resource preparation failed: " +
+                                             progress.error);
+                }
+                if (progress.state == ResourcePreparationState::Ready)
+                {
+                    preparations_.release(root.ticket);
+                    root.ticket = {};
+                    root.ready = true;
+                    ++status_.completed;
+                }
+            }
+            if (status_.completed == status_.total)
             {
                 status_.state = ScenePreparationState::PreparingPipelines;
             }
         }
         else if (status_.state == ScenePreparationState::PreparingPipelines)
         {
-            const auto& assets = *request_.assets;
+            const auto materialTemplate = cache_.materialTemplate(request_.materialTemplate);
+            const auto present = cache_.shaderProgram(request_.presentProgram);
+            if (!materialTemplate || !present)
+            {
+                throw std::logic_error("scene pipeline dependencies are missing");
+            }
             renderer_.createSceneResources(
-                makeDefaultScenePipeline(
-                    assets, assets.materialTemplate(request_.materialTemplate).program(),
-                    cache_.materialDescriptorSetLayout()),
-                makeDefaultPresentPipeline(assets, request_.presentProgram),
-                request_.maxRenderObjects);
+                makeDefaultScenePipeline(materialTemplate->program(), materialTemplate->layout()),
+                makeDefaultPresentPipeline(present), request_.maxRenderObjects);
             status_.state = ScenePreparationState::Ready;
         }
     }
@@ -107,17 +174,6 @@ void VulkanScenePreparation::advance()
     {
         fail(error);
     }
-}
-
-render::ScenePreparationStatus VulkanScenePreparation::status() const
-{
-    auto result = status_;
-    if (result.state == ScenePreparationState::Uploading)
-    {
-        result.completed = result.total - cache_.pendingUploadCount();
-        result.submitted = result.completed + (cache_.hasSubmittedUpload(uploads_) ? 1 : 0);
-    }
-    return result;
 }
 
 void VulkanScenePreparation::activate()
@@ -129,19 +185,28 @@ void VulkanScenePreparation::activate()
     // Completed GPU objects stay in renderer/cache. The source owner may now
     // move its CPU registries into the live application without backend reads.
     ownsResources_ = false;
+    roots_.clear();
     request_ = {};
     status_.state = ScenePreparationState::Activated;
 }
 
 void VulkanScenePreparation::discardResources() noexcept
 {
-    cache_.cancelPendingUpload(uploads_);
+    for (auto& root : roots_)
+    {
+        if (root.ticket)
+        {
+            preparations_.cancel(root.ticket);
+            preparations_.release(root.ticket);
+            root.ticket = {};
+        }
+    }
+    roots_.clear();
     if (ownsResources_)
     {
         ownsResources_ = false;
         renderer_.releaseSceneResources();
-        // releaseSceneResources waits for submitted frames; reclaim cancelled upload leases too.
-        uploads_.tick({0, 0, std::chrono::microseconds{0}});
+        // Renderer waits for GPU users. Cancelled in-flight upload leases remain service-owned.
         cache_.reset();
     }
     request_ = {};

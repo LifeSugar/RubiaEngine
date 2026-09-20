@@ -442,3 +442,288 @@ BC7 非整块边缘更新。非法范围、源数据截断/溢出、块对齐、
 本轮验证结果：`cmake --build --preset debug-vs --parallel 1` 构建通过；
 `ctest --test-dir build/debug-vs -C Debug --output-on-failure` 全部 5 项通过。
 GPU 测试日志未发现 Vulkan VUID/validation error；存在环境中 RenderDoc/OBS 重复注册层的 loader 警告。
+
+
+## 11. 通用资产内容版本基础设施（2026-09-20）
+
+为后续缓存复用和准备中去重补齐 CPU 侧版本，不将版本作为稳定 handle 的一部分。
+`AssetHandle<T>` 仍由 index/generation 构成；`AssetVersion<T>` 保存 handle/contentRevision。
+所有 AssetRegistry 的槽位统一维护 uint64_t 内容版本：创建为 1，成功替换递增，拒绝不变；
+删除/reset 清零，复用槽位通过新 generation 区分旧身份。恢复旧内容也产生新版本，溢出时拒绝替换。
+
+AssetManager 为全部七类资产提供 contentRevision(handle)、version(handle)、isCurrent(version)。
+当前仅纹理已有公开 replace 入口，其他资产仍保留原有创建/只读策略；基础设施不绕过类型专属校验。
+版本快照只表示元数据，不保活 CPU 字节，不跟踪依赖变化，也不提供多线程同步。
+不同 AssetManager 的数值版本可能相同，未来缓存键必须包含管理器域或绑定唯一管理器。
+
+后续 Texture 准备层可以使用绑定域内的 `{handle, contentRevision}` 判断缓存命中或共享任务；
+目前 GPU cache 和独立准备入口尚未接入版本匹配，重复请求仍按现有逻辑处理。
+详见 `engine/asset/README.md` 的版本规则与使用示例。
+
+本轮验证：Debug 全量构建通过，CTest 7/7 通过（新增 asset-revision-test），
+覆盖稳定 handle 的内容替换、失败不变、恢复旧内容、删除/reset/槽位复用、插入失败回滚，
+以及全部七类资产的版本查询。既有启动、运行、编辑器 GPU 测试通过，未发现 VUID/validation error。
+
+
+## 12. 独立纹理准备逻辑迁移（2026-09-20）
+
+新增后端内部组件 `VulkanResourcePreparation`，从 Renderer 移入 PendingTexturePreparation、
+pendingTextures_、纹理创建/请求构建、状态/取消/ticket 释放及完成后发布逻辑。
+同步 uploadTextureAndWait 的实现一并迁入，仍返回未发布的新纹理，并可能 drain 其他共享请求。
+
+Renderer 持有组件，保留原公开接口、场景与独立准备的互斥规则，以及每帧的统一推进顺序：
+ScenePreparation::advance → UploadService::tick → ResourcePreparation::advance。
+ResourcePreparation::advance 只查询传输结果并发布，不再次 tick 或等待 GPU。
+组件借用 Device/UploadService，缓存必须覆盖请求和已发布资源的使用期。
+
+清理顺序为：取消/释放场景会话，销毁资源准备组件（取消/释放其 ticket），然后 shutdown 上传服务。
+组件析构不访问缓存、不发布资源、不关闭共享服务；在途 Part 继续持有资源直到 GPU 完成。
+已发布纹理归 cache 所有，不随准备 ticket 或准备组件的销毁而移除。
+
+本轮保持原 ticket 和状态语义：仍复用 UploadTicket/UploadStatus，上传完成但尚未发布时对外仍为
+Uploading，取消该阶段不会误发布。已缓存或重复请求仍拒绝，尚未接入版本匹配和任务合并。
+场景专用的 RenderAssetCache::prepareNext 路径暂未迁移，也未改变其整体取消策略。
+
+新增生命周期回归：分别在排队中和已提交时销毁准备组件，确认其 ticket 被释放、纹理不发布、
+已提交来源保活到 GPU 完成，而且同服务上的其他请求继续成功。
+现有启动测试继续覆盖独立贴图发布、GUI 预览、取消、drain 完成后取消及重导入路径。
+
+本轮验证：Debug 全量构建通过，CTest 7/7 通过；新增准备组件销毁回归与原有纹理发布、
+取消、重导入测试均通过，GPU 测试日志未发现 VUID/validation error。
+
+
+## 13. Texture / Mesh 共用资源准备流程（2026-09-20）
+
+本节更新第 12 节的类型专用记录和复用上传 ticket 的设计。
+
+### 类型差异与公共流程
+
+`IResourcePreparation` 是后端内部抽象接口，只包含三个步骤：
+
+1. `createGpuResources(device)`：创建尚未发布的 GPU 对象。
+2. `buildUploadRequest()`：构建传输请求，允许包含多个 operation，也允许为空。
+3. `publish()`：所有传输完成后把对象发布到 cache；失败必须保持 cache 不变。
+
+`TexturePreparation` 组合 GpuTexture / TextureUploadBuilder，`MeshPreparation` 组合 Mesh。
+两者持有未发布对象，通过 RAII 清理；请求构建后源数据保活交给 UploadRequest。
+派生类不管理 ticket，不轮询 fence，不 tick，也不处理取消状态。
+
+`VulkanResourcePreparation` 用统一 PreparationRecord 保存目标、类型准备对象、可选 UploadTicket
+和 ResourcePreparationStatus。统一完成接收、容量限制、上传入队、状态推进、取消、发布和回收。
+目标按 cache + 资源类型 + 槽位识别冲突；同数值 Texture / Mesh handle 不冲突。
+初次发布仍拒绝覆盖已存在对象；尚未接入 contentRevision 匹配或重复请求共享。
+
+### ticket 与生命周期
+
+对外返回 `ResourcePreparationTicket`，通过 `resourcePreparationStatus`、
+`cancelResourcePreparation`、`releaseResourcePreparation` 统一操作。Renderer 新增 prepareMesh，
+prepareTexture 改为返回同一套准备结果；旧 texture 专属状态/取消/释放入口删除。
+
+- Preparing：已接收，等待上传调度或等待零上传任务发布；创建和请求构建目前仍同步执行。
+- Uploading：正在传输，或传输已经完成但尚未发布。
+- Ready：全部传输完成，且成功发布到 cache。
+- Failed / Cancelled：不再发布，记录保留错误和传输进度供查询。
+
+只有终态允许释放准备 ticket。终态立即回收类型对象和内部上传 ticket，保留轻量状态直到
+调用方 release。默认最多保留 1024 个准备记录（包含未释放终态），零上传任务也受限。
+字节计数仅表示传输进度，不代表 CPU 创建或 pipeline 编译进度。
+
+空 UploadRequest 不进入 UploadService，因此不占上传 ticket 容量；由下一次 advance 发布。
+单个 Mesh 的 vertex/index 操作可以跨批次，必须全部完成才发布。
+取消已提交任务不会撤销 GPU copy；UploadService 的在途 Part 继续保活源/目标直到 fence 完成。
+取消准备不修改已发布资源，不影响共享服务上其他请求。准备组件全部入口限所属渲染线程，
+缓存必须覆盖请求和已发布资源使用期，服务与设备必须比准备组件活得更久。
+
+### 本轮边界与验证
+
+Renderer 仍统一推进 ScenePreparation → UploadService → ResourcePreparation。
+准备组件 advance 不 tick、不 drain；同步 uploadTextureAndWait 仍是显式阻塞的重导入适配器。
+场景专用 RenderAssetCache::prepareNext 尚未迁入公共准备记录，只复用新的 publishMesh 入口。
+尚未实现 Material / ShaderProgram 准备器、依赖调度、缓存版本命中、请求合并或多线程执行。
+
+回归覆盖 Texture/Mesh 同槽位共存、重复拒绝、Mesh 部分完成不可见、完整完成后发布、
+取消在途 Mesh 的来源保活、零上传任务不占传输容量、准备记录容量与释放、发布失败隔离、
+创建失败清理、错误线程调用拒绝，以及 Renderer/App 主循环的独立 Mesh 发布入口。
+
+本轮验证：Debug 全量构建通过，CTest 7/7 通过；GPU 测试日志未发现 VUID/validation error。
+
+
+## 14. 版本缓存复用、共享准备与资源替换（2026-09-20）
+
+本节替代第 13 节的重复拒绝和仅初次发布策略。目前 Texture / Mesh 共用以下流程：
+
+- 同 cache、domain、类型、handle（含 generation）、revision 已驻留：返回 CacheHit，
+  状态立即 Ready，不创建 GPU 对象、不申请上传 ticket，传输计数为零。
+- 同一准备组件内，同版本任务正在准备（包括传输完成尚未发布）：返回 Shared。
+  每个调用方拥有自己的 PreparationTicket，共享一个内部准备记录与 UploadTicket。
+- 新版本：返回 Started，创建新 GPU 对象并上传，成功后替换旧缓存。缓存对象不原地写入。
+  拒绝/失败/取消保留旧驻留版本；只有新任务接受成功后才取代旧版本的未完成任务。
+
+每个 cache 绑定一个资产 domain，避免不同 AssetManager 的数值 handle/revision 相撞。
+AssetManager 的 domain token 在移动时跟随资产移交，快照和 cache 保活 token 防止地址复用。
+不同 generation 不能覆盖同一缓存槽位，需结束请求并 reset cache 后重建。
+
+入口为 `prepareTexture(cache, assets.snapshot(handle))` / `prepareMesh(cache, assets.snapshot(handle))`。
+AssetSnapshot 保存 domain、版本以及不可变数据，独立于 registry 的扩容、内容替换和 reset。
+当前 snapshot 捕获复制一次 CPU 内容；调用方可以保存并反复提交同一份快照。
+公共 prepare 仍同步创建 GPU 对象和构建请求，返回 ticket 后逐帧上传/发布。
+
+### 共享与取消
+
+对外 records_ 存放调用方 Subscription，内部 tasks_ 只存未终结共享任务。
+Subscription 持有共享准备记录以及可选的本调用方取消状态。
+取消一个 ticket 只减少等待者数量；最后一个等待者取消时，才取消底层上传并释放未发布对象。
+已提交 Part 仍保活资源直到 fence 完成。release 只删除对应终态订阅，不删除缓存资源。
+默认 1024 个调用方 ticket 上限也覆盖 Shared/CacheHit，防止未释放订阅无限增长。
+
+cache 记录 resident revision 与最高已接受请求版本。同槽位更新请求接受后，旧未完成任务
+标记 Cancelled（error 说明被新版本取代），不会再发布；旧在途 GPU 工作仍正常退休。
+新版本入队被拒绝时不会改变版本记录或取消已有任务。低于最新接受版本的未驻留旧快照拒绝；
+仍驻留的旧版本可缓存命中，且不撤销正在进行的新版本任务。同版本失败/取消后可以重试，
+无需等其他调用方释放其失败/取消 ticket。Ready 记录是历史完成结果，不是资源驻留租约。
+
+### 替换提交与外部使用
+
+新对象上传完成后，Texture / Mesh 替换当前先 device.waitIdle，再提交；整个 advance 必须位于
+本帧命令录制之前。原有帧可能仍引用旧 Buffer / ImageView / descriptor，这次保守等待保证其
+完成后才替换并销毁旧资源。后续可优化成按帧延迟回收，目前不声称零阻塞更新。
+
+cache 保存已发布材质的纹理 handle 和布局，纹理替换更新所有受影响材质 descriptor；全部
+引用及临时容器先准备，再进入 descriptor 写入与资源移动。GUI preview 使用独立发布序号
+检测缓存替换，下一次 preview 调用等待旧 GUI 使用结束并重新注册 descriptor。
+调用方应每帧获取 preview token，不跨资源推进保留已经录制好的命令或 GUI draw data。
+
+场景路径仍由原 ScenePreparation/prepareNext 协调，但发布时记录 domain/revision，可与独立
+准备共享缓存。旧同步重导入事务在 CPU/GPU 成功后标记新版本；rollback 恢复原版本标记。
+准备层不自动修改/回滚 CPU AssetManager 或磁盘，也不负责依赖资产更新；特别是改变 Mesh
+子网格/材质结构时，调用方必须协调 CPU 场景启用与 GPU Ready 的时机。
+
+验证包括独立 CPU 快照、管理器移动后的域身份、相同数值 handle 的跨域拒绝、单传输容量下
+重复任务共享、独立取消/全部取消、完成未发布时共享、缓存命中、Texture/Mesh 版本替换、
+失败和队列满保留旧资源、在途旧版本被取代，以及真实场景材质绘制和 GUI preview 自动刷新。
+
+本轮验证：Debug 全量构建通过，CTest 7/7 通过，git diff --check 通过；
+GPU 测试日志未发现 VUID / validation error。
+
+
+## 15. 全部 Asset 类型的 Preparation 与依赖准备（2026-09-20）
+
+本节更新第 13、14 节的类型范围和依赖边界。七种 Asset 都有独立准备入口，
+都返回同一套 PreparationTicket / Status / Disposition，并共享取消、版本匹配与发布流程。
+
+| Asset | 准备结果 | 自身是否进入 UploadService |
+| --- | --- | --- |
+| Texture | Image、ImageView、Sampler | 是，像素传输 |
+| Mesh | 顶点/索引 buffer、子网格信息 | 是，几何数据传输 |
+| Shader | GpuShader / VkShaderModule | 否 |
+| ShaderProgram | GpuShaderProgram、阶段模块引用、反射 descriptor layouts / pipeline layout | 否 |
+| MaterialTemplate | GpuMaterialTemplate、材质 descriptor layout、Program 引用 | 否 |
+| Material | GpuMaterial、参数 buffer、descriptor set 与所属 pool | 否，当前参数直接写 host-visible coherent buffer |
+| Model | 模型层级快照与依赖已就绪的发布记录 | 否，没有额外的 Model GPU allocation |
+
+“不需要 Upload”仅描述该类型自身。Material 依赖 Texture；Model 依赖 Mesh，
+Mesh 依赖子网格 Material；Material → MaterialTemplate → ShaderProgram → Shader。
+因此首次 prepareModel 仍会间接触发纹理和几何数据上传。
+
+### 快照、依赖与版本
+
+`assets.snapshot(handle)` 支持全部七类，并捕获同一 domain 下的不可变依赖快照。
+一次捕获内相同资源只复制一次，多个父节点共享该快照；不同次捕获目前仍会复制 CPU 数据。
+这一步在 CPU Asset 层完成，不持有 Vulkan 对象。调用方可以复用快照，避免反复复制大资源。
+
+公共准备目标记录根资源版本和排序后的传递依赖版本集合；缓存命中及任务共享都比较这两部分。
+例如 Texture revision 增长而 Material/Model 自身 revision 不变，新快照仍会启动依赖更新，
+不会把旧材质准备结果当成 CacheHit。未变化的 Shader/Program/Template 仍命中缓存。
+Mesh 自身 revision 未变时只更新依赖就绪记录，复用原顶点/索引 buffer，不重复传输几何数据。
+发布前再次核对依赖驻留版本，失败时不覆盖该任务的旧驻留对象。
+
+有依赖的准备记录先持有快照，由 advance 逐个接收直接依赖；依赖自己也走公共准备入口。
+每个父任务持有独立的内部订阅 ticket，因此两个父任务可以共享同一次依赖准备。
+依赖 Ready 后父任务才创建自身资源、构造可选 UploadRequest、最后发布。
+无依赖资源仍在请求接收时创建对象；空 UploadRequest 不占上传容量。
+
+外部 ticket 容量与内部依赖订阅容量分开计算，只有一个外部槽位也能完成整个模型。
+目前直接依赖逐个推进，内部容量按七类资产图的最大深度预留；不是并行 job system。
+父任务 Waiting 的表现是 Preparing。字节计数只统计自身传输，不聚合共享依赖字节。
+
+取消一个父订阅不影响其他父订阅；最后一个订阅取消才释放该任务的内部依赖订阅。
+依赖仍有其他等待者时继续执行。已发布依赖保留在缓存，失败/取消不是整个依赖图的回滚。
+依赖失败或被新版本取消，父任务失败并报告原因；调用方可使用最新快照重试。
+Ready ticket 依旧是历史完成结果；资源更新后应发起新准备，不能用旧 ticket 判断当前驻留版本。
+
+### ShaderProgram 与 pipeline 的界线
+
+ShaderProgram Ready 表示 shader modules 与反射布局已创建，不表示完整 graphics pipeline 已创建。
+`GraphicsPipeline::CreateInfo::program` 可以直接消费缓存中的 GpuShaderProgram，复用模块；
+render pass、顶点输入、材质渲染状态、descriptor layouts 与 push constants 由 pipeline 调用方提供。
+旧 SPIR-V 字段保留为现有场景路径的兼容入口。
+
+现有 VS+PS、材质单 UBO 和独立 image/sampler 的能力限制保持不变。
+本轮没有新增 compute program、全资产 CPU 热重载、自动 pipeline 重建或材质参数迁移。
+Shader/Program/Template/Material/Model 的 CPU 内容仍按现有只读资产规则发布。
+
+Renderer 暴露所有七类 prepare 方法并统一推进；Demo 的 ScenePreparation/prepareNext
+仍保留原有场景启用和 pipeline 协调，尚未迁移为 prepareModel 的组合调用。
+通用准备既不创建 Scene 实例，也不自动启用场景。GPU 替换仍在帧边界采用 waitIdle 保守提交。
+
+
+入口示例（调用顺序仍是先推进资源，再录制本帧命令）：
+
+```cpp
+auto result = renderer.prepareModel(cache, assets.snapshot(modelHandle));
+if (result.accepted())
+{
+    // 保存 ticket；后续每帧推进，直到 Ready / Failed / Cancelled。
+    renderer.advanceResourcePreparation();
+    auto status = renderer.resourcePreparationStatus(result.ticket);
+    // Ready 后可以使用 cache.model / mesh / material 等结果。
+    // 终态读取结果后 releaseResourcePreparation(ticket)。
+}
+// QueueFull 可保留快照重试；其他拒绝读取 result.error。
+```
+
+回归覆盖七类缓存命中、模型共享与独立取消、单外部槽位依赖推进、在途依赖取消与重试、
+依赖失败向父任务传播、根 revision 不变时的贴图版本更新、旧快照拒绝、未变化几何 buffer 复用，
+以及 UploadService 满载时 Program 的零传输准备和使用已准备模块创建真实 graphics pipeline。
+
+验证：Debug 构建通过，CTest 7/7 通过，git diff --check 通过；GPU 测试日志无 VUID / validation error。
+
+
+## 16. 删除 Demo 独立 Scene Upload 路径（2026-09-20）
+
+本节替代第 15 节末尾“场景尚未迁移”的说明。默认 Demo 与零散资产准备现在走同一条路径：
+
+```text
+CPU PreparedContent
+  → 场景协调：prepareModel + prepareMaterialTemplate + prepareShaderProgram(present)
+  → VulkanResourcePreparation：依赖共享、版本缓存、资源创建、可选上传、发布
+  → 所有根请求 Ready
+  → 使用缓存中的 GpuShaderProgram / GpuMaterialTemplate 创建 graphics pipeline
+  → Ready → Activate → App 移交 CPU 内容
+```
+
+删除 RenderAssetCache::initialize / beginUpload / prepareNext / pendingUploadCount /
+hasSubmittedUpload / cancelPendingUpload；删除 pendingTextures、pendingMaterials、pendingMeshes、
+pendingUpload、上传计数、全局材质布局/descriptor pool 和 uploadMaterialSets。
+RenderAssetCache 不再引用 VulkanUploadService，只保存资源、版本并负责发布/替换。
+材质使用各自已准备的 Template 布局和 descriptor pool。
+
+VulkanScenePreparation 保留为场景就绪与启用的协调对象，不再接触 UploadService、UploadTicket、
+命令池、批次或 fence。它订阅通用 PreparationTicket，QueueFull 保留根快照待下帧重试；
+依赖失败则报告场景失败。创建 pipeline 使用准备好的模块，不再在默认工厂中重新读取 SPIR-V。
+
+唯一每帧推进入口为 advanceResourcePreparation：UploadService tick → 通用准备推进/发布 →
+场景根请求检查/pipeline 创建。删除 advanceScenePreparation 兼容入口，避免重复推进。
+ScenePreparationState::Uploading 改为 PreparingResources，移除 submitted；total/completed 统计
+根准备请求，默认是 Model、材质 Template、Present Program 三项，不声称为传输数量或字节数。
+
+场景会话仍要求最初为空的 renderer/cache，并独占尚未启用的场景缓存；它负责取消自己的
+根订阅，通用准备负责退订依赖和取消最后一个订阅者的上传。清理场景前由 renderer 等待 GPU，
+在途 copy 的来源/目标继续由共享上传服务保活至正常回收。已激活场景不受会话 cancel 影响。
+这是场景启用的所有权边界；没有重新建立一套 Scene Upload 队列。
+
+回归在真正的默认加载与渲染路径验证：激活后 prepareModel 必须直接 CacheHit，PresentProgram
+必须已在公共缓存中；继续覆盖场景中途/Ready 取消、重试、resize、CPU 移交、Runtime/Editor
+绘制以及纹理更新。通用准备测试继续覆盖在途依赖取消与来源保活。
+
+本轮验证：Debug 构建通过，CTest 7/7 通过（含默认场景缓存命中断言）；git diff --check 通过，GPU 日志无 VUID / validation error。

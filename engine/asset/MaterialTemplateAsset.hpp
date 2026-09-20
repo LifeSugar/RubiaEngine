@@ -114,6 +114,10 @@ public:
     [[nodiscard]] const std::vector<MaterialParameterDesc>& parameters() const noexcept { return parameters_; }
     [[nodiscard]] const std::vector<MaterialTextureSlotDesc>& textureSlots() const noexcept { return textureSlots_; }
     [[nodiscard]] const std::vector<ProgramResourceBinding>& bindings() const noexcept { return bindings_; }
+    [[nodiscard]] explicit operator bool() const noexcept
+    {
+        return program_ && parameterDataSize_ != 0;
+    }
     [[nodiscard]] uint64_t schemaSignature() const noexcept { return schemaSignature_; }
     [[nodiscard]] uint64_t programInterfaceSignature() const noexcept
     {

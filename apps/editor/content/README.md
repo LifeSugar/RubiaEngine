@@ -15,8 +15,8 @@
    AssetManager、Scene、TextureImportRegistry 和 DemoContent。
 
 GUI 只访问主线程的资源。在完成移交之前，资源面板和场景保持为空。
-加载阶段、上传进度、完成信息和错误统一写入现有 Console，不创建加载面板。
-上传进度按约 10% 的里程碑记录，避免每帧刷屏。加载失败不会退出编辑器。
+加载阶段、准备进度、完成信息和错误统一写入现有 Console，不创建加载面板。
+准备进度按约 10% 的里程碑记录，避免每帧刷屏。加载失败不会退出编辑器。
 当前只由主循环在首帧后自动发起一次加载，GUI 不提供加载或重试入口。
 
 ## 职责与接口
@@ -25,8 +25,8 @@ GUI 只访问主线程的资源。在完成移交之前，资源面板和场景�
   `operator bool()` 表示基础呈现可用，`sceneReady()` 单独表示场景渲染可用。
 - `renderGui()`：只清理交换链颜色并绘制 GUI；不会执行场景 pass，也不会读取
   RenderAssetCache。没有场景时，GUI bridge 不注册视口纹理。
-- `beginScenePreparation()` / `advanceScenePreparation()` / `scenePreparationStatus()`：
-  接收 CPU 资源请求、推进后端准备并返回阶段、已提交数、已完成数和错误。
+- `beginScenePreparation()` / `scenePreparationStatus()`：
+  接收 CPU 资源请求并返回阶段、根请求总数、已完成数和错误；不再暴露场景上传提交数。
   请求与状态定义在 `engine/render/SceneResourcePreparation.hpp`，不包含 Vulkan 类型。
 - `activatePreparedScene()`：在 Ready 后启用场景，再由 App 移交 CPU 内容。
   Ready 阶段仍允许 GUI 绘制和 resize，`sceneReady()` 直到启用后才为 true。
@@ -34,18 +34,29 @@ GUI 只访问主线程的资源。在完成移交之前，资源面板和场景�
   保留基础呈现。取消已启用的准备不会销毁正在使用的场景。
 - `VulkanUploadService`：由 renderer 随基础呈现创建并长期持有，管理上传命令池、
   UploadContext、请求队列、全局预算、批次提交、fence 查询和传输资源回收。
-- `VulkanScenePreparation`：协调 Demo 的资源准备和 pipeline 创建；纹理和 mesh
-  请求共享上传服务，材质参数仍使用现有 host-visible buffer 路径。
+- `VulkanResourcePreparation`：统一管理全部七类 Asset 的准备记录、依赖、状态、取消和完成发布。
+  `IResourcePreparation` 的具体实现只负责创建 GPU 对象、构建上传请求、发布到 cache。
+  准备 ticket 独立于上传 ticket；空上传请求跳过 UploadService，仍通过 advance 完成发布。
+  Renderer 保留外部接口并转发；组件借用 Device/UploadService，不推进共享服务的 tick。
+  同步重导入适配器 `uploadTextureAndWait()` 也由该组件实现，显式 drain 后返回未发布纹理。
+  析构只取消并释放自己的 ticket；已提交资源继续由上传服务保活，不清空或关闭共享服务。
+- `VulkanScenePreparation`：仅组合通用 Model / MaterialTemplate / ShaderProgram 准备 ticket，
+  等待 Ready 后创建 pipeline，协调场景启用与取消；不持有 UploadService 或 UploadTicket。
+  状态为 PreparingResources → PreparingPipelines → Ready → Activated；失败/取消保持 GUI 可用。
+  进度按根请求计数，一个 Model Ready 表示其所有依赖已就绪，不表示单个 GPU copy。
 - `advanceResourcePreparation()`：每帧推进共享上传与结果发布；App 即使处于 Idle / Ready
-  也调用它。`advanceScenePreparation()` 仅保留为兼容入口，两者每帧选一个调用。
-- `prepareTexture()` / `texturePreparationStatus()` / `cancelTexturePreparation()` /
-  `releaseTexturePreparation()`：独立贴图准备，不需要模型或场景 pipeline；
-  上传完成后才增量发布到 cache。取消未完成请求不会破坏已有贴图。
+  也调用它。顺序为 UploadService tick → 通用 Preparation 发布 → 场景就绪检查和 pipeline 创建。
+  原 `advanceScenePreparation()` 兼容入口已删除。
+- `prepareTexture()` / `prepareMesh()`：独立资源准备，不需要模型或场景 pipeline。
+  输入改为 `AssetManager::snapshot(handle)`：同版本已驻留返回 CacheHit，准备中返回 Shared，
+  新任务返回 Started；三者均有独立的调用方 ticket。共享任务只有最后一个等待者取消才取消上传。
+  `resourcePreparationStatus()` / `cancelResourcePreparation()` / `releaseResourcePreparation()`
+  共用准备 ticket；Ready 表示全部上传完成且已经发布到 cache。取消未完成请求不破坏已有资源。
 - `DemoContentLoader::loadBuiltins()` / `loadModel()`：将默认纹理、材质模板和
   shader 的创建与具体模型导入分开；`load()` 保留同步组合入口供 CPU 测试使用。
-- `RenderAssetCache::initialize()`：根据材质模板建立布局，不要求存在模型。
-  `beginUpload()` 准备 Demo 的资源列表和描述符；`prepareNext()` 通过共享服务准备资源。
-  旧 `create()` / `uploadNext()` 同步路径已删除。
+- `RenderAssetCache`：只保存已发布资源和版本，不调度上传。
+  原 initialize / beginUpload / prepareNext、pending 列表和全局材质 descriptor pool 已删除。
+  材质布局由 GpuMaterialTemplate 持有，每个 GpuMaterial 的 descriptor pool 由通用准备发布。
 - `AppContentLoading.cpp`：管理 Preparing、Uploading、Finalizing、Ready、Failed
   应用状态，负责 CPU 工作线程、提交准备请求、展示状态、结果移交和请求取消。
   不创建命令池、不操作上传批次、不查询 fence、不构造 Vulkan pipeline。
@@ -73,15 +84,22 @@ App 整体的 RHI 抽象。纹理重导入的传输已接入共享服务，但�
 独立纹理。App 不再创建上传 CommandPool / UploadContext；缓存替换、descriptor 更新及
 CPU/磁盘事务仍由原提交流程完成，替换前等待已有渲染结束。
 
+独立版本更新先上传新 GPU 对象，旧缓存继续可用。上传成功后在帧边界等待 GPU 空闲并提交替换；
+材质引用由 cache 更新，GUI preview 按缓存发布序号刷新 descriptor。当前替换提交可能阻塞一帧，
+并非无等待的资源退休队列。advanceResourcePreparation 必须位于录制/绘制本帧 GUI 和场景之前。
+缓存绑定一个资产 domain；场景发布也记录版本，AssetManager 移交 App 后仍可缓存命中。
+缓存 reset 前必须结束相关准备任务并同步渲染使用；准备 ticket 的 Ready 是历史完成结果，
+不能用旧 ticket 判断该版本现在是否仍驻留。
+
 共享服务的请求持有不可变 CPU 来源和目标 GPU 对象的引用，入队只接管数据，
 实际 staging 拷贝在 tick 中执行。独立贴图和 mesh 上传完成前不对 cache 查询可见。
 服务的 submittedBytes / completedBytes 按提交与 fence 完成分别更新；
-场景状态仍按已准备好的资源数报告，包含不经 transfer 的材质创建。
+场景状态按就绪根请求数报告，依赖上传与不经 transfer 的设备对象创建都由通用准备处理。
 
 每批默认按 4 ms、16 MiB 或 16 个传输 operation 的软阈值停止添加，
 最多保留一个在途批次。硬限制默认为 256 MiB staging、512 MiB 活跃请求的逻辑源数据量、
 1024 个未释放 ticket。单个 operation 超出硬上限会明确拒绝；暂时排队空间不足返回 QueueFull。
-请求可以跨批次，多个请求可以合入一批。Demo 适配器当前逐资源推进，后续可扩大准备窗口。
+请求可以跨批次，多个请求可以合入一批。Demo 没有独立上传适配器或单独的传输预算。
 
 预算在完整 operation 之间检查；分配 GPU 对象、单次 staging 拷贝和 pipeline 创建仍可能
 使主线程超时。此版本不提供传输线程、staging 页池或大资源分块。
@@ -109,8 +127,26 @@ GPU 测试默认不注册，避免无图形环境下自动失败。它们也可�
 
 - `--startup-test`：设备本地 buffer/image 上传回读、已有 image 局部更新与未覆盖内容保留、
   多 mip/数组层/padding/BC7 边缘复制、多操作请求、批次合并与取消、容量与重试、
-  独立贴图上传和 ImGui 预览，以及空 GUI、空场景 resize、CPU 取消、缺失模型、重复请求拒绝、
+  独立贴图上传和 ImGui 预览、Mesh 分批完成与取消、零上传准备和发布失败隔离，
+  以及空 GUI、空场景 resize、CPU 取消、缺失模型、重复请求拒绝、
   上传取消与重启、Ready 时 resize 与取消、CPU 来源生命周期和上传中关闭。
 - `--render-test` / `--editor-test`：缺失 shader 后的 GUI 和 resize、测试代码发起重试、上传中
   持续绘制 GUI、完整场景绘制；保留原有贴图替换、重导入及 resize 验证。
 - `--asset-test`：原有 CPU 资源导入与校验。
+
+
+## 通用资产准备入口
+
+Renderer 的 `prepareTexture / prepareMesh / prepareShader / prepareShaderProgram /
+prepareMaterialTemplate / prepareMaterial / prepareModel` 均接收 `assets.snapshot(handle)`，
+返回可查询、取消、释放的 PreparationTicket。prepareModel 自动准备传递依赖，
+所有类型共用 CacheHit / Shared / Started 规则，并将依赖版本纳入比较。
+
+Shader、Program、Template、Material、Model 自身不产生 transfer 请求；Material 的参数
+当前写入 host-visible buffer。它们仍需创建设备对象或等待 Texture/Mesh 依赖上传。
+父请求在依赖就绪前保持 Preparing，字节数仅表示自身传输。取消父请求释放依赖订阅，
+不会取消仍被其他调用方等待的共享任务，也不清除已发布缓存。
+
+ShaderProgram Ready 只保证模块与布局可用；完整 graphics pipeline 仍需渲染上下文。
+`GraphicsPipeline::CreateInfo::program` 可复用已准备模块。
+Demo ScenePreparation 仅组合这些通用准备并协调 pipeline/场景激活；独立 Scene Upload 路径已删除。

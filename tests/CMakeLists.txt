@@ -1,6 +1,7 @@
 add_library(rubia_smoke_tests STATIC
     AppSmokeTests.cpp
     AppStartupTests.cpp
+    AssetPreparationTests.cpp
     VulkanUploadTests.cpp
     VulkanUploadTests.hpp
     AppSmokeTests.hpp
@@ -21,6 +22,9 @@ target_link_libraries(rubia_smoke_tests
 target_link_libraries(VulkanApp PRIVATE rubia_smoke_tests)
 
 if(BUILD_TESTING)
+    add_executable(asset_revision_tests AssetRevisionTests.cpp)
+    target_link_libraries(asset_revision_tests PRIVATE Rubia::Engine rubia_project_options)
+    add_test(NAME asset-revision-test COMMAND asset_revision_tests)
     add_executable(editor_theme_tests EditorThemeTests.cpp)
     target_link_libraries(editor_theme_tests PRIVATE Rubia::Editor imgui)
     add_test(NAME editor-theme-test COMMAND editor_theme_tests)

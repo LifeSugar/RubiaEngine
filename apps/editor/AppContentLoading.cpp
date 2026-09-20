@@ -103,8 +103,8 @@ void App::updateContentLoading()
             if (status.total != 0 && status.completed * 10 / status.total >
                 previousCompleted * 10 / status.total)
             {
-                std::clog << "[Content] Uploaded " << status.completed
-                    << '/' << status.total << " resources ("
+                std::clog << "[Content] Prepared " << status.completed
+                    << '/' << status.total << " root resources ("
                     << status.completed * 100 / status.total << "%)\n";
             }
             if (status.state == render::ScenePreparationState::PreparingPipelines &&

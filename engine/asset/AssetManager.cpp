@@ -296,6 +296,22 @@ MeshAssetHandle AssetManager::createMesh(MeshAsset::CreateInfo createInfo)
     return meshes_.emplace(std::move(createInfo));
 }
 
+MeshAsset AssetManager::replaceMesh(MeshAssetHandle handle, MeshAsset replacement)
+{
+    if (!replacement)
+    {
+        throw std::invalid_argument("cannot replace mesh with an incomplete asset");
+    }
+    for (const auto& submesh : replacement.submeshes())
+    {
+        if (submesh.material && !materials_.contains(submesh.material))
+        {
+            throw std::invalid_argument("mesh references a material outside this AssetManager");
+        }
+    }
+    return meshes_.replace(handle, std::move(replacement));
+}
+
 ShaderAssetHandle AssetManager::createShader(
     ShaderAsset::CreateInfo createInfo)
 {
@@ -393,6 +409,41 @@ bool AssetManager::contains(ShaderAssetHandle handle) const noexcept
 bool AssetManager::contains(ModelAssetHandle handle) const noexcept
 {
     return models_.contains(handle);
+}
+
+AssetContentRevision AssetManager::contentRevision(TextureAssetHandle handle) const
+{
+    return textures_.contentRevision(handle);
+}
+
+AssetContentRevision AssetManager::contentRevision(MaterialTemplateAssetHandle handle) const
+{
+    return materialTemplates_.contentRevision(handle);
+}
+
+AssetContentRevision AssetManager::contentRevision(MaterialAssetHandle handle) const
+{
+    return materials_.contentRevision(handle);
+}
+
+AssetContentRevision AssetManager::contentRevision(MeshAssetHandle handle) const
+{
+    return meshes_.contentRevision(handle);
+}
+
+AssetContentRevision AssetManager::contentRevision(ShaderAssetHandle handle) const
+{
+    return shaders_.contentRevision(handle);
+}
+
+AssetContentRevision AssetManager::contentRevision(ShaderProgramAssetHandle handle) const
+{
+    return shaderPrograms_.contentRevision(handle);
+}
+
+AssetContentRevision AssetManager::contentRevision(ModelAssetHandle handle) const
+{
+    return models_.contentRevision(handle);
 }
 
 bool AssetManager::isMaterialTemplateCurrent(

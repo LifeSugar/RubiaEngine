@@ -63,6 +63,10 @@ class ShaderProgramAsset final
         return shaders_;
     }
     [[nodiscard]] const ShaderProgramInterface &interface() const noexcept { return interface_; }
+    [[nodiscard]] explicit operator bool() const noexcept
+    {
+        return shaders_.size() == 2;
+    }
     [[nodiscard]] uint64_t codeSignature() const noexcept { return codeSignature_; }
     [[nodiscard]] uint64_t layoutSignature() const noexcept { return layoutSignature_; }
     [[nodiscard]] uint64_t interfaceSignature() const noexcept { return interfaceSignature_; }

@@ -1,6 +1,7 @@
 #include "vulkan/GraphicsPipeline.hpp"
 
 #include "vulkan/Device.hpp"
+#include "vulkan/GpuPreparedAssets.hpp"
 
 #include <array>
 #include <stdexcept>
@@ -91,23 +92,33 @@ void GraphicsPipeline::create(
     const Device& device,
     const CreateInfo& createInfo)
 {
-    if (!device ||
-        createInfo.renderPass == VK_NULL_HANDLE ||
-        createInfo.vertexShaderSpirv.empty() ||
-        createInfo.vertexEntryPoint.empty() ||
-        createInfo.fragmentShaderSpirv.empty() ||
-        createInfo.fragmentEntryPoint.empty() ||
+    if (!device || createInfo.renderPass == VK_NULL_HANDLE ||
+        (!createInfo.program &&
+         (createInfo.vertexShaderSpirv.empty() || createInfo.vertexEntryPoint.empty() ||
+          createInfo.fragmentShaderSpirv.empty() || createInfo.fragmentEntryPoint.empty())) ||
         createInfo.sampleCount == 0)
     {
         throw std::invalid_argument("graphics pipeline create info is incomplete");
     }
 
-    const ShaderModule vertexModule(
-        device.get(),
-        createInfo.vertexShaderSpirv);
-    const ShaderModule fragmentModule(
-        device.get(),
-        createInfo.fragmentShaderSpirv);
+    std::unique_ptr<ShaderModule> vertexModule;
+    std::unique_ptr<ShaderModule> fragmentModule;
+    auto shaderStages = createInfo.program ? createInfo.program->stages()
+                                           : std::vector<VkPipelineShaderStageCreateInfo>(2);
+    if (!createInfo.program)
+    {
+        vertexModule = std::make_unique<ShaderModule>(device.get(), createInfo.vertexShaderSpirv);
+        fragmentModule =
+            std::make_unique<ShaderModule>(device.get(), createInfo.fragmentShaderSpirv);
+        shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        shaderStages[0].module = vertexModule->get();
+        shaderStages[0].pName = createInfo.vertexEntryPoint.c_str();
+        shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        shaderStages[1].module = fragmentModule->get();
+        shaderStages[1].pName = createInfo.fragmentEntryPoint.c_str();
+    }
 
     VkPipelineLayout newLayout = VK_NULL_HANDLE;
     VkPipeline newPipeline = VK_NULL_HANDLE;
@@ -132,18 +143,6 @@ void GraphicsPipeline::create(
         {
             throw std::runtime_error("failed to create pipeline layout!");
         }
-
-        std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{};
-        shaderStages[0].sType =
-            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-        shaderStages[0].module = vertexModule.get();
-        shaderStages[0].pName = createInfo.vertexEntryPoint.c_str();
-        shaderStages[1].sType =
-            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-        shaderStages[1].module = fragmentModule.get();
-        shaderStages[1].pName = createInfo.fragmentEntryPoint.c_str();
 
         VkPipelineVertexInputStateCreateInfo vertexInput{};
         vertexInput.sType =

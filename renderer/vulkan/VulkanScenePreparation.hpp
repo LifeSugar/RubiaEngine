@@ -1,23 +1,27 @@
 #pragma once
 
+#include "asset/AssetSnapshot.hpp"
 #include "render/SceneResourcePreparation.hpp"
-#include "vulkan/VulkanUploadService.hpp"
-
+#include "vulkan/ResourcePreparationTypes.hpp"
 #include <exception>
-#include <memory>
+#include <optional>
+#include <vector>
 
 namespace rubia::rhi::vulkan
 {
 class RenderAssetCache;
 class VulkanRenderer;
+class VulkanResourcePreparation;
 
-/// Backend-internal, render-thread-only preparation of an initially empty
-/// scene. Renderer, cache, and device must outlive this session.
+// Coordinates generic asset preparations, pipeline creation and scene activation.
+// It owns no upload requests, command pools, transfer queues or fences.
+// Renderer, cache and preparation manager outlive this render-thread-only session.
 class VulkanScenePreparation final
 {
 public:
-    VulkanScenePreparation(const Device& device, VulkanRenderer& renderer, RenderAssetCache& cache,
-                           VulkanUploadService& uploads, render::SceneResourceRequest request);
+    VulkanScenePreparation(VulkanRenderer& renderer, RenderAssetCache& cache,
+                           VulkanResourcePreparation& preparations,
+                           render::SceneResourceRequest request);
     ~VulkanScenePreparation();
     VulkanScenePreparation(const VulkanScenePreparation&) = delete;
     VulkanScenePreparation& operator=(const VulkanScenePreparation&) = delete;
@@ -26,22 +30,34 @@ public:
     void advance();
     void activate();
     void cancel() noexcept;
-    [[nodiscard]] render::ScenePreparationStatus status() const;
+    [[nodiscard]] render::ScenePreparationStatus status() const
+    {
+        return status_;
+    }
     [[nodiscard]] bool ownsResources() const noexcept
     {
         return ownsResources_;
     }
 
 private:
+    struct Root
+    {
+        using Source = std::variant<asset::AssetSnapshot<asset::ModelAsset>,
+                                    asset::AssetSnapshot<asset::MaterialTemplateAsset>,
+                                    asset::AssetSnapshot<asset::ShaderProgramAsset>>;
+        std::optional<Source> source;
+        ResourcePreparationTicket ticket;
+        bool ready = false;
+    };
     void discardResources() noexcept;
     void fail(const std::exception& error);
 
-    const Device& device_;
     VulkanRenderer& renderer_;
     RenderAssetCache& cache_;
+    VulkanResourcePreparation& preparations_;
     render::SceneResourceRequest request_;
     render::ScenePreparationStatus status_;
+    std::vector<Root> roots_;
     bool ownsResources_ = false;
-    VulkanUploadService& uploads_;
 };
 } // namespace rubia::rhi::vulkan

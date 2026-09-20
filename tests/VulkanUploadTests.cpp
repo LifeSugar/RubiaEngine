@@ -1,5 +1,7 @@
 #include "VulkanUploadTests.hpp"
 #include "vulkan/Fence.hpp"
+#include "vulkan/RenderAssetCache.hpp"
+#include "vulkan/VulkanResourcePreparation.hpp"
 #include "vulkan/VulkanUploadService.hpp"
 #include <cstring>
 #include <stdexcept>
@@ -293,9 +295,446 @@ void runImageUpdateTests(const Device& device)
     bad.destination = std::make_shared<Image>(device, desc);
     reject(bad, UploadEnqueueCode::UnsupportedRequest, "3D service limitation misclassified");
 }
+std::shared_ptr<asset::MeshAsset> preparationMesh()
+{
+    asset::MeshAsset::CreateInfo info;
+    info.vertices.resize(3);
+    info.indices = {0, 1, 2};
+    info.submeshes.push_back({0, 3, 0, 3, {}});
+    return std::make_shared<asset::MeshAsset>(std::move(info));
+}
+void runMeshPreparationTests(const Device& device)
+{
+    VulkanUploadService uploads(device);
+    RenderAssetCache cache;
+    VulkanResourcePreparation preparation(device, uploads);
+    const auto domain = std::make_shared<asset::AssetDomainTag>();
+    const asset::MeshAssetHandle meshHandle{0, 1};
+    auto source = preparationMesh();
+    const auto mesh = preparation.prepareMesh(cache, {domain, {meshHandle, 1}, source});
+    require(mesh.accepted(), "standalone mesh preparation was rejected");
+    auto shared = preparation.prepareMesh(cache, {domain, {meshHandle, 1}, source});
+    require(shared.accepted() && shared.disposition == ResourcePreparationDisposition::Shared,
+            "duplicate preparation was not shared");
+    preparation.cancel(shared.ticket);
+    preparation.release(shared.ticket);
+    // Type is part of the target: identical texture/mesh slot numbers must coexist.
+    asset::TextureAsset::CreateInfo image;
+    image.width = image.height = 2;
+    image.format = asset::TextureFormat::RGBA8UNorm;
+    image.payload.assign(16, std::byte{0x42});
+    const asset::TextureAssetHandle textureHandle{0, 1};
+    const auto texture = preparation.prepareTexture(
+        cache,
+        {domain, {textureHandle, 1}, std::make_shared<asset::TextureAsset>(std::move(image))});
+    require(texture.accepted(), "texture and mesh slot identities collided");
+    bool releaseRejected = false;
+    try
+    {
+        preparation.release(mesh.ticket);
+    }
+    catch (const std::logic_error&)
+    {
+        releaseRejected = true;
+    }
+    require(releaseRejected, "unfinished preparation could be released");
+
+    // One indexed mesh has vertex and index operations; finish only the first batch.
+    uploads.tick({4096, 1, std::chrono::seconds(1)});
+    device.waitIdle();
+    uploads.tick({0, 0, std::chrono::microseconds{0}});
+    preparation.advance();
+    const auto partial = preparation.status(mesh.ticket);
+    require(partial.state == ResourcePreparationState::Uploading && partial.completedBytes > 0 &&
+                partial.completedBytes < partial.totalBytes && !cache.tryMesh(meshHandle),
+            "partial mesh upload was published");
+    uploads.drain();
+    require(preparation.status(mesh.ticket).state == ResourcePreparationState::Uploading &&
+                !cache.tryMesh(meshHandle),
+            "transfer completion published a mesh without advance");
+    preparation.advance();
+    const auto complete = preparation.status(mesh.ticket);
+    require(complete.state == ResourcePreparationState::Ready &&
+                complete.completedBytes == complete.totalBytes &&
+                complete.submittedBytes == complete.totalBytes && cache.tryMesh(meshHandle) &&
+                cache.mesh(meshHandle).indexBuffer() &&
+                cache.mesh(meshHandle).submeshes().front().indexCount == 3 &&
+                preparation.status(texture.ticket).state == ResourcePreparationState::Ready &&
+                cache.tryTexture(textureHandle),
+            "common preparation did not publish both asset types");
+    preparation.release(mesh.ticket);
+    preparation.release(texture.ticket);
+    require(preparation.empty() && cache.tryMesh(meshHandle),
+            "ticket release removed published mesh");
+
+    // Cancellation after one submission must retain the source until that batch retires.
+    const asset::MeshAssetHandle cancelledHandle{1, 1};
+    auto cancelledSource = preparationMesh();
+    std::weak_ptr<asset::MeshAsset> weak = cancelledSource;
+    const auto cancelled =
+        preparation.prepareMesh(cache, {domain, {cancelledHandle, 1}, cancelledSource});
+    require(cancelled.accepted(), "cancelled mesh test enqueue failed");
+    cancelledSource.reset();
+    uploads.tick({4096, 1, std::chrono::seconds(1)});
+    preparation.cancel(cancelled.ticket);
+    require(preparation.status(cancelled.ticket).state == ResourcePreparationState::Cancelled &&
+                !weak.expired() && !cache.tryMesh(cancelledHandle),
+            "mesh cancellation released in-flight resources or published a partial mesh");
+    preparation.release(cancelled.ticket);
+    uploads.drain();
+    preparation.advance();
+    require(weak.expired() && !cache.tryMesh(cancelledHandle),
+            "cancelled mesh leaked or was published");
+}
+
+struct PreparationProbe
+{
+    int created = 0;
+    int built = 0;
+    int published = 0;
+    int destroyed = 0;
+    bool failCreate = false;
+    bool failPublish = false;
+};
+class NoUploadPreparation final : public IResourcePreparation
+{
+public:
+    explicit NoUploadPreparation(PreparationProbe& probe) : probe_(probe)
+    {
+    }
+    ~NoUploadPreparation() override
+    {
+        ++probe_.destroyed;
+    }
+    void createGpuResources(const Device&) override
+    {
+        ++probe_.created;
+        if (probe_.failCreate)
+        {
+            throw std::runtime_error("probe create failed");
+        }
+    }
+    UploadRequest buildUploadRequest() override
+    {
+        ++probe_.built;
+        return {};
+    }
+    void publish() override
+    {
+        if (probe_.failPublish)
+        {
+            throw std::runtime_error("probe publish failed");
+        }
+        ++probe_.published;
+    }
+
+private:
+    PreparationProbe& probe_;
+};
+void runNoUploadPreparationTests(const Device& device)
+{
+    // Occupy the only upload ticket. Empty-transfer preparations must still work.
+    VulkanUploadService uploads(device, {1024, 2048, 1});
+    auto bytes = std::make_shared<std::vector<std::byte>>(16, std::byte{0x31});
+    auto pending = request(destination(device), bytes);
+    const auto occupied = uploads.tryEnqueue(pending);
+    require(occupied.accepted(), "no-upload test could not occupy service capacity");
+    RenderAssetCache cache;
+    PreparationProbe ready, cancelled, failed, retry, rejected, createFailed;
+    VulkanResourcePreparation preparation(device, uploads, 2);
+    const auto domain = std::make_shared<asset::AssetDomainTag>();
+    const auto enqueue = [&](uint32_t index, PreparationProbe& probe)
+    {
+        return preparation.prepare({&cache, asset::MeshAssetHandle{index, 1}, 1, domain},
+                                   std::make_unique<NoUploadPreparation>(probe));
+    };
+    auto a = enqueue(0, ready);
+    auto b = enqueue(1, cancelled);
+    require(a.accepted() && b.accepted() && ready.created == 1 && ready.built == 1 &&
+                ready.published == 0 && preparation.status(a.ticket).totalBytes == 0,
+            "empty-transfer preparation required upload capacity or published early");
+    require(enqueue(2, rejected).code == ResourcePreparationCode::QueueFull &&
+                rejected.created == 0 && rejected.destroyed == 1,
+            "no-upload preparation records were not bounded before creation");
+    bool foreignThreadRejected = false;
+    std::thread foreign(
+        [&]
+        {
+            try
+            {
+                preparation.advance();
+            }
+            catch (const std::logic_error&)
+            {
+                foreignThreadRejected = true;
+            }
+        });
+    foreign.join();
+    require(foreignThreadRejected, "no-upload preparation bypassed render-thread ownership");
+    preparation.cancel(b.ticket);
+    preparation.advance();
+    preparation.advance();
+    require(preparation.status(a.ticket).state == ResourcePreparationState::Ready &&
+                ready.published == 1 && ready.destroyed == 1 &&
+                preparation.status(b.ticket).state == ResourcePreparationState::Cancelled &&
+                cancelled.published == 0 && cancelled.destroyed == 1,
+            "no-upload completion/cancellation failed or published more than once");
+    preparation.release(a.ticket);
+    preparation.release(b.ticket);
+    failed.failPublish = true;
+    a = enqueue(0, failed);
+    b = enqueue(1, retry);
+    require(a.accepted() && b.accepted(), "terminal records did not release preparation capacity");
+    preparation.advance();
+    require(preparation.status(a.ticket).state == ResourcePreparationState::Failed &&
+                preparation.status(a.ticket).error == "probe publish failed" &&
+                failed.destroyed == 1 &&
+                preparation.status(b.ticket).state == ResourcePreparationState::Ready,
+            "publication failure was lost or damaged another preparation");
+    preparation.release(a.ticket);
+    preparation.release(b.ticket);
+    createFailed.failCreate = true;
+    require(enqueue(0, createFailed).code == ResourcePreparationCode::Failed &&
+                createFailed.destroyed == 1 && preparation.empty(),
+            "creation failure leaked a record");
+    require(uploads.query(occupied.ticket).state == UploadState::Queued &&
+                uploads.stagedBytes() == 0,
+            "preparation advanced unrelated service uploads");
+    uploads.cancel(occupied.ticket);
+    uploads.releaseTicket(occupied.ticket);
+}
+void runVersionedPreparationTests(const Device& device)
+{
+    // One transfer record proves that duplicate preparations do not enqueue a second upload.
+    VulkanUploadService uploads(device, {1024, 2048, 1});
+    RenderAssetCache cache;
+    PreparationProbe failed;
+    VulkanResourcePreparation preparation(device, uploads);
+    asset::AssetManager assets;
+    asset::TextureAsset::CreateInfo info;
+    info.width = info.height = 2;
+    info.format = asset::TextureFormat::RGBA8UNorm;
+    info.payload.assign(16, std::byte{0x41});
+    const auto handle = assets.createTexture(info);
+    const auto v1 = assets.snapshot(handle);
+    const auto target = [&](const auto& snapshot)
+    {
+        return ResourcePreparationTarget{&cache, snapshot.version.handle,
+                                         snapshot.version.contentRevision, snapshot.domain};
+    };
+    auto a = preparation.prepareTexture(cache, v1);
+    auto b = preparation.prepareTexture(cache, v1);
+    require(a.accepted() && b.accepted() && a.ticket.value != b.ticket.value &&
+                b.disposition == ResourcePreparationDisposition::Shared,
+            "identical texture versions did not share one upload with separate caller tickets");
+    preparation.cancel(a.ticket);
+    preparation.release(a.ticket);
+    uploads.drain();
+    // Sharing still works after transfer completion but before publication.
+    auto c = preparation.prepareTexture(cache, v1);
+    require(c.accepted() && c.disposition == ResourcePreparationDisposition::Shared,
+            "completed but unpublished preparation was not shared");
+    preparation.advance();
+    require(preparation.status(b.ticket).state == ResourcePreparationState::Ready &&
+                preparation.status(c.ticket).state == ResourcePreparationState::Ready,
+            "one subscriber cancellation damaged the shared task");
+    const auto originalView = cache.texture(handle).view();
+    preparation.release(b.ticket);
+    preparation.release(c.ticket);
+    auto hit = preparation.prepareTexture(cache, v1);
+    require(hit.accepted() && hit.disposition == ResourcePreparationDisposition::CacheHit &&
+                preparation.status(hit.ticket).state == ResourcePreparationState::Ready &&
+                cache.texture(handle).view() == originalView && uploads.stagedBytes() == 0,
+            "cache hit allocated/uploaded another texture or was not immediately ready");
+    preparation.release(hit.ticket);
+
+    info.payload.assign(16, std::byte{0x52});
+    static_cast<void>(assets.replaceTexture(handle, asset::TextureAsset(info)));
+    const auto v2 = assets.snapshot(handle);
+    a = preparation.prepareTexture(cache, v2);
+    b = preparation.prepareTexture(cache, v2);
+    require(a.accepted() && b.accepted(), "updated version was rejected");
+    uploads.tick({1024, 1, std::chrono::seconds(1)});
+    preparation.cancel(a.ticket);
+    preparation.cancel(b.ticket);
+    preparation.release(a.ticket);
+    preparation.release(b.ticket);
+    uploads.drain();
+    preparation.advance();
+    require(cache.texture(handle).view() == originalView &&
+                cache.inspectPreparation(target(v2)).resident == 1,
+            "cancelling all update subscribers destroyed the resident version");
+
+    a = preparation.prepareTexture(cache, v2);
+    require(a.accepted(), "cancelled version could not be retried");
+    uploads.drain();
+    // No free record until the completed upload is published; rejection must preserve it.
+    info.payload.assign(16, std::byte{0x63});
+    static_cast<void>(assets.replaceTexture(handle, asset::TextureAsset(info)));
+    const auto v3 = assets.snapshot(handle);
+    auto rejected = preparation.prepareTexture(cache, v3);
+    require(rejected.code == ResourcePreparationCode::QueueFull &&
+                preparation.status(a.ticket).state == ResourcePreparationState::Uploading &&
+                cache.inspectPreparation(target(v2)).requested == 2,
+            "rejected newer version superseded accepted work");
+    preparation.advance();
+    require(preparation.status(a.ticket).state == ResourcePreparationState::Ready &&
+                cache.texture(handle).view() != originalView &&
+                cache.inspectPreparation(target(v2)).resident == 2,
+            "texture replacement did not publish the requested revision");
+    preparation.release(a.ticket);
+    const auto secondView = cache.texture(handle).view();
+
+    // Publication failure retains the old cache entry and can be retried.
+    failed.failPublish = true;
+    a = preparation.prepare(target(v3), std::make_unique<NoUploadPreparation>(failed));
+    require(a.accepted(), "failure probe was not accepted");
+    preparation.advance();
+    require(preparation.status(a.ticket).state == ResourcePreparationState::Failed &&
+                cache.texture(handle).view() == secondView &&
+                cache.inspectPreparation(target(v3)).resident == 2,
+            "failed publication lost the previous texture/version");
+    preparation.release(a.ticket);
+    a = preparation.prepareTexture(cache, v3);
+    require(a.accepted(), "failed version could not be retried");
+    uploads.drain();
+    preparation.advance();
+    preparation.release(a.ticket);
+    require(cache.inspectPreparation(target(v3)).resident == 3 &&
+                !preparation.prepareTexture(cache, v2).accepted(),
+            "older version was allowed to overwrite newer resident data");
+
+    asset::AssetManager other;
+    const auto otherHandle = other.createTexture(info);
+    require(otherHandle == handle &&
+                !preparation.prepareTexture(cache, other.snapshot(otherHandle)).accepted(),
+            "identical handles from different asset domains collided");
+    auto recycled = v3;
+    ++recycled.version.handle.generation;
+    require(!preparation.prepareTexture(cache, recycled).accepted(),
+            "another generation was silently treated as the same resource");
+
+    // A second service with room for concurrent versions exercises supersession in flight.
+    VulkanUploadService concurrent(device);
+    VulkanResourcePreparation updates(device, concurrent);
+    static_cast<void>(assets.replaceTexture(handle, asset::TextureAsset(info)));
+    const auto v4 = assets.snapshot(handle);
+    a = updates.prepareTexture(cache, v4);
+    b = updates.prepareTexture(cache, v4);
+    require(a.accepted() && b.accepted(), "supersession setup failed");
+    concurrent.tick({1024, 1, std::chrono::seconds(1)});
+    static_cast<void>(assets.replaceTexture(handle, asset::TextureAsset(info)));
+    const auto v5 = assets.snapshot(handle);
+    c = updates.prepareTexture(cache, v5);
+    require(c.accepted() && updates.status(a.ticket).state == ResourcePreparationState::Cancelled &&
+                updates.status(b.ticket).state == ResourcePreparationState::Cancelled,
+            "new revision failed to supersede all observers of older pending work");
+    concurrent.drain();
+    updates.advance();
+    require(updates.status(c.ticket).state == ResourcePreparationState::Ready &&
+                cache.inspectPreparation(target(v5)).resident == 5,
+            "older in-flight completion overwrote the latest texture");
+    updates.release(a.ticket);
+    updates.release(b.ticket);
+    updates.release(c.ticket);
+
+    // The same policy applies to Mesh, including unchanged buffer identity on cache hit.
+    asset::MeshAsset::CreateInfo meshInfo;
+    meshInfo.vertices.resize(3);
+    meshInfo.indices = {0, 1, 2};
+    meshInfo.submeshes.push_back({0, 3, 0, 3, {}});
+    const auto meshHandle = assets.createMesh(meshInfo);
+    a = updates.prepareMesh(cache, assets.snapshot(meshHandle));
+    b = updates.prepareMesh(cache, assets.snapshot(meshHandle));
+    require(a.accepted() && b.disposition == ResourcePreparationDisposition::Shared,
+            "mesh preparation did not share");
+    concurrent.drain();
+    updates.advance();
+    const auto originalBuffer = cache.mesh(meshHandle).vertexBuffer();
+    updates.release(a.ticket);
+    updates.release(b.ticket);
+    a = updates.prepareMesh(cache, assets.snapshot(meshHandle));
+    require(a.disposition == ResourcePreparationDisposition::CacheHit &&
+                cache.mesh(meshHandle).vertexBuffer() == originalBuffer,
+            "mesh cache miss");
+    updates.release(a.ticket);
+    meshInfo.vertices[0].position.x = 2.0f;
+    static_cast<void>(assets.replaceMesh(meshHandle, asset::MeshAsset(meshInfo)));
+    const auto meshV2 = assets.snapshot(meshHandle);
+    a = updates.prepareMesh(cache, meshV2);
+    require(a.accepted() && cache.mesh(meshHandle).vertexBuffer() == originalBuffer,
+            "mesh update replaced the old buffer before completion");
+    concurrent.drain();
+    updates.advance();
+    require(updates.status(a.ticket).state == ResourcePreparationState::Ready &&
+                cache.mesh(meshHandle).vertexBuffer() != originalBuffer &&
+                cache.inspectPreparation(target(meshV2)).resident == 2,
+            "mesh update did not commit the new revision");
+    updates.release(a.ticket);
+}
+
+void runPreparationLifetimeTests(const Device& device)
+{
+    // Destroying a preparation component must not shut down the shared service,
+    // publish abandoned textures, or free resources that the GPU still uses.
+    for (const bool submitted : {false, true})
+    {
+        VulkanUploadService uploads(device, {1024, 2048, 2});
+        RenderAssetCache cache;
+        auto bytes = std::make_shared<std::vector<std::byte>>(16, std::byte{0x31});
+        auto survivorRequest = request(destination(device), bytes);
+        const auto survivor = uploads.tryEnqueue(survivorRequest);
+        require(survivor.accepted(), "shared service test enqueue failed");
+        ResourcePreparationTicket textureTicket;
+        const asset::TextureAssetHandle handle{0, 1};
+        std::weak_ptr<asset::TextureAsset> weakSource;
+        {
+            VulkanResourcePreparation preparation(device, uploads);
+            asset::TextureAsset::CreateInfo info;
+            info.width = info.height = 2;
+            info.format = asset::TextureFormat::RGBA8UNorm;
+            info.payload.assign(16, std::byte{0x42});
+            auto source = std::make_shared<asset::TextureAsset>(std::move(info));
+            weakSource = source;
+            const auto result = preparation.prepareTexture(
+                cache, {std::make_shared<asset::AssetDomainTag>(), {handle, 1}, source});
+            require(result.accepted(), "preparation lifetime test enqueue failed");
+            textureTicket = result.ticket;
+            source.reset();
+            preparation.advance();
+            require(preparation.status(textureTicket).state ==
+                            ResourcePreparationState::Preparing &&
+                        uploads.stagedBytes() == 0 && !cache.tryTexture(handle),
+                    "preparation advance submitted or prematurely published work");
+            if (submitted)
+            {
+                uploads.tick({64, 2, std::chrono::seconds(1)});
+                require(preparation.status(textureTicket).submittedBytes == 16,
+                        "texture did not enter the shared batch");
+            }
+        }
+        require(cache.empty() && !cache.tryTexture(handle) && weakSource.expired() == !submitted,
+                "preparation destruction published or incorrectly retained/released source");
+        // The destroyed component must release its service record, leaving room for another
+        // request.
+        auto retry = request(destination(device), bytes);
+        auto retried = uploads.tryEnqueue(retry);
+        require(retried.accepted(), "preparation destruction leaked its upload ticket");
+        uploads.drain();
+        require(weakSource.expired() &&
+                    uploads.query(survivor.ticket).state == UploadState::Completed,
+                "preparation destruction damaged other work or leaked in-flight references");
+        uploads.releaseTicket(survivor.ticket);
+        uploads.releaseTicket(retried.ticket);
+    }
+}
 } // namespace
 void runVulkanUploadTests(const Device& device)
 {
+    runPreparationLifetimeTests(device);
+    runMeshPreparationTests(device);
+    runNoUploadPreparationTests(device);
+    runVersionedPreparationTests(device);
     runImageUpdateTests(device);
     auto bytes = std::make_shared<std::vector<std::byte>>(16, std::byte{0x5a});
     auto a = destination(device);

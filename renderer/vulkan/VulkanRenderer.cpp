@@ -1,5 +1,5 @@
 #include "vulkan/VulkanRenderer.hpp"
-#include "vulkan/TextureUploadBuilder.hpp"
+#include "vulkan/VulkanResourcePreparation.hpp"
 
 #include "vulkan/GpuMaterial.hpp"
 #include "vulkan/Mesh.hpp"
@@ -384,6 +384,7 @@ void VulkanRenderer::createPresentation(const CreateInfo& createInfo)
 
         createFrameContexts(createInfo.framesInFlight);
         uploads_ = std::make_unique<VulkanUploadService>(device);
+        resourcePreparation_ = std::make_unique<VulkanResourcePreparation>(device, *uploads_);
     }
     catch (...)
     {
@@ -396,19 +397,14 @@ void VulkanRenderer::beginScenePreparation(
     RenderAssetCache& renderAssets, render::SceneResourceRequest request)
 {
     if (!*this || hasSceneResources() ||
-        (scenePreparation_ && scenePreparation_->ownsResources()) ||
-        !renderAssets.empty() || !pendingTextures_.empty())
+        (scenePreparation_ && scenePreparation_->ownsResources()) || !renderAssets.empty() ||
+        (resourcePreparation_ && !resourcePreparation_->empty()))
     {
         throw std::logic_error("scene preparation requires presentation and an empty scene/cache");
     }
     scenePreparation_ = std::make_unique<VulkanScenePreparation>(
-        context_->device(), *this, renderAssets, *uploads_, std::move(request));
+        *this, renderAssets, *resourcePreparation_, std::move(request));
     scenePreparation_->begin();
-}
-
-void VulkanRenderer::advanceScenePreparation()
-{
-    advanceResourcePreparation();
 }
 
 void VulkanRenderer::advanceResourcePreparation()
@@ -417,166 +413,129 @@ void VulkanRenderer::advanceResourcePreparation()
     {
         return;
     }
+    uploads_->tick();
+    resourcePreparation_->advance();
     if (scenePreparation_)
     {
         scenePreparation_->advance();
     }
-    uploads_->tick();
-    for (auto& pair : pendingTextures_)
-    {
-        auto& pending = pair.second;
-        if (pending.published || pending.cancelled || !pending.error.empty())
-        {
-            continue;
-        }
-        const auto status = uploads_->query({pair.first});
-        if (status.state == UploadState::Failed || status.state == UploadState::Cancelled)
-        {
-            pending.texture.reset();
-            continue;
-        }
-        if (status.state == UploadState::Completed)
-        {
-            try
-            {
-                pending.cache->publishTexture(pending.handle, std::move(*pending.texture));
-                pending.published = true;
-                pending.texture.reset();
-            }
-            catch (const std::exception& error)
-            {
-                pending.error = error.what();
-                pending.texture.reset();
-            }
-        }
-    }
 }
 
-UploadEnqueueResult VulkanRenderer::prepareTexture(
-    RenderAssetCache& cache, asset::TextureAssetHandle handle,
-    std::shared_ptr<const asset::TextureAsset> source)
+ResourcePreparationResult VulkanRenderer::prepareTexture(
+    RenderAssetCache& cache, asset::AssetSnapshot<asset::TextureAsset> source)
 {
-    if (!uploads_ || !handle || !source || !*source || cache.tryTexture(handle) ||
-        (scenePreparation_ && scenePreparation_->ownsResources()))
+    if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
     {
-        return {UploadEnqueueCode::InvalidRequest,
+        return {ResourcePreparationCode::InvalidRequest,
                 {},
-                "texture preparation requires a new asset slot and no scene preparation"};
+                "texture preparation requires presentation and no scene preparation"};
     }
-    for (const auto& pair : pendingTextures_)
-    {
-        if (pair.second.cache == &cache && pair.second.handle.index == handle.index)
-        {
-            return {UploadEnqueueCode::InvalidRequest,
-                    {},
-                    "texture slot already has a preparation ticket"};
-        }
-    }
-    auto texture = std::make_shared<GpuTexture>();
-    auto info = makeTextureCreateInfo(*source);
-    texture->allocate(context_->device(), info);
-    auto request = makeTextureUploadRequest(texture, std::move(source));
-    auto result = uploads_->tryEnqueue(request);
-    if (result.accepted())
-    {
-        try
-        {
-            pendingTextures_.emplace(result.ticket.value,
-                                     PendingTexturePreparation{&cache, handle, texture});
-        }
-        catch (...)
-        {
-            uploads_->cancel(result.ticket);
-            uploads_->releaseTicket(result.ticket);
-            throw;
-        }
-    }
-    return result;
+    return resourcePreparation_->prepareTexture(cache, std::move(source));
 }
 
+ResourcePreparationResult VulkanRenderer::prepareMesh(RenderAssetCache& cache,
+                                                      asset::AssetSnapshot<asset::MeshAsset> source)
+{
+    if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
+    {
+        return {ResourcePreparationCode::InvalidRequest,
+                {},
+                "mesh preparation requires presentation and no scene preparation"};
+    }
+    return resourcePreparation_->prepareMesh(cache, std::move(source));
+}
+
+ResourcePreparationResult VulkanRenderer::prepareShader(
+    RenderAssetCache& cache, asset::AssetSnapshot<asset::ShaderAsset> source)
+{
+    if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
+    {
+        return {ResourcePreparationCode::InvalidRequest,
+                {},
+                "resource preparation requires presentation and no scene preparation"};
+    }
+    return resourcePreparation_->prepareShader(cache, std::move(source));
+}
+ResourcePreparationResult VulkanRenderer::prepareShaderProgram(
+    RenderAssetCache& cache, asset::AssetSnapshot<asset::ShaderProgramAsset> source)
+{
+    if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
+    {
+        return {ResourcePreparationCode::InvalidRequest,
+                {},
+                "resource preparation requires presentation and no scene preparation"};
+    }
+    return resourcePreparation_->prepareShaderProgram(cache, std::move(source));
+}
+ResourcePreparationResult VulkanRenderer::prepareMaterialTemplate(
+    RenderAssetCache& cache, asset::AssetSnapshot<asset::MaterialTemplateAsset> source)
+{
+    if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
+    {
+        return {ResourcePreparationCode::InvalidRequest,
+                {},
+                "resource preparation requires presentation and no scene preparation"};
+    }
+    return resourcePreparation_->prepareMaterialTemplate(cache, std::move(source));
+}
+ResourcePreparationResult VulkanRenderer::prepareMaterial(
+    RenderAssetCache& cache, asset::AssetSnapshot<asset::MaterialAsset> source)
+{
+    if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
+    {
+        return {ResourcePreparationCode::InvalidRequest,
+                {},
+                "resource preparation requires presentation and no scene preparation"};
+    }
+    return resourcePreparation_->prepareMaterial(cache, std::move(source));
+}
+ResourcePreparationResult VulkanRenderer::prepareModel(
+    RenderAssetCache& cache, asset::AssetSnapshot<asset::ModelAsset> source)
+{
+    if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
+    {
+        return {ResourcePreparationCode::InvalidRequest,
+                {},
+                "resource preparation requires presentation and no scene preparation"};
+    }
+    return resourcePreparation_->prepareModel(cache, std::move(source));
+}
 GpuTexture VulkanRenderer::uploadTextureAndWait(std::shared_ptr<const asset::TextureAsset> source)
 {
-    if (!uploads_ || !source || !*source ||
-        (scenePreparation_ && scenePreparation_->ownsResources()))
+    if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
     {
         throw std::logic_error(
-            "blocking texture upload requires valid assets and no scene preparation");
+            "blocking texture upload requires presentation and no scene preparation");
     }
-    auto texture = std::make_shared<GpuTexture>();
-    auto info = makeTextureCreateInfo(*source);
-    texture->allocate(context_->device(), info);
-    auto request = makeTextureUploadRequest(texture, std::move(source));
-    auto result = uploads_->tryEnqueue(request);
-    if (result.code == UploadEnqueueCode::QueueFull)
-    {
-        uploads_->drain();
-        result = uploads_->tryEnqueue(request);
-    }
-    if (!result.accepted())
-    {
-        throw std::runtime_error(result.error.empty() ? "texture upload queue is full"
-                                                      : result.error);
-    }
-    try
-    {
-        uploads_->drain();
-        const auto status = uploads_->query(result.ticket);
-        if (status.state != UploadState::Completed)
-        {
-            throw std::runtime_error("texture upload failed: " + status.error);
-        }
-    }
-    catch (...)
-    {
-        uploads_->cancel(result.ticket);
-        uploads_->releaseTicket(result.ticket);
-        throw;
-    }
-    uploads_->releaseTicket(result.ticket);
-    return std::move(*texture);
+    return resourcePreparation_->uploadTextureAndWait(std::move(source));
 }
 
-UploadStatus VulkanRenderer::texturePreparationStatus(UploadTicket ticket) const
+ResourcePreparationStatus VulkanRenderer::resourcePreparationStatus(
+    ResourcePreparationTicket ticket) const
 {
-    const auto& pending = pendingTextures_.at(ticket.value);
-    auto status = uploads_->query(ticket);
-    if (pending.cancelled)
+    if (!resourcePreparation_)
     {
-        status.state = UploadState::Cancelled;
+        throw std::out_of_range("unknown resource preparation ticket");
     }
-    else if (!pending.error.empty())
-    {
-        status.state = UploadState::Failed;
-        status.error = pending.error;
-    }
-    else if (status.state == UploadState::Completed && !pending.published)
-    {
-        status.state = UploadState::Uploading;
-    }
-    return status;
+    return resourcePreparation_->status(ticket);
 }
-void VulkanRenderer::cancelTexturePreparation(UploadTicket ticket)
+
+void VulkanRenderer::cancelResourcePreparation(ResourcePreparationTicket ticket)
 {
-    auto& pending = pendingTextures_.at(ticket.value);
-    if (uploadFinished(texturePreparationStatus(ticket).state))
+    if (!resourcePreparation_)
     {
-        return;
+        throw std::out_of_range("unknown resource preparation ticket");
     }
-    uploads_->cancel(ticket);
-    // A blocking drain may have completed the upload without publishing it.
-    // Service completion is immutable; preparation cancellation is tracked here.
-    pending.cancelled = true;
-    pending.texture.reset();
+    resourcePreparation_->cancel(ticket);
 }
-void VulkanRenderer::releaseTexturePreparation(UploadTicket ticket)
+
+void VulkanRenderer::releaseResourcePreparation(ResourcePreparationTicket ticket)
 {
-    // A completed upload must first be published (or explicitly failed).
-    if (!uploadFinished(texturePreparationStatus(ticket).state))
+    if (!resourcePreparation_)
     {
-        throw std::logic_error("texture preparation is not finished");
+        throw std::out_of_range("unknown resource preparation ticket");
     }
-    uploads_->releaseTicket(ticket);
-    pendingTextures_.erase(ticket.value);
+    resourcePreparation_->release(ticket);
 }
 
 render::ScenePreparationStatus VulkanRenderer::scenePreparationStatus() const
@@ -675,8 +634,8 @@ void VulkanRenderer::reset() noexcept
 {
     resetSceneResources();
     scenePreparation_.reset();
+    resourcePreparation_.reset();
     if (uploads_) uploads_->shutdown();
-    pendingTextures_.clear();
     uploads_.reset();
     frameContexts_.clear();
     swapchainResources_.reset();

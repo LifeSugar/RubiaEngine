@@ -1,35 +1,31 @@
 #include "vulkan/DefaultPipelineFactory.hpp"
 
 #include "asset/MeshAsset.hpp"
-#include "asset/AssetManager.hpp"
 #include "render/RenderData.hpp"
+#include "vulkan/GpuPreparedAssets.hpp"
 
 #include <array>
 #include <cstddef>
+#include <stdexcept>
+#include <utility>
 
 namespace rubia::rhi::vulkan
 {
 
 GraphicsPipeline::CreateInfo makeDefaultScenePipeline(
-    const asset::AssetManager& assets,
-    asset::ShaderProgramAssetHandle program,
+    std::shared_ptr<const GpuShaderProgram> program,
     VkDescriptorSetLayout materialDescriptorSetLayout)
 {
-    // ShaderProgramBuilder stores the validated VS/PS pair in stage order.
-    const auto& shaders = assets.shaderProgram(program).shaders();
-    const auto& vertexShader = assets.shader(shaders.at(0));
-    const auto& fragmentShader = assets.shader(shaders.at(1));
+    if (!program)
+    {
+        throw std::invalid_argument("pipeline requires a prepared shader program");
+    }
     GraphicsPipeline::CreateInfo createInfo{};
-    createInfo.vertexShaderSpirv = vertexShader.spirv();
-    createInfo.vertexEntryPoint = vertexShader.entryPoint();
-    createInfo.fragmentShaderSpirv = fragmentShader.spirv();
-    createInfo.fragmentEntryPoint = fragmentShader.entryPoint();
+    createInfo.program = std::move(program);
     createInfo.descriptorSetLayouts = {materialDescriptorSetLayout};
 
     VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags =
-        VK_SHADER_STAGE_VERTEX_BIT |
-        VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushConstantRange.size = sizeof(render::DrawPushConstants);
     createInfo.pushConstantRanges = {pushConstantRange};
 
@@ -66,18 +62,14 @@ GraphicsPipeline::CreateInfo makeDefaultScenePipeline(
 }
 
 GraphicsPipeline::CreateInfo makeDefaultPresentPipeline(
-    const asset::AssetManager& assets,
-    asset::ShaderProgramAssetHandle program)
+    std::shared_ptr<const GpuShaderProgram> program)
 {
-    // ShaderProgramBuilder stores the validated VS/PS pair in stage order.
-    const auto& shaders = assets.shaderProgram(program).shaders();
-    const auto& vertexShader = assets.shader(shaders.at(0));
-    const auto& fragmentShader = assets.shader(shaders.at(1));
+    if (!program)
+    {
+        throw std::invalid_argument("pipeline requires a prepared shader program");
+    }
     GraphicsPipeline::CreateInfo createInfo{};
-    createInfo.vertexShaderSpirv = vertexShader.spirv();
-    createInfo.vertexEntryPoint = vertexShader.entryPoint();
-    createInfo.fragmentShaderSpirv = fragmentShader.spirv();
-    createInfo.fragmentEntryPoint = fragmentShader.entryPoint();
+    createInfo.program = std::move(program);
     createInfo.cullMode = VK_CULL_MODE_NONE;
     createInfo.depthTestEnable = VK_FALSE;
     createInfo.depthWriteEnable = VK_FALSE;

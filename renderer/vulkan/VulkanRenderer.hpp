@@ -1,17 +1,19 @@
 #pragma once
 
+#include "asset/AssetSnapshot.hpp"
+#include "render/RenderFrame.hpp"
+#include "render/SceneResourcePreparation.hpp"
 #include "vulkan/DescriptorPool.hpp"
 #include "vulkan/DescriptorSetLayout.hpp"
 #include "vulkan/FrameContext.hpp"
 #include "vulkan/FrameDataResources.hpp"
 #include "vulkan/GraphicsPipeline.hpp"
-#include "render/RenderFrame.hpp"
-#include "render/SceneResourcePreparation.hpp"
-#include "vulkan/VulkanUploadService.hpp"
 #include "vulkan/RenderPass.hpp"
 #include "vulkan/RenderTarget.hpp"
+#include "vulkan/ResourcePreparationTypes.hpp"
 #include "vulkan/Sampler.hpp"
 #include "vulkan/SwapchainResources.hpp"
+#include "vulkan/VulkanUploadService.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -26,6 +28,7 @@ class Mesh;
 class RenderAssetCache;
 class VulkanContext;
 class VulkanScenePreparation;
+class VulkanResourcePreparation;
 class GpuTexture;
 struct VulkanDrawList;
 
@@ -100,22 +103,32 @@ public:
     /// are retained until activation, cancellation, or failure.
     void beginScenePreparation(
         RenderAssetCache& renderAssets, render::SceneResourceRequest request);
-    /// Polls uploads and advances one soft-budgeted batch or the pipeline stage.
-    void advanceScenePreparation();
     // Called once per frame, including when no scene is loading.
     void advanceResourcePreparation();
-    // Initial, incremental texture preparation. Source remains immutable; cache
-    // must outlive the ticket (and all published GPU uses). No replacement here.
-    UploadEnqueueResult prepareTexture(RenderAssetCache& cache,
-        asset::TextureAssetHandle handle, std::shared_ptr<const asset::TextureAsset> source);
+    // Versioned asset/dependency preparation; call before recording frame commands. Cache
+    // must outlive the ticket and all published GPU uses. Replacement waits for GPU users.
+    ResourcePreparationResult prepareTexture(RenderAssetCache& cache,
+                                             asset::AssetSnapshot<asset::TextureAsset> source);
+    ResourcePreparationResult prepareMesh(RenderAssetCache& cache,
+                                          asset::AssetSnapshot<asset::MeshAsset> source);
+    ResourcePreparationResult prepareShader(RenderAssetCache& cache,
+                                            asset::AssetSnapshot<asset::ShaderAsset> source);
+    ResourcePreparationResult prepareShaderProgram(
+        RenderAssetCache& cache, asset::AssetSnapshot<asset::ShaderProgramAsset> source);
+    ResourcePreparationResult prepareMaterialTemplate(
+        RenderAssetCache& cache, asset::AssetSnapshot<asset::MaterialTemplateAsset> source);
+    ResourcePreparationResult prepareMaterial(RenderAssetCache& cache,
+                                              asset::AssetSnapshot<asset::MaterialAsset> source);
+    ResourcePreparationResult prepareModel(RenderAssetCache& cache,
+                                           asset::AssetSnapshot<asset::ModelAsset> source);
     // Explicit blocking path for transactional replacement. Uses the shared service;
     // drains accepted uploads and returns an unpublished texture. Caller synchronizes
     // existing descriptor users before committing replacement into the live cache.
     [[nodiscard]] GpuTexture uploadTextureAndWait(
         std::shared_ptr<const asset::TextureAsset> source);
-    UploadStatus texturePreparationStatus(UploadTicket ticket) const;
-    void cancelTexturePreparation(UploadTicket ticket);
-    void releaseTexturePreparation(UploadTicket ticket);
+    ResourcePreparationStatus resourcePreparationStatus(ResourcePreparationTicket ticket) const;
+    void cancelResourcePreparation(ResourcePreparationTicket ticket);
+    void releaseResourcePreparation(ResourcePreparationTicket ticket);
 
     [[nodiscard]] render::ScenePreparationStatus scenePreparationStatus() const;
     /// Publishes ready GPU resources; caller then publishes matching CPU content.
@@ -294,17 +307,8 @@ private:
     /// Revision of the currently staged view GPU payload.
     uint64_t stagedViewGpuDataRevision_ = 0;
     // Destroy/cancel before scene objects, frame contexts, cache, or device.
-    struct PendingTexturePreparation
-    {
-        RenderAssetCache* cache = nullptr;
-        asset::TextureAssetHandle handle;
-        std::shared_ptr<GpuTexture> texture;
-        bool published = false;
-        bool cancelled = false;
-        std::string error;
-    };
     std::unique_ptr<VulkanUploadService> uploads_; //长期存在的上传服务。场景加载或者独立asset准备都使用此服务
-    std::map<uint64_t, PendingTexturePreparation> pendingTextures_;
+    std::unique_ptr<VulkanResourcePreparation> resourcePreparation_;
     std::unique_ptr<VulkanScenePreparation> scenePreparation_; 
 };
 

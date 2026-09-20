@@ -30,7 +30,7 @@ struct SceneResourceRequest
 enum class ScenePreparationState
 {
     Idle,
-    Uploading,
+    PreparingResources,
     PreparingPipelines,
     Ready,
     Activated,
@@ -42,8 +42,8 @@ struct ScenePreparationStatus
 {
     ScenePreparationState state = ScenePreparationState::Idle;
     std::size_t total = 0;
-    std::size_t submitted = 0;
-    // Counts only resources whose submitted upload has completed on the GPU.
+    // Counts ready root preparations (models, material template and present program),
+    // including all their dependencies. This is not GPU transfer progress.
     std::size_t completed = 0;
     std::string error;
 };

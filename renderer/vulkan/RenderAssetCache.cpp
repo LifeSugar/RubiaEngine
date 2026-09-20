@@ -1,220 +1,38 @@
 #include "vulkan/RenderAssetCache.hpp"
-#include "vulkan/TextureUploadBuilder.hpp"
 
 #include "vulkan/Device.hpp"
 
 #include <algorithm>
-#include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace rubia::rhi::vulkan
 {
-namespace
-{
-
-template <typename Handle>
-void appendUnique(std::vector<Handle>& handles, Handle handle)
-{
-    if (!handle)
-    {
-        throw std::invalid_argument(
-            "render asset graph contains an invalid handle");
-    }
-    if (std::find(handles.begin(), handles.end(), handle) == handles.end())
-    {
-        handles.push_back(handle);
-    }
-}
-
-uint32_t checkedDescriptorCount(
-    std::size_t materialCount,
-    uint32_t texturesPerMaterial)
-{
-    if (texturesPerMaterial != 0 &&
-        materialCount >
-            std::numeric_limits<uint32_t>::max() / texturesPerMaterial)
-    {
-        throw std::overflow_error(
-            "material texture descriptor count exceeds uint32_t");
-    }
-    return static_cast<uint32_t>(materialCount) * texturesPerMaterial;
-}
-
-template <typename Handle>
-std::size_t requiredSlotCount(const std::vector<Handle>& handles)
-{
-    std::size_t result = 0;
-    for (Handle handle : handles)
-    {
-        result = std::max(
-            result,
-            static_cast<std::size_t>(handle.index) + 1);
-    }
-    return result;
-}
-
-} // namespace
-
 RenderAssetCache::~RenderAssetCache()
 {
     reset();
 }
 
-void RenderAssetCache::beginUpload(
-    const Device& device,
-    const asset::AssetManager& assets,
-    const std::vector<asset::ModelAssetHandle>& models)
-{
-    if (!device)
-    {
-        throw std::invalid_argument("RenderAssetCache requires a device");
-    }
-    if (models.empty())
-    {
-        reset();
-        return;
-    }
-    std::vector<asset::MeshAssetHandle> meshHandles;
-    std::vector<asset::MaterialAssetHandle> materialHandles;
-    std::vector<asset::TextureAssetHandle> textureHandles;
-    for (asset::ModelAssetHandle modelHandle : models)
-    {
-        const asset::ModelAsset& model = assets.model(modelHandle);
-        for (const asset::ModelNode& node : model.nodes())
-        {
-            for (asset::MeshAssetHandle meshHandle : node.meshes)
-            {
-                appendUnique(meshHandles, meshHandle);
-            }
-        }
-    }
-    for (asset::MeshAssetHandle meshHandle : meshHandles)
-    {
-        const asset::MeshAsset& meshAsset = assets.mesh(meshHandle);
-        for (const asset::SubmeshData& submesh : meshAsset.submeshes())
-        {
-            appendUnique(materialHandles, submesh.material);
-        }
-    }
-
-    asset::MaterialTemplateAssetHandle materialTemplateHandle;
-    uint32_t textureCount = 0;
-    for (asset::MaterialAssetHandle materialHandle : materialHandles)
-    {
-        const asset::MaterialAsset& materialAsset = assets.material(materialHandle);
-        if (!materialTemplateHandle)
-        {
-            materialTemplateHandle = materialAsset.materialTemplate();
-            textureCount =
-                static_cast<uint32_t>(materialAsset.textures().size());
-        }
-        else if (materialAsset.materialTemplate() != materialTemplateHandle ||
-                 materialAsset.textures().size() != textureCount)
-        {
-            throw std::invalid_argument(
-                "one RenderAssetCache currently requires a shared material template");
-        }
-        for (asset::TextureAssetHandle textureHandle : materialAsset.textures())
-        {
-            appendUnique(textureHandles, textureHandle);
-        }
-    }
-    if (materialHandles.empty() || textureCount == 0)
-    {
-        throw std::invalid_argument(
-            "render model contains no textured materials");
-    }
-    const asset::MaterialTemplateAsset& materialTemplate =
-        assets.materialTemplate(materialTemplateHandle);
-    const uint32_t textureSlotCount = static_cast<uint32_t>(
-        materialTemplate.textureSlots().size());
-
-    initialize(device, materialTemplate);
-    try
-    {
-        const uint32_t materialCount =
-            static_cast<uint32_t>(materialHandles.size());
-        const uint32_t materialTextureDescriptors =
-            checkedDescriptorCount(
-                materialHandles.size(),
-                textureSlotCount);
-        materialDescriptorPool_.create(
-            device.get(),
-            {
-                {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, materialCount},
-                {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, materialTextureDescriptors},
-                {VK_DESCRIPTOR_TYPE_SAMPLER, materialTextureDescriptors}
-            },
-            materialCount);
-        uploadMaterialSets_ =
-            materialDescriptorPool_.allocate(
-                materialDescriptorSetLayout_.get(),
-                materialCount);
-
-        textures_.resize(requiredSlotCount(textureHandles));
-        materials_.resize(requiredSlotCount(materialHandles));
-        meshes_.resize(requiredSlotCount(meshHandles));
-        pendingTextures_ = std::move(textureHandles);
-        pendingMaterials_ = std::move(materialHandles);
-        pendingMeshes_ = std::move(meshHandles);
-    }
-    catch (...)
-    {
-        reset();
-        throw;
-    }
-}
-
-void RenderAssetCache::initialize(
-    const Device& device,
-    const asset::MaterialTemplateAsset& materialTemplate)
-{
-    if (!device)
-    {
-        throw std::invalid_argument("RenderAssetCache requires a device");
-    }
-    reset();
-    if (materialTemplate.parameterBlock().descriptor.set != 1)
-        throw std::invalid_argument("Vulkan scene materials currently require descriptor set 1");
-    std::vector<VkDescriptorSetLayoutBinding> bindings;
-    for (const auto& resource : materialTemplate.bindings())
-    {
-        VkDescriptorSetLayoutBinding binding{};
-        binding.binding = resource.binding;
-        binding.descriptorCount = resource.arrayCount;
-        if (resource.stages & asset::shaderStageMask(asset::ShaderStage::Vertex))
-            binding.stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
-        if (resource.stages & asset::shaderStageMask(asset::ShaderStage::Fragment))
-            binding.stageFlags |= VK_SHADER_STAGE_FRAGMENT_BIT;
-        switch (resource.type)
-        {
-        case asset::ShaderResourceType::UniformBuffer:
-            binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; break;
-        case asset::ShaderResourceType::SampledImage:
-            binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; break;
-        case asset::ShaderResourceType::Sampler:
-            binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER; break;
-        default: throw std::invalid_argument("unsupported material descriptor type");
-        }
-        bindings.push_back(binding);
-    }
-    materialDescriptorSetLayout_.create(device.get(), bindings);
-
-}
-
-std::size_t RenderAssetCache::pendingUploadCount() const noexcept
-{
-    return pendingTextures_.size() - uploadedTextures_ +
-        pendingMaterials_.size() - uploadedMaterials_ +
-        pendingMeshes_.size() - uploadedMeshes_;
-}
-
 bool RenderAssetCache::empty() const noexcept
 {
-    return textures_.empty() && materials_.empty() && meshes_.empty() &&
-           materialDescriptorSetLayout_.get() == VK_NULL_HANDLE && !pendingUpload_.ticket;
+    const auto emptyPrepared = [](const auto& list)
+    {
+        return std::none_of(list.begin(), list.end(),
+                            [](const auto& entry) { return bool(entry.resource); });
+    };
+    if (!emptyPrepared(shaders_) || !emptyPrepared(programs_) || !emptyPrepared(templates_) ||
+        !emptyPrepared(models_))
+    {
+        return false;
+    }
+    return std::none_of(textures_.begin(), textures_.end(),
+                        [](const auto& entry) { return bool(entry.texture); }) &&
+           std::none_of(materials_.begin(), materials_.end(),
+                        [](const auto& entry) { return bool(entry.material); }) &&
+           std::none_of(meshes_.begin(), meshes_.end(),
+                        [](const auto& entry) { return bool(entry.mesh); });
 }
 
 void RenderAssetCache::publishTexture(asset::TextureAssetHandle handle, GpuTexture texture)
@@ -231,109 +49,31 @@ void RenderAssetCache::publishTexture(asset::TextureAssetHandle handle, GpuTextu
     {
         textures_.resize(static_cast<std::size_t>(handle.index) + 1);
     }
+    if (!nextPublication_)
+    {
+        throw std::overflow_error("texture publication counter exhausted");
+    }
+    textures_[handle.index].publication = nextPublication_++;
     textures_[handle.index].texture = std::move(texture);
     textures_[handle.index].generation = handle.generation;
 }
 
-bool RenderAssetCache::hasSubmittedUpload(const VulkanUploadService& uploads) const
+void RenderAssetCache::publishMesh(asset::MeshAssetHandle handle, Mesh mesh)
 {
-    return pendingUpload_.ticket && uploads.query(pendingUpload_.ticket).submittedBytes != 0;
-}
-
-void RenderAssetCache::cancelPendingUpload(VulkanUploadService& uploads)
-{
-    if (pendingUpload_.ticket)
+    if (!handle || !mesh)
     {
-        uploads.cancel(pendingUpload_.ticket);
-        uploads.releaseTicket(pendingUpload_.ticket);
+        throw std::invalid_argument("invalid mesh publication");
     }
-    pendingUpload_ = {};
-}
-
-void RenderAssetCache::prepareNext(const Device& device, VulkanUploadService& uploads,
-                                   std::shared_ptr<const asset::AssetManager> assets)
-{
-    if (pendingUpload_.ticket)
+    if (handle.index < meshes_.size() && meshes_[handle.index].mesh)
     {
-        const auto status = uploads.query(pendingUpload_.ticket);
-        if (status.state == UploadState::Failed || status.state == UploadState::Cancelled)
-        {
-            throw std::runtime_error("scene upload failed or cancelled: " + status.error);
-        }
-        if (status.state != UploadState::Completed)
-        {
-            return;
-        }
-        // Completion drops every service-side source/destination reference before moving wrappers.
-        uploads.releaseTicket(pendingUpload_.ticket);
-        pendingUpload_.ticket = {};
-        if (pendingUpload_.texture)
-        {
-            const auto handle = pendingTextures_[uploadedTextures_];
-            publishTexture(handle, std::move(*pendingUpload_.texture));
-            ++uploadedTextures_;
-        }
-        else
-        {
-            const auto handle = pendingMeshes_[uploadedMeshes_];
-            meshes_[handle.index].mesh = std::move(*pendingUpload_.mesh);
-            meshes_[handle.index].generation = handle.generation;
-            ++uploadedMeshes_;
-        }
-        pendingUpload_ = {};
-        return;
+        throw std::logic_error("initial mesh publication cannot replace an existing slot");
     }
-    if (!pendingUpload_.texture && !pendingUpload_.mesh)
+    if (handle.index >= meshes_.size())
     {
-        if (uploadedTextures_ < pendingTextures_.size())
-        {
-            const auto& cpu = assets->texture(pendingTextures_[uploadedTextures_]);
-            pendingUpload_.texture = std::make_shared<GpuTexture>();
-            auto info = makeTextureCreateInfo(cpu);
-            pendingUpload_.texture->allocate(device, info);
-            pendingUpload_.request = makeTextureUploadRequest(
-                pendingUpload_.texture, std::shared_ptr<const asset::TextureAsset>(assets, &cpu));
-        }
-        else if (uploadedMaterials_ < pendingMaterials_.size())
-        {
-            const auto handle = pendingMaterials_[uploadedMaterials_];
-            const auto& material = assets->material(handle);
-            const auto& layout = assets->materialTemplate(material.materialTemplate());
-            std::vector<const GpuTexture*> textures;
-            for (auto textureHandle : material.textures())
-            {
-                textures.push_back(&texture(textureHandle));
-            }
-            auto& entry = materials_[handle.index];
-            entry.material.create(device, material, layout, textures,
-                                  uploadMaterialSets_[uploadedMaterials_]);
-            entry.generation = handle.generation;
-            ++uploadedMaterials_;
-            return;
-        }
-        else if (uploadedMeshes_ < pendingMeshes_.size())
-        {
-            const auto& cpu = assets->mesh(pendingMeshes_[uploadedMeshes_]);
-            pendingUpload_.mesh = std::make_shared<Mesh>();
-            pendingUpload_.mesh->allocate(device, cpu);
-            pendingUpload_.request = Mesh::makeUploadRequest(
-                pendingUpload_.mesh, std::shared_ptr<const asset::MeshAsset>(assets, &cpu));
-        }
-        else
-        {
-            return;
-        }
+        meshes_.resize(static_cast<std::size_t>(handle.index) + 1);
     }
-    const auto result = uploads.tryEnqueue(pendingUpload_.request);
-    if (result.code == UploadEnqueueCode::QueueFull)
-    {
-        return;
-    }
-    if (!result.accepted())
-    {
-        throw std::runtime_error(result.error);
-    }
-    pendingUpload_.ticket = result.ticket;
+    meshes_[handle.index].mesh = std::move(mesh);
+    meshes_[handle.index].generation = handle.generation;
 }
 
 GpuTexture RenderAssetCache::commitTextureReplacement(
@@ -341,6 +81,16 @@ GpuTexture RenderAssetCache::commitTextureReplacement(
     const asset::AssetManager& assets,
     asset::TextureAssetHandle handle,
     GpuTexture replacement)
+{
+    if (domain_ && domain_ != assets.domain())
+    {
+        throw std::invalid_argument("texture replacement uses another asset domain");
+    }
+    return replaceTexture(device, handle, std::move(replacement));
+}
+
+GpuTexture RenderAssetCache::replaceTexture(const Device& device, asset::TextureAssetHandle handle,
+                                            GpuTexture replacement)
 {
     if (!device || !replacement || tryTexture(handle) == nullptr)
     {
@@ -366,22 +116,16 @@ GpuTexture RenderAssetCache::commitTextureReplacement(
             continue;
         }
 
-        const asset::MaterialAssetHandle materialHandle{index, entry.generation};
-        const asset::MaterialAsset& materialAsset = assets.material(materialHandle);
-        if (std::find(
-                materialAsset.textures().begin(),
-                materialAsset.textures().end(),
-                handle) == materialAsset.textures().end())
+        if (std::find(entry.textures.begin(), entry.textures.end(), handle) == entry.textures.end())
         {
             continue;
         }
 
         MaterialTextureUpdate update{};
         update.material = &entry.material;
-        update.materialTemplate = &assets.materialTemplate(
-            materialAsset.materialTemplate());
-        update.textures.reserve(materialAsset.textures().size());
-        for (asset::TextureAssetHandle textureHandle : materialAsset.textures())
+        update.materialTemplate = &entry.layout;
+        update.textures.reserve(entry.textures.size());
+        for (asset::TextureAssetHandle textureHandle : entry.textures)
         {
             update.textures.push_back(
                 textureHandle == handle
@@ -391,6 +135,10 @@ GpuTexture RenderAssetCache::commitTextureReplacement(
         updates.push_back(std::move(update));
     }
 
+    if (!nextPublication_)
+    {
+        throw std::overflow_error("texture publication counter exhausted");
+    }
     // All references were validated above. vkUpdateDescriptorSets has no
     // failure return; after these writes the no-throw move commits ownership.
     for (MaterialTextureUpdate& update : updates)
@@ -402,23 +150,289 @@ GpuTexture RenderAssetCache::commitTextureReplacement(
     }
     GpuTexture previous = std::move(textures_[handle.index].texture);
     textures_[handle.index].texture = std::move(replacement);
+    textures_[handle.index].revision = 0;  // Legacy transaction has not committed CPU content yet.
+    textures_[handle.index].requested = 0; // Invalidate any older pending versioned publication.
+    textures_[handle.index].publication = nextPublication_++;
     return previous;
+}
+
+RenderAssetCache::PreparationVersions RenderAssetCache::inspectPreparation(
+    const ResourcePreparationTarget& target) const
+{
+    if (target.cache != this || !target.domain || !target.revision ||
+        (domain_ && domain_ != target.domain))
+    {
+        throw std::invalid_argument("invalid preparation version or asset domain");
+    }
+    return std::visit(
+        [&](auto handle) -> PreparationVersions
+        {
+            if (!handle)
+            {
+                throw std::invalid_argument("invalid preparation handle");
+            }
+            const auto& list = entries(handle);
+            if (handle.index >= list.size())
+            {
+                return {};
+            }
+            const auto& entry = list[handle.index];
+            if (entry.generation && entry.generation != handle.generation)
+            {
+                throw std::invalid_argument(
+                    "cache slot belongs to another asset generation; reset cache first");
+            }
+            return {entry.revision, entry.requested, entry.residentDependencies,
+                    entry.requestedDependencies};
+        },
+        target.asset);
+}
+bool RenderAssetCache::dependenciesCurrent(const ResourcePreparationTarget& target) const
+{
+    for (const auto& dependency : target.dependencies)
+    {
+        const auto version =
+            inspectPreparation({const_cast<RenderAssetCache*>(this), dependency.handle,
+                                dependency.revision, target.domain});
+        if (version.resident != dependency.revision)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+void RenderAssetCache::acceptPreparation(const ResourcePreparationTarget& target)
+{
+    static_cast<void>(inspectPreparation(target));
+    auto dependencies = target.dependencies;
+    std::visit(
+        [&](auto handle)
+        {
+            auto& list = entries(handle);
+            if (handle.index >= list.size())
+            {
+                list.resize(static_cast<size_t>(handle.index) + 1);
+            }
+            auto& entry = list[handle.index];
+            entry.generation = handle.generation;
+            entry.requested = target.revision;
+            entry.requestedDependencies = std::move(dependencies);
+        },
+        target.asset);
+    domain_ = target.domain;
+}
+
+void RenderAssetCache::setTextureVersion(asset::AssetDomainId domain,
+                                         asset::AssetVersion<asset::TextureAsset> version)
+{
+    if (!tryTexture(version.handle))
+    {
+        throw std::invalid_argument("texture is not resident");
+    }
+    acceptPreparation({this, version.handle, version.contentRevision, std::move(domain)});
+    textures_[version.handle.index].revision = version.contentRevision;
+}
+
+uint64_t RenderAssetCache::texturePublication(asset::TextureAssetHandle handle) const noexcept
+{
+    return tryTexture(handle) ? textures_[handle.index].publication : 0;
+}
+
+void RenderAssetCache::publishPreparedTexture(const Device& device,
+                                              const ResourcePreparationTarget& target,
+                                              GpuTexture texture)
+{
+    const auto version = inspectPreparation(target);
+    if (version.requested != target.revision ||
+        version.requestedDependencies != target.dependencies)
+    {
+        throw std::logic_error("texture preparation has been superseded");
+    }
+    auto dependencies = target.dependencies;
+    if (!dependenciesCurrent(target))
+    {
+        throw std::logic_error("texture dependencies changed");
+    }
+    const auto handle = std::get<asset::TextureAssetHandle>(target.asset);
+    if (tryTexture(handle))
+    {
+        // Initial implementation commits at a frame boundary with a conservative GPU wait.
+        // New uploads never overwrite the image still used by existing frames.
+        device.waitIdle();
+        auto previous = replaceTexture(device, handle, std::move(texture));
+    }
+    else
+    {
+        publishTexture(handle, std::move(texture));
+    }
+    textures_[handle.index].residentDependencies = std::move(dependencies);
+    textures_[handle.index].revision = target.revision;
+    textures_[handle.index].requested = target.revision;
+}
+
+void RenderAssetCache::publishPreparedMesh(const Device& device,
+                                           const ResourcePreparationTarget& target, Mesh mesh)
+{
+    const auto version = inspectPreparation(target);
+    if (!mesh || version.requested != target.revision ||
+        version.requestedDependencies != target.dependencies)
+    {
+        throw std::logic_error("invalid or superseded mesh publication");
+    }
+    auto dependencies = target.dependencies;
+    if (!dependenciesCurrent(target))
+    {
+        throw std::logic_error("mesh dependencies changed");
+    }
+    const auto handle = std::get<asset::MeshAssetHandle>(target.asset);
+    if (tryMesh(handle))
+    {
+        device.waitIdle();
+        meshes_[handle.index].mesh = std::move(mesh);
+    }
+    else
+    {
+        publishMesh(handle, std::move(mesh));
+    }
+    meshes_[handle.index].residentDependencies = std::move(dependencies);
+    meshes_[handle.index].revision = target.revision;
+}
+
+void RenderAssetCache::publishPreparedMeshDependencies(const ResourcePreparationTarget& target)
+{
+    const auto version = inspectPreparation(target);
+    const auto handle = std::get<asset::MeshAssetHandle>(target.asset);
+    if (!tryMesh(handle) || version.resident != target.revision ||
+        version.requested != target.revision ||
+        version.requestedDependencies != target.dependencies || !dependenciesCurrent(target))
+    {
+        throw std::logic_error("mesh changed before dependency publication");
+    }
+    auto deps = target.dependencies;
+    meshes_[handle.index].residentDependencies = std::move(deps);
+}
+
+template <typename Handle, typename Resource>
+void RenderAssetCache::publishPrepared(const Device& device,
+                                       const ResourcePreparationTarget& target,
+                                       std::shared_ptr<const Resource> resource)
+{
+    const auto version = inspectPreparation(target);
+    if (!resource || version.requested != target.revision ||
+        version.requestedDependencies != target.dependencies || !dependenciesCurrent(target))
+    {
+        throw std::logic_error("superseded or unready prepared resource");
+    }
+    auto deps = target.dependencies;
+    const auto handle = std::get<Handle>(target.asset);
+    auto& entry = entries(handle).at(handle.index);
+    if (entry.resource)
+    {
+        device.waitIdle();
+    }
+    entry.resource = std::move(resource);
+    entry.revision = target.revision;
+    entry.residentDependencies = std::move(deps);
+}
+void RenderAssetCache::publishPreparedShader(const Device& device,
+                                             const ResourcePreparationTarget& target,
+                                             std::shared_ptr<const GpuShader> resource)
+{
+    publishPrepared<asset::ShaderAssetHandle>(device, target, std::move(resource));
+}
+std::shared_ptr<const GpuShader> RenderAssetCache::shader(asset::ShaderAssetHandle handle) const
+{
+    const auto& list = entries(handle);
+    return handle && handle.index < list.size() &&
+                   list[handle.index].generation == handle.generation
+               ? list[handle.index].resource
+               : nullptr;
+}
+void RenderAssetCache::publishPreparedShaderProgram(
+    const Device& device, const ResourcePreparationTarget& target,
+    std::shared_ptr<const GpuShaderProgram> resource)
+{
+    publishPrepared<asset::ShaderProgramAssetHandle>(device, target, std::move(resource));
+}
+std::shared_ptr<const GpuShaderProgram> RenderAssetCache::shaderProgram(
+    asset::ShaderProgramAssetHandle handle) const
+{
+    const auto& list = entries(handle);
+    return handle && handle.index < list.size() &&
+                   list[handle.index].generation == handle.generation
+               ? list[handle.index].resource
+               : nullptr;
+}
+void RenderAssetCache::publishPreparedMaterialTemplate(
+    const Device& device, const ResourcePreparationTarget& target,
+    std::shared_ptr<const GpuMaterialTemplate> resource)
+{
+    publishPrepared<asset::MaterialTemplateAssetHandle>(device, target, std::move(resource));
+}
+std::shared_ptr<const GpuMaterialTemplate> RenderAssetCache::materialTemplate(
+    asset::MaterialTemplateAssetHandle handle) const
+{
+    const auto& list = entries(handle);
+    return handle && handle.index < list.size() &&
+                   list[handle.index].generation == handle.generation
+               ? list[handle.index].resource
+               : nullptr;
+}
+void RenderAssetCache::publishPreparedModel(const Device& device,
+                                            const ResourcePreparationTarget& target,
+                                            std::shared_ptr<const asset::ModelAsset> resource)
+{
+    publishPrepared<asset::ModelAssetHandle>(device, target, std::move(resource));
+}
+std::shared_ptr<const asset::ModelAsset> RenderAssetCache::model(
+    asset::ModelAssetHandle handle) const
+{
+    const auto& list = entries(handle);
+    return handle && handle.index < list.size() &&
+                   list[handle.index].generation == handle.generation
+               ? list[handle.index].resource
+               : nullptr;
+}
+void RenderAssetCache::publishPreparedMaterial(
+    const Device& device, const ResourcePreparationTarget& target, GpuMaterial material,
+    DescriptorPool pool, std::shared_ptr<const GpuMaterialTemplate> materialTemplate,
+    std::vector<asset::TextureAssetHandle> textures)
+{
+    const auto version = inspectPreparation(target);
+    if (!material || !pool || !materialTemplate || version.requested != target.revision ||
+        version.requestedDependencies != target.dependencies || !dependenciesCurrent(target))
+    {
+        throw std::logic_error("superseded or unready material preparation");
+    }
+    auto deps = target.dependencies;
+    auto layout = materialTemplate->source();
+    const auto handle = std::get<asset::MaterialAssetHandle>(target.asset);
+    auto& entry = materials_.at(handle.index);
+    if (entry.material)
+    {
+        device.waitIdle();
+    }
+    entry.pool.reset();
+    entry.material = std::move(material);
+    entry.layout = std::move(layout);
+    entry.textures = std::move(textures);
+    entry.preparedTemplate = std::move(materialTemplate);
+    entry.pool = std::move(pool);
+    entry.revision = target.revision;
+    entry.residentDependencies = std::move(deps);
 }
 
 void RenderAssetCache::reset() noexcept
 {
     // Preparation owner cancels its ticket before reset. Submitted work retains its own leases.
-    pendingUpload_ = {};
-    pendingTextures_.clear();
-    pendingMaterials_.clear();
-    pendingMeshes_.clear();
-    uploadMaterialSets_.clear();
-    uploadedTextures_ = uploadedMaterials_ = uploadedMeshes_ = 0;
-    materialDescriptorPool_.reset();
+    domain_.reset();
     meshes_.clear();
     materials_.clear();
     textures_.clear();
-    materialDescriptorSetLayout_.reset();
+    models_.clear();
+    templates_.clear();
+    programs_.clear();
+    shaders_.clear();
 }
 
 const Mesh& RenderAssetCache::mesh(asset::MeshAssetHandle handle) const

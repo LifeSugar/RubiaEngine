@@ -36,6 +36,7 @@ private:
     {
         asset::TextureAssetHandle texture;
         VkDescriptorSet descriptor = VK_NULL_HANDLE;
+        uint64_t publication = 0;
     };
 
     void registerViewportTextures();

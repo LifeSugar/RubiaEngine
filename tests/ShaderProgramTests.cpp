@@ -175,6 +175,18 @@ void testGeneratedMaterial()
     material.materialTemplate = materialTemplate;
     material.parameters = {{"roughness", 0.75f}};
     const auto handle = assets.createMaterial(material);
+    const auto programVersion = assets.version(original);
+    const auto templateVersion = assets.version(materialTemplate);
+    const auto materialVersion = assets.version(handle);
+    require(programVersion.contentRevision == 1 && templateVersion.contentRevision == 1 &&
+                materialVersion.contentRevision == 1 && assets.isCurrent(programVersion) &&
+                assets.isCurrent(templateVersion) && assets.isCurrent(materialVersion),
+            "program/template/material must expose content revisions");
+    for (const auto shader : assets.shaderProgram(original).shaders())
+    {
+        require(assets.contentRevision(shader) == 1 && assets.isCurrent(assets.version(shader)),
+                "shader must expose its own content revision");
+    }
     float roughness = 0;
     std::memcpy(&roughness, assets.material(handle).parameterData().data() + 16, sizeof(float));
     require(roughness == 0.75f, "material must pack values at reflected offsets");
@@ -206,6 +218,13 @@ void testGeneratedMaterial()
     info.program = program(assets, vs, ps);
     rejects([&] { static_cast<void>(assets.createMaterialTemplate(info)); },
             "Template.UnsupportedParameter");
+    require(assets.isCurrent(programVersion) && assets.isCurrent(templateVersion) &&
+                assets.isCurrent(materialVersion),
+            "failed creation or publishing another asset changed existing versions");
+    assets.reset();
+    require(!assets.isCurrent(programVersion) && !assets.isCurrent(templateVersion) &&
+                !assets.isCurrent(materialVersion),
+            "reset must invalidate program/template/material versions");
 }
 
 void testTextureMapping()

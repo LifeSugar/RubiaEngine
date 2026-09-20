@@ -1,5 +1,7 @@
 target_sources(rubia_engine PRIVATE
     AssetFwd.hpp
+    AssetSnapshot.cpp
+    AssetSnapshot.hpp
     AssetHandle.hpp
     AssetId.cpp
     AssetId.hpp

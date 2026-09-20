@@ -53,7 +53,7 @@ void AppSmokeTests::runStartupTest()
 
         runVulkanUploadTests(app.vulkanContext.device());
 
-        // Standalone incremental texture uploads: no model, material layout or pipeline.
+        // Standalone incremental resource preparation: no model, material layout or pipeline.
         {
             auto sources = std::make_shared<asset::AssetManager>();
             asset::TextureAsset::CreateInfo info;
@@ -65,12 +65,20 @@ void AppSmokeTests::runStartupTest()
             info.name = "Second standalone preview";
             auto second = sources->createTexture(info);
             auto prepare = [&](asset::TextureAssetHandle handle)
-            {
-                return app.renderer.prepareTexture(app.renderAssets, handle,
-                    std::shared_ptr<const asset::TextureAsset>(sources, &sources->texture(handle)));
-            };
+            { return app.renderer.prepareTexture(app.renderAssets, sources->snapshot(handle)); };
             auto a = prepare(first);
             auto b = prepare(second);
+            asset::MeshAsset::CreateInfo meshInfo;
+            meshInfo.vertices.resize(3);
+            meshInfo.indices = {0, 1, 2};
+            meshInfo.submeshes.push_back({0, 3, 0, 3, {}});
+            const auto meshHandle = sources->createMesh(std::move(meshInfo));
+            const auto mesh =
+                app.renderer.prepareMesh(app.renderAssets, sources->snapshot(meshHandle));
+            if (!mesh.accepted() || app.renderAssets.tryMesh(meshHandle))
+            {
+                throw std::runtime_error("standalone mesh failed admission or was published early");
+            }
             if (!a.accepted() || !b.accepted() || app.renderAssets.tryTexture(first) || app.renderAssets.tryTexture(second))
                 throw std::runtime_error("standalone upload exposed an unready texture");
             auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(15);
@@ -78,12 +86,24 @@ void AppSmokeTests::runStartupTest()
             {
                 // This is the normal App pump even while content loading is Idle.
                 app.updateContentLoading();
-                if (app.renderer.texturePreparationStatus(a.ticket).state == rhi::vulkan::UploadState::Completed &&
-                    app.renderer.texturePreparationStatus(b.ticket).state == rhi::vulkan::UploadState::Completed) break;
+                if (app.renderer.resourcePreparationStatus(a.ticket).state ==
+                        rhi::vulkan::ResourcePreparationState::Ready &&
+                    app.renderer.resourcePreparationStatus(b.ticket).state ==
+                        rhi::vulkan::ResourcePreparationState::Ready &&
+                    app.renderer.resourcePreparationStatus(mesh.ticket).state ==
+                        rhi::vulkan::ResourcePreparationState::Ready)
+                {
+                    break;
+                }
                 draw();
             }
             if (!app.renderAssets.tryTexture(first) || !app.renderAssets.tryTexture(second) || app.renderer.sceneReady())
                 throw std::runtime_error("standalone texture preparation required a scene or did not publish");
+            if (!app.renderAssets.tryMesh(meshHandle))
+            {
+                throw std::runtime_error("standalone mesh was not published by the App pump");
+            }
+            app.renderer.releaseResourcePreparation(mesh.ticket);
             const auto firstView = app.renderAssets.texture(first).view();
             auto preview = app.guiRenderBridge.preview(first);
             if (!preview) throw std::runtime_error("standalone upload has no GUI preview");
@@ -94,13 +114,13 @@ void AppSmokeTests::runStartupTest()
             const auto previewResult = app.renderer.renderGui(app.imguiLayer.endFrame());
             if (previewResult == rhi::vulkan::VulkanRenderer::RenderResult::NeedsResize)
                 app.recreateSwapChain(gui);
-            app.renderer.releaseTexturePreparation(a.ticket);
-            app.renderer.releaseTexturePreparation(b.ticket);
+            app.renderer.releaseResourcePreparation(a.ticket);
+            app.renderer.releaseResourcePreparation(b.ticket);
             info.name = "Cancelled standalone preview";
             auto third = sources->createTexture(info);
             auto c = prepare(third);
-            app.renderer.cancelTexturePreparation(c.ticket);
-            app.renderer.releaseTexturePreparation(c.ticket);
+            app.renderer.cancelResourcePreparation(c.ticket);
+            app.renderer.releaseResourcePreparation(c.ticket);
             app.updateContentLoading();
             if (app.renderAssets.tryTexture(third) || app.renderAssets.texture(first).view() != firstView)
                 throw std::runtime_error("standalone cancellation damaged the cache");
@@ -118,27 +138,27 @@ void AppSmokeTests::runStartupTest()
             auto unpublished = app.renderer.uploadTextureAndWait(
                 std::shared_ptr<const asset::TextureAsset>(sources, &sources->texture(first)));
             if (!unpublished || app.renderAssets.tryTexture(fourth) ||
-                app.renderer.texturePreparationStatus(d.ticket).state !=
-                    rhi::vulkan::UploadState::Uploading)
+                app.renderer.resourcePreparationStatus(d.ticket).state !=
+                    rhi::vulkan::ResourcePreparationState::Uploading)
             {
                 throw std::runtime_error("drain published standalone texture prematurely");
             }
-            app.renderer.cancelTexturePreparation(d.ticket);
-            if (app.renderer.texturePreparationStatus(d.ticket).state !=
-                rhi::vulkan::UploadState::Cancelled)
+            app.renderer.cancelResourcePreparation(d.ticket);
+            if (app.renderer.resourcePreparationStatus(d.ticket).state !=
+                rhi::vulkan::ResourcePreparationState::Cancelled)
             {
                 throw std::runtime_error("completed but unpublished upload did not cancel");
             }
             // Keep the cancelled record for a pump to cover accidental re-publication.
             app.updateContentLoading();
             if (app.renderAssets.tryTexture(fourth) || !app.renderAssets.tryTexture(fifth) ||
-                app.renderer.texturePreparationStatus(e.ticket).state !=
-                    rhi::vulkan::UploadState::Completed)
+                app.renderer.resourcePreparationStatus(e.ticket).state !=
+                    rhi::vulkan::ResourcePreparationState::Ready)
             {
                 throw std::runtime_error("completion cancellation damaged another texture");
             }
-            app.renderer.releaseTexturePreparation(d.ticket);
-            app.renderer.releaseTexturePreparation(e.ticket);
+            app.renderer.releaseResourcePreparation(d.ticket);
+            app.renderer.releaseResourcePreparation(e.ticket);
             app.renderer.waitIdle();
             app.guiRenderBridge.invalidatePreview(first);
             app.renderAssets.reset();
@@ -183,15 +203,15 @@ void AppSmokeTests::runStartupTest()
             }
             draw();
             const auto status = app.renderer.scenePreparationStatus();
-            if (status.submitted > status.completed)
+            if (status.state == ScenePreparationState::PreparingResources && status.total > status.completed)
             {
                 break;
             }
         }
         const auto uploading = app.renderer.scenePreparationStatus();
-        if (uploading.submitted <= uploading.completed)
+        if (uploading.state != ScenePreparationState::PreparingResources || uploading.total <= uploading.completed)
         {
-            throw std::runtime_error("upload shutdown test did not submit a batch");
+            throw std::runtime_error("scene cancellation test did not begin resource preparation");
         }
         // Keep the CPU source to exercise cancellation and restart independently
         // of the App worker. The backend must not clear an existing operation.
@@ -200,18 +220,21 @@ void AppSmokeTests::runStartupTest()
         try { app.renderer.beginScenePreparation(app.renderAssets, {}); }
         catch (const std::logic_error&) { duplicateRejected = true; }
         if (!duplicateRejected ||
-            app.renderer.scenePreparationStatus().submitted != uploading.submitted)
+            app.renderer.scenePreparationStatus().total != uploading.total)
         {
             throw std::runtime_error("duplicate preparation replaced an in-flight operation");
         }
         app.discardContentLoading();
         if (app.renderer.scenePreparationStatus().state != ScenePreparationState::Cancelled ||
-            app.renderAssets.materialDescriptorSetLayout() != VK_NULL_HANDLE ||
+            !app.renderAssets.empty() ||
             app.renderer.sceneReady() || !app.assetManager.textureHandles().empty())
         {
             throw std::runtime_error("upload cancellation left partial scene resources");
         }
         draw();
+
+        runAssetPreparationTests(app.vulkanContext.device(), prepared->assets,
+                                 prepared->content.model, prepared->content.presentProgram);
 
         app.renderer.beginScenePreparation(app.renderAssets, {});
         if (app.renderer.scenePreparationStatus().state != ScenePreparationState::Failed ||
@@ -234,11 +257,11 @@ void AppSmokeTests::runStartupTest()
         while (app.renderer.scenePreparationStatus().state != ScenePreparationState::Ready &&
             std::chrono::steady_clock::now() < deadline)
         {
-            app.renderer.advanceScenePreparation();
+            app.renderer.advanceResourcePreparation();
             const auto status = app.renderer.scenePreparationStatus();
             if (status.state == ScenePreparationState::Failed)
                 throw std::runtime_error(status.error);
-            if (status.completed > status.submitted || status.submitted > status.total ||
+            if (status.completed > status.total ||
                 app.renderer.sceneReady())
                 throw std::runtime_error("preparation exposed incomplete scene resources");
             draw();
@@ -251,7 +274,7 @@ void AppSmokeTests::runStartupTest()
         if (app.renderer.sceneReady())
             throw std::runtime_error("resize activated a prepared scene");
         app.renderer.cancelScenePreparation();
-        if (app.renderAssets.materialDescriptorSetLayout() != VK_NULL_HANDLE || app.renderer.sceneReady())
+        if (!app.renderAssets.empty() || app.renderer.sceneReady())
             throw std::runtime_error("ready cancellation left scene resources alive");
 
         // The backend retains the source even when the caller releases it.
@@ -260,11 +283,11 @@ void AppSmokeTests::runStartupTest()
         prepared.reset();
         if (source.expired())
             throw std::runtime_error("backend did not retain the CPU upload source");
-        app.renderer.advanceScenePreparation();
+        app.renderer.advanceResourcePreparation();
         const auto closing = app.renderer.scenePreparationStatus();
-        if (closing.submitted <= closing.completed)
-            throw std::runtime_error("upload shutdown test did not restart a batch");
-        // Exercise the close path while staging and GPU destinations are owned.
+        if (closing.state != ScenePreparationState::PreparingResources || closing.total <= closing.completed)
+            throw std::runtime_error("scene shutdown test did not restart resource preparation");
+        // Exercise the close path while generic asset preparations are pending.
         glfwSetWindowShouldClose(app.window.nativeHandle(), GLFW_TRUE);
         app.mainLoop(gui);
         app.discardContentLoading();

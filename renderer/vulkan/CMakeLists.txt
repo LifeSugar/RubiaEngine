@@ -19,6 +19,8 @@ add_library(rubia_rhi_vulkan STATIC
     FrameContext.hpp
     FrameDataResources.cpp
     FrameDataResources.hpp
+    GpuPreparedAssets.cpp
+    GpuPreparedAssets.hpp
     GpuMaterial.cpp
     GpuMaterial.hpp
     GpuTexture.cpp
@@ -69,6 +71,11 @@ add_library(rubia_rhi_vulkan STATIC
     VulkanMemoryConfig.hpp
     VulkanRenderer.cpp
     VulkanRenderer.hpp
+    IResourcePreparation.hpp
+    ResourcePreparationTypes.hpp
+    ResourcePreparations.cpp
+    VulkanResourcePreparation.cpp
+    VulkanResourcePreparation.hpp
     VulkanScenePreparation.cpp
     VulkanScenePreparation.hpp
     Window.cpp

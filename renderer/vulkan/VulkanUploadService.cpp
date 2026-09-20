@@ -233,6 +233,7 @@ void VulkanUploadService::tick(const UploadBudget& budget)
     {
         return;
     }
+    //尝试收菜
     if (!batch_.empty())
     {
         try
@@ -279,6 +280,7 @@ void VulkanUploadService::tick(const UploadBudget& budget)
             // Retain before recording or submission. A failure rolls back the whole unsubmitted
             // batch.
             batch_.push_back({r, op, size});
+            //Begin when the first op has been added
             if (batch_.size() == 1)
             {
                 uploadsContext_.beginBatch();
@@ -335,6 +337,7 @@ void VulkanUploadService::tick(const UploadBudget& budget)
         batch_.clear();
     }
 }
+//反复Tick, 强制全部上传
 void VulkanUploadService::drain()
 {
     checkThread();

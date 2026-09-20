@@ -2,11 +2,12 @@
 
 #include "asset/AssetManager.hpp"
 #include "vulkan/DescriptorPool.hpp"
-#include "vulkan/DescriptorSetLayout.hpp"
 #include "vulkan/GpuMaterial.hpp"
+#include "vulkan/GpuPreparedAssets.hpp"
 #include "vulkan/GpuTexture.hpp"
+#include "vulkan/IResourcePreparation.hpp"
 #include "vulkan/Mesh.hpp"
-#include "vulkan/VulkanUploadService.hpp"
+#include <type_traits>
 
 #include <vulkan/vulkan.h>
 
@@ -28,19 +29,46 @@ public:
     RenderAssetCache(RenderAssetCache&&) = delete;
     RenderAssetCache& operator=(RenderAssetCache&&) = delete;
 
-    /// Establishes the material interface without requiring a model instance.
-    void initialize(const Device& device, const asset::MaterialTemplateAsset& materialTemplate);
-    /// Allocates cache slots and descriptors; leaves resource uploads to prepareNext.
-    void beginUpload(const Device& device, const asset::AssetManager& assets,
-        const std::vector<asset::ModelAssetHandle>& models);
-    [[nodiscard]] std::size_t pendingUploadCount() const noexcept;
-    // Scene preparation adapter. Publishes only fence-completed textures/meshes.
-    void prepareNext(const Device& device, VulkanUploadService& uploads,
-        std::shared_ptr<const asset::AssetManager> assets);
-    bool hasSubmittedUpload(const VulkanUploadService& uploads) const;
-    void cancelPendingUpload(VulkanUploadService& uploads);
     void publishTexture(asset::TextureAssetHandle handle, GpuTexture texture);
+    void publishMesh(asset::MeshAssetHandle handle, Mesh mesh);
     bool empty() const noexcept;
+    struct PreparationVersions
+    {
+        asset::AssetContentRevision resident = 0;
+        asset::AssetContentRevision requested = 0;
+        std::vector<asset::AssetDependencyVersion> residentDependencies;
+        std::vector<asset::AssetDependencyVersion> requestedDependencies;
+    };
+    // One asset domain per cache until reset. A recycled generation requires cache reset.
+    PreparationVersions inspectPreparation(const ResourcePreparationTarget& target) const;
+    void acceptPreparation(const ResourcePreparationTarget& target);
+    bool dependenciesCurrent(const ResourcePreparationTarget& target) const;
+    void publishPreparedTexture(const Device& device, const ResourcePreparationTarget& target,
+                                GpuTexture texture);
+    void publishPreparedMesh(const Device& device, const ResourcePreparationTarget& target,
+                             Mesh mesh);
+    // Refresh dependency readiness without allocating/uploading unchanged geometry.
+    void publishPreparedMeshDependencies(const ResourcePreparationTarget& target);
+    void publishPreparedShader(const Device&, const ResourcePreparationTarget&,
+                               std::shared_ptr<const GpuShader>);
+    void publishPreparedShaderProgram(const Device&, const ResourcePreparationTarget&,
+                                      std::shared_ptr<const GpuShaderProgram>);
+    void publishPreparedMaterialTemplate(const Device&, const ResourcePreparationTarget&,
+                                         std::shared_ptr<const GpuMaterialTemplate>);
+    void publishPreparedModel(const Device&, const ResourcePreparationTarget&,
+                              std::shared_ptr<const asset::ModelAsset>);
+    void publishPreparedMaterial(const Device&, const ResourcePreparationTarget&, GpuMaterial,
+                                 DescriptorPool, std::shared_ptr<const GpuMaterialTemplate>,
+                                 std::vector<asset::TextureAssetHandle>);
+    std::shared_ptr<const GpuShader> shader(asset::ShaderAssetHandle) const;
+    std::shared_ptr<const GpuShaderProgram> shaderProgram(asset::ShaderProgramAssetHandle) const;
+    std::shared_ptr<const GpuMaterialTemplate> materialTemplate(
+        asset::MaterialTemplateAssetHandle) const;
+    std::shared_ptr<const asset::ModelAsset> model(asset::ModelAssetHandle) const;
+    // Legacy CPU/GPU transaction: stamp only after committing matching content.
+    void setTextureVersion(asset::AssetDomainId domain,
+                           asset::AssetVersion<asset::TextureAsset> version);
+    uint64_t texturePublication(asset::TextureAssetHandle handle) const noexcept;
 
     /// Commits a staged texture under the existing handle and rewrites every
     /// cached material descriptor that references it. The caller must ensure
@@ -64,52 +92,89 @@ public:
         asset::TextureAssetHandle handle) const;
     [[nodiscard]] const GpuTexture* tryTexture(
         asset::TextureAssetHandle handle) const noexcept;
-    [[nodiscard]] VkDescriptorSetLayout materialDescriptorSetLayout() const
-        noexcept
-    {
-        return materialDescriptorSetLayout_.get();
-    }
 private:
-    struct PendingUpload
-    {
-        std::shared_ptr<GpuTexture> texture;
-        std::shared_ptr<Mesh> mesh;
-        UploadRequest request;
-        UploadTicket ticket;
-    } pendingUpload_;
-
-    struct TextureEntry
+    struct VersionedEntry
     {
         uint32_t generation = 0;
+        asset::AssetContentRevision revision = 0;
+        asset::AssetContentRevision requested = 0;
+        std::vector<asset::AssetDependencyVersion> residentDependencies;
+        std::vector<asset::AssetDependencyVersion> requestedDependencies;
+    };
+    struct TextureEntry : VersionedEntry
+    {
+        uint64_t publication = 0;
         GpuTexture texture;
     };
 
-    struct MaterialEntry
+    struct MaterialEntry : VersionedEntry
     {
-        uint32_t generation = 0;
         GpuMaterial material;
+        std::vector<asset::TextureAssetHandle> textures;
+        asset::MaterialTemplateAsset layout;
+        std::shared_ptr<const GpuMaterialTemplate> preparedTemplate;
+        DescriptorPool pool;
     };
 
-    struct MeshEntry
+    struct MeshEntry : VersionedEntry
     {
-        uint32_t generation = 0;
         Mesh mesh;
     };
 
-    // Pool is declared last so it destroys descriptor sets before their
-    // referenced buffers, image views, and samplers.
-    DescriptorSetLayout materialDescriptorSetLayout_;
+    template <typename Resource> struct PreparedEntry : VersionedEntry
+    {
+        std::shared_ptr<const Resource> resource;
+    };
+    template <typename Handle> auto& entries(Handle)
+    {
+        if constexpr (std::is_same_v<Handle, asset::TextureAssetHandle>)
+        {
+            return textures_;
+        }
+        else if constexpr (std::is_same_v<Handle, asset::MeshAssetHandle>)
+        {
+            return meshes_;
+        }
+        else if constexpr (std::is_same_v<Handle, asset::ShaderAssetHandle>)
+        {
+            return shaders_;
+        }
+        else if constexpr (std::is_same_v<Handle, asset::ShaderProgramAssetHandle>)
+        {
+            return programs_;
+        }
+        else if constexpr (std::is_same_v<Handle, asset::MaterialTemplateAssetHandle>)
+        {
+            return templates_;
+        }
+        else if constexpr (std::is_same_v<Handle, asset::MaterialAssetHandle>)
+        {
+            return materials_;
+        }
+        else
+        {
+            return models_;
+        }
+    }
+    template <typename Handle> const auto& entries(Handle handle) const
+    {
+        return const_cast<RenderAssetCache*>(this)->entries(handle);
+    }
+    template <typename Handle, typename Resource>
+    void publishPrepared(const Device&, const ResourcePreparationTarget&,
+                         std::shared_ptr<const Resource>);
+    std::vector<PreparedEntry<GpuShader>> shaders_;
+    std::vector<PreparedEntry<GpuShaderProgram>> programs_;
+    std::vector<PreparedEntry<GpuMaterialTemplate>> templates_;
+    std::vector<PreparedEntry<asset::ModelAsset>> models_;
+    GpuTexture replaceTexture(const Device& device, asset::TextureAssetHandle handle,
+                              GpuTexture replacement);
+    asset::AssetDomainId domain_;
+    uint64_t nextPublication_ = 1; // Does not reset: GUI tokens must notice cache reuse.
     std::vector<TextureEntry> textures_;
     std::vector<MaterialEntry> materials_;
     std::vector<MeshEntry> meshes_;
-    DescriptorPool materialDescriptorPool_;
-    std::vector<asset::TextureAssetHandle> pendingTextures_;
-    std::vector<asset::MaterialAssetHandle> pendingMaterials_;
-    std::vector<asset::MeshAssetHandle> pendingMeshes_;
-    std::vector<VkDescriptorSet> uploadMaterialSets_;
-    std::size_t uploadedTextures_ = 0;
-    std::size_t uploadedMaterials_ = 0;
-    std::size_t uploadedMeshes_ = 0;
+
 };
 
 } // namespace rubia::rhi::vulkan
