@@ -1,6 +1,6 @@
 #include "vulkan/VulkanScenePreparation.hpp"
 
-#include "asset/AssetManager.hpp"
+#include "asset/MeshAsset.hpp"
 #include "vulkan/DefaultPipelineFactory.hpp"
 #include "vulkan/RenderAssetCache.hpp"
 #include "vulkan/VulkanRenderer.hpp"
@@ -30,49 +30,31 @@ void VulkanScenePreparation::begin()
 {
     try
     {
-        if (!request_.assets || request_.models.empty() || request_.maxRenderObjects == 0)
+        if (!request_.materialTemplate || !request_.presentProgram || !request_.maxRenderObjects)
         {
             throw std::invalid_argument(
-                "scene preparation requires CPU assets, models and object capacity");
+                "scene requires prepared CPU resource inputs and object capacity");
         }
-        const auto& assets = *request_.assets;
-        if (!assets.contains(request_.materialTemplate) ||
-            !assets.isMaterialTemplateCurrent(request_.materialTemplate) ||
-            !assets.contains(request_.presentProgram))
+        const auto domain = request_.materialTemplate.domain;
+        if (request_.presentProgram.domain != domain)
         {
-            throw std::invalid_argument(
-                "scene preparation references an invalid template or program");
+            throw std::invalid_argument("scene resources belong to different asset domains");
         }
-        for (auto model : request_.models)
-        {
-            for (const auto& node : assets.model(model).nodes())
-            {
-                for (auto mesh : node.meshes)
-                {
-                    for (const auto& submesh : assets.mesh(mesh).submeshes())
-                    {
-                        if (assets.material(submesh.material).materialTemplate() !=
-                            request_.materialTemplate)
-                        {
-                            throw std::invalid_argument("scene preparation requires the requested "
-                                                        "shared material template");
-                        }
-                    }
-                }
-            }
-        }
-
-        if (assets.materialTemplate(request_.materialTemplate).parameterBlock().descriptor.set != 1)
+        if (request_.materialTemplate.data->parameterBlock().descriptor.set != 1)
         {
             throw std::invalid_argument(
                 "Vulkan scene materials currently require descriptor set 1");
         }
-        for (auto model : request_.models)
+        for (const auto& mesh : request_.meshes)
         {
-            roots_.push_back({assets.snapshot(model), {}, false});
+            if (!mesh || mesh.domain != domain)
+            {
+                throw std::invalid_argument("invalid mesh snapshot or asset domain");
+            }
+            roots_.push_back({mesh, {}, false});
         }
-        roots_.push_back({assets.snapshot(request_.materialTemplate), {}, false});
-        roots_.push_back({assets.snapshot(request_.presentProgram), {}, false});
+        roots_.push_back({request_.materialTemplate, {}, false});
+        roots_.push_back({request_.presentProgram, {}, false});
 
         // Preconditions on an empty renderer/cache are checked by the public
         // renderer entry point. From here on, all partial resources are ours.
@@ -104,10 +86,9 @@ void VulkanScenePreparation::advance()
                         [&](const auto& source) -> ResourcePreparationResult
                         {
                             using T = std::decay_t<decltype(source)>;
-                            if constexpr (std::is_same_v<T,
-                                                         asset::AssetSnapshot<asset::ModelAsset>>)
+                            if constexpr (std::is_same_v<T, asset::AssetSnapshot<asset::MeshAsset>>)
                             {
-                                return preparations_.prepareModel(cache_, source);
+                                return preparations_.prepareMesh(cache_, source);
                             }
                             else if constexpr (std::is_same_v<T, asset::AssetSnapshot<
                                                                      asset::MaterialTemplateAsset>>)
@@ -158,8 +139,9 @@ void VulkanScenePreparation::advance()
         }
         else if (status_.state == ScenePreparationState::PreparingPipelines)
         {
-            const auto materialTemplate = cache_.materialTemplate(request_.materialTemplate);
-            const auto present = cache_.shaderProgram(request_.presentProgram);
+            const auto materialTemplate =
+                cache_.materialTemplate(request_.materialTemplate.version.handle);
+            const auto present = cache_.shaderProgram(request_.presentProgram.version.handle);
             if (!materialTemplate || !present)
             {
                 throw std::logic_error("scene pipeline dependencies are missing");
@@ -182,8 +164,7 @@ void VulkanScenePreparation::activate()
     {
         throw std::logic_error("scene preparation must be ready before activation");
     }
-    // Completed GPU objects stay in renderer/cache. The source owner may now
-    // move its CPU registries into the live application without backend reads.
+    // Completed GPU objects stay in renderer/cache. CPU scene ownership stays with the caller.
     ownsResources_ = false;
     roots_.clear();
     request_ = {};

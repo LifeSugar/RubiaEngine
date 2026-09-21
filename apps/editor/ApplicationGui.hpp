@@ -3,6 +3,7 @@
 #include "EditorFwd.hpp"
 #include "content/ContentLoadStatus.hpp"
 #include "texture/TextureImportRegistry.hpp"
+#include "render/ResourcePreparation.hpp"
 
 #include <optional>
 #include <vector>
@@ -18,6 +19,9 @@ struct ApplicationGuiContext
     render::ApplicationGuiRenderBridge& render;
     const importer::texture::TextureImportRegistry* textureImports = nullptr;
     const ContentLoadStatus* contentLoading = nullptr;
+    // Optional non-owning port. Store tickets for status/cancel/release; the App
+    // advances work before GUI/frame recording, never from draw().
+    render::ResourcePreparation* preparations = nullptr;
 };
 
 /// Per-frame GUI decisions consumed before building the scene RenderFrame.

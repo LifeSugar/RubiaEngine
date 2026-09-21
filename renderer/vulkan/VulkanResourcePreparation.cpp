@@ -37,14 +37,18 @@ ResourcePreparationCode preparationCode(UploadEnqueueCode code)
 } // namespace
 VulkanResourcePreparation::VulkanResourcePreparation(const Device& device,
                                                      VulkanUploadService& uploads,
+                                                     RetiredResources& retired,
+                                                     render::ResourcePreparationOptions options,
                                                      std::size_t maxRequests)
-    : device_(device), uploads_(uploads), maxRequests_(maxRequests),
-      thread_(std::this_thread::get_id())
+    : device_(device), uploads_(uploads), retired_(retired), maxRequests_(maxRequests),
+      options_(options), thread_(std::this_thread::get_id())
 {
     if (!maxRequests_)
     {
         throw std::invalid_argument("preparation capacity must be positive");
     }
+    if (!render::validMaterialParameterMemory(options_.material.parameterMemory))
+        throw std::invalid_argument("invalid material parameter memory policy");
 }
 void VulkanResourcePreparation::checkThread() const
 {
@@ -162,21 +166,7 @@ ResourcePreparationResult VulkanResourcePreparation::prepareMaterial(
     try
     {
         auto target = preparationTarget(cache, source);
-        return prepare(std::move(target), makeMaterialPreparation(cache, std::move(source)));
-    }
-    catch (const std::invalid_argument& error)
-    {
-        return {ResourcePreparationCode::InvalidRequest, {}, error.what()};
-    }
-}
-ResourcePreparationResult VulkanResourcePreparation::prepareModel(
-    RenderAssetCache& cache, asset::AssetSnapshot<asset::ModelAsset> source)
-{
-    checkThread();
-    try
-    {
-        auto target = preparationTarget(cache, source);
-        return prepare(std::move(target), makeModelPreparation(cache, std::move(source)));
+        return prepare(std::move(target), makeMaterialPreparation(cache, std::move(source), options_.material));
     }
     catch (const std::invalid_argument& error)
     {
@@ -184,7 +174,7 @@ ResourcePreparationResult VulkanResourcePreparation::prepareModel(
     }
 }
 ResourcePreparationResult VulkanResourcePreparation::prepareAny(RenderAssetCache& cache,
-                                                                asset::AnyAssetSnapshot source)
+                                                                render::ResourceAssetSnapshot source)
 {
     struct Restore
     {
@@ -226,10 +216,7 @@ ResourcePreparationResult VulkanResourcePreparation::prepareAny(RenderAssetCache
             {
                 return prepareMaterial(cache, std::move(value));
             }
-            else if constexpr (std::is_same_v<Snapshot, asset::AssetSnapshot<asset::ModelAsset>>)
-            {
-                return prepareModel(cache, std::move(value));
-            }
+
         },
         std::move(source));
 }
@@ -258,8 +245,8 @@ ResourcePreparationResult VulkanResourcePreparation::prepare(
         return {ResourcePreparationCode::QueueFull, {}, "preparation ticket capacity exhausted"};
     }
     // Separate internal capacity prevents a parent consuming the only slot needed by its child.
-    // Direct dependencies are advanced sequentially; the seven-type graph has bounded depth.
-    constexpr auto slotsPerExternalRequest = std::variant_size_v<asset::AnyAssetSnapshot> + 1;
+    // Direct dependencies are advanced sequentially; the render-resource graph has bounded depth.
+    constexpr auto slotsPerExternalRequest = std::variant_size_v<render::ResourceAssetSnapshot> + 1;
     if (dependencyAdmission_ && records_.size() / slotsPerExternalRequest >= maxRequests_)
     {
         return {ResourcePreparationCode::Failed, {}, "dependency subscription capacity exhausted"};
@@ -500,41 +487,53 @@ void VulkanResourcePreparation::advance()
                 }
                 else if (advanceDependencies(record))
                 {
-                    if (!record.created)
+                    const auto current = record.target.cache->inspectPreparation(record.target);
+                    // A texture publication can already have rebuilt these exact
+                    // material bindings while preserving their parameter buffer.
+                    if (!record.created && current.resident == record.target.revision &&
+                        current.residentDependencies == record.target.dependencies &&
+                        record.target.cache->dependenciesCurrent(record.target))
                     {
-                        if (!record.target.cache->dependenciesCurrent(record.target))
-                        {
-                            throw std::runtime_error(
-                                "dependency version changed before resource creation");
-                        }
-                        record.preparation->createGpuResources(device_);
-                        record.pendingUpload = record.preparation->buildUploadRequest();
-                        record.created = true;
-                    }
-                    if (!record.pendingUpload.operations.empty())
-                    {
-                        const auto result = uploads_.tryEnqueue(record.pendingUpload);
-                        if (result.accepted())
-                        {
-                            record.upload = result.ticket;
-                        }
-                        else if (result.code != UploadEnqueueCode::QueueFull)
-                        {
-                            throw std::runtime_error(result.error);
-                        }
-                    }
-                    record.status = taskStatus(record);
-                    if (record.pendingUpload.operations.empty() &&
-                        (!record.upload ||
-                         uploads_.query(record.upload).state == UploadState::Completed))
-                    {
-                        if (!record.target.cache->dependenciesCurrent(record.target))
-                        {
-                            throw std::runtime_error(
-                                "dependency version changed before publication");
-                        }
-                        record.preparation->publish();
                         record.status.state = ResourcePreparationState::Ready;
+                    }
+                    else
+                    {
+                        if (!record.created)
+                        {
+                            if (!record.target.cache->dependenciesCurrent(record.target))
+                            {
+                                throw std::runtime_error(
+                                    "dependency version changed before resource creation");
+                            }
+                            record.preparation->createGpuResources(device_);
+                            record.pendingUpload = record.preparation->buildUploadRequest();
+                            record.created = true;
+                        }
+                        if (!record.pendingUpload.operations.empty())
+                        {
+                            const auto result = uploads_.tryEnqueue(record.pendingUpload);
+                            if (result.accepted())
+                            {
+                                record.upload = result.ticket;
+                            }
+                            else if (result.code != UploadEnqueueCode::QueueFull)
+                            {
+                                throw std::runtime_error(result.error);
+                            }
+                        }
+                        record.status = taskStatus(record);
+                        if (record.pendingUpload.operations.empty() &&
+                            (!record.upload ||
+                             uploads_.query(record.upload).state == UploadState::Completed))
+                        {
+                            if (!record.target.cache->dependenciesCurrent(record.target))
+                            {
+                                throw std::runtime_error(
+                                    "dependency version changed before publication");
+                            }
+                            record.preparation->publish(retired_);
+                            record.status.state = ResourcePreparationState::Ready;
+                        }
                     }
                 }
             }

@@ -1,3 +1,4 @@
+#include "vulkan/RetiredResources.hpp"
 #include "VulkanUploadTests.hpp"
 #include "vulkan/Fence.hpp"
 #include "vulkan/RenderAssetCache.hpp"
@@ -307,7 +308,8 @@ void runMeshPreparationTests(const Device& device)
 {
     VulkanUploadService uploads(device);
     RenderAssetCache cache;
-    VulkanResourcePreparation preparation(device, uploads);
+    RetiredResources preparationRetired;
+    VulkanResourcePreparation preparation(device, uploads, preparationRetired);
     const auto domain = std::make_shared<asset::AssetDomainTag>();
     const asset::MeshAssetHandle meshHandle{0, 1};
     auto source = preparationMesh();
@@ -367,6 +369,22 @@ void runMeshPreparationTests(const Device& device)
     require(preparation.empty() && cache.tryMesh(meshHandle),
             "ticket release removed published mesh");
 
+    // Replacing geometry transfers the old buffers to the caller's batch,
+    // while publishing the new version and leaving admission metadata intact.
+    const auto oldVertices = cache.mesh(meshHandle).vertexBuffer();
+    const auto replacement = preparation.prepareMesh(cache, {domain, {meshHandle, 2}, source});
+    require(replacement.accepted(), "mesh replacement was rejected");
+    uploads.drain();
+    preparation.advance();
+    require(preparation.status(replacement.ticket).state == ResourcePreparationState::Ready &&
+                cache.mesh(meshHandle).vertexBuffer() != oldVertices &&
+                preparationRetired.size() == 1,
+            "mesh replacement did not hand off the old owner");
+    preparation.release(replacement.ticket);
+    device.waitIdle();
+    preparationRetired.clear();
+    require(bool(cache.mesh(meshHandle)), "retiring old geometry destroyed the resident");
+
     // Cancellation after one submission must retain the source until that batch retires.
     const asset::MeshAssetHandle cancelledHandle{1, 1};
     auto cancelledSource = preparationMesh();
@@ -419,7 +437,7 @@ public:
         ++probe_.built;
         return {};
     }
-    void publish() override
+    void publish(RetiredResources&) override
     {
         if (probe_.failPublish)
         {
@@ -441,7 +459,8 @@ void runNoUploadPreparationTests(const Device& device)
     require(occupied.accepted(), "no-upload test could not occupy service capacity");
     RenderAssetCache cache;
     PreparationProbe ready, cancelled, failed, retry, rejected, createFailed;
-    VulkanResourcePreparation preparation(device, uploads, 2);
+    RetiredResources preparationRetired;
+    VulkanResourcePreparation preparation(device, uploads, preparationRetired, {}, 2);
     const auto domain = std::make_shared<asset::AssetDomainTag>();
     const auto enqueue = [&](uint32_t index, PreparationProbe& probe)
     {
@@ -509,7 +528,8 @@ void runVersionedPreparationTests(const Device& device)
     VulkanUploadService uploads(device, {1024, 2048, 1});
     RenderAssetCache cache;
     PreparationProbe failed;
-    VulkanResourcePreparation preparation(device, uploads);
+    RetiredResources preparationRetired;
+    VulkanResourcePreparation preparation(device, uploads, preparationRetired);
     asset::AssetManager assets;
     asset::TextureAsset::CreateInfo info;
     info.width = info.height = 2;
@@ -616,7 +636,8 @@ void runVersionedPreparationTests(const Device& device)
 
     // A second service with room for concurrent versions exercises supersession in flight.
     VulkanUploadService concurrent(device);
-    VulkanResourcePreparation updates(device, concurrent);
+    RetiredResources updatesRetired;
+    VulkanResourcePreparation updates(device, concurrent, updatesRetired);
     static_cast<void>(assets.replaceTexture(handle, asset::TextureAsset(info)));
     const auto v4 = assets.snapshot(handle);
     a = updates.prepareTexture(cache, v4);
@@ -689,7 +710,8 @@ void runPreparationLifetimeTests(const Device& device)
         const asset::TextureAssetHandle handle{0, 1};
         std::weak_ptr<asset::TextureAsset> weakSource;
         {
-            VulkanResourcePreparation preparation(device, uploads);
+            RetiredResources preparationRetired;
+            VulkanResourcePreparation preparation(device, uploads, preparationRetired);
             asset::TextureAsset::CreateInfo info;
             info.width = info.height = 2;
             info.format = asset::TextureFormat::RGBA8UNorm;

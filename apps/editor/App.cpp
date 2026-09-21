@@ -14,6 +14,7 @@ namespace rubia::editor
 
 App::~App()
 {
+    resourcePreparation_.cancelAll();
     discardContentLoading();
     discardTextureReimport();
     // Destruction after an exception must not release resources still in use by
@@ -43,11 +44,10 @@ void App::run(const RunConfig& config, ApplicationGui& gui)
         initImGui(config);
         guiRenderBridge.attach(renderer, renderAssets);
         ApplicationGuiContext guiContext{
-            assetManager, scene, guiRenderBridge, &textureImports, &contentLoadStatus_};
+            assetManager, scene, guiRenderBridge, &textureImports, &contentLoadStatus_,
+            &resourcePreparation_};
         gui.attach(guiContext);
         guiAttached = true;
-        contentLoadConfig_ = config.demoContent;
-        loadAfterFirstFrame_ = config.autoLoadDemo;
         mainLoop(gui);
     }
     catch (...)
@@ -92,15 +92,16 @@ void App::initVulkan(const RunConfig& config)
     rendererCreateInfo.framebufferExtent = window.framebufferExtent();
     rendererCreateInfo.framesInFlight = kMaxFramesInFlight;
     rendererCreateInfo.outputMode = config.outputMode;
+    rendererCreateInfo.resourcePreparation = config.resourcePreparation;
     renderer.createPresentation(rendererCreateInfo);
 
 }
 
 void App::cleanup()
 {
+    resourcePreparation_.cancelAll();
     discardContentLoading();
     contentLoadStatus_ = {};
-    loadAfterFirstFrame_ = false;
     discardTextureReimport();
     renderer.waitIdle();
     guiRenderBridge.detach();
@@ -162,6 +163,7 @@ void App::mainLoop(ApplicationGui& gui)
             recreateSwapChain(gui);
         }
 
+        resourcePreparation_.advance();
         updateContentLoading();
         processPendingTextureReimport();
 
@@ -177,11 +179,6 @@ void App::mainLoop(ApplicationGui& gui)
         {
             requestSwapChainRecreation();
         }
-        else if (loadAfterFirstFrame_)
-        {
-            loadAfterFirstFrame_ = false;
-            startContentLoading();
-        }
     }
 }
 
@@ -192,7 +189,8 @@ void App::drawGui(ApplicationGui& gui)
         scene,
         guiRenderBridge,
         &textureImports,
-        &contentLoadStatus_};
+        &contentLoadStatus_,
+        &resourcePreparation_};
     const ApplicationGuiFrameOutput output = gui.draw(context);
     for (const importer::texture::TextureReimportRequest& request : output.textureReimports)
     {

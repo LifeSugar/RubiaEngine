@@ -56,7 +56,6 @@ void App::updateContentLoading()
     using namespace std::chrono_literals;
     try
     {
-        renderer.advanceResourcePreparation();
         if (contentLoadStatus_.state == ContentLoadState::Preparing)
         {
             if (contentLoadFuture_.wait_for(0ms) != std::future_status::ready)
@@ -64,14 +63,9 @@ void App::updateContentLoading()
                 return;
             }
             preparedContent_ = contentLoadFuture_.get();
-            render::SceneResourceRequest request;
-            // Aliasing ownership keeps the whole prepared bundle alive while
-            // the backend reads its immutable AssetManager.
-            request.assets = std::shared_ptr<const asset::AssetManager>(
-                preparedContent_, &preparedContent_->assets);
-            request.models = {preparedContent_->content.model};
-            request.materialTemplate = preparedContent_->content.materialTemplate;
-            request.presentProgram = preparedContent_->content.presentProgram;
+            auto request = render::makeSceneResourceRequest(preparedContent_->assets,
+                {preparedContent_->content.model}, preparedContent_->content.materialTemplate,
+                preparedContent_->content.presentProgram);
             renderer.beginScenePreparation(renderAssets, std::move(request));
             const auto status = renderer.scenePreparationStatus();
             if (status.state == render::ScenePreparationState::Failed)

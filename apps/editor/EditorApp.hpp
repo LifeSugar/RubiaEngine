@@ -10,7 +10,7 @@ namespace rubia::editor
 class EditorApp final
 {
 public:
-    void run(bool autoLoadDemo = true);
+    void run();
     void runRenderTest();
 
 private:

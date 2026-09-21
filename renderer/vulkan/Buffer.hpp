@@ -57,6 +57,10 @@ public:
     void* map(VkDeviceSize offset = 0, VkDeviceSize size = VK_WHOLE_SIZE);
     /// Unmaps the buffer memory if it is currently mapped.
     void unmap() noexcept;
+    /// Writes an unmapped, host-visible allocation and flushes non-coherent memory.
+    /// Caller must exclude overlapping GPU use; intended for unpublished buffers.
+    void write(const void* data, VkDeviceSize size, VkDeviceSize offset = 0);
+    [[nodiscard]] VkMemoryPropertyFlags memoryProperties() const noexcept { return memoryProperties_; }
 
     [[nodiscard]] VkDevice ownerDevice() const noexcept { return ownerDevice_; }
     [[nodiscard]] VkBufferUsageFlags usage() const noexcept { return usage_; }
@@ -64,6 +68,7 @@ public:
 private:
     VkDevice ownerDevice_ = VK_NULL_HANDLE;
     VkBufferUsageFlags usage_ = 0;
+    VkMemoryPropertyFlags memoryProperties_ = 0;
 #if VK_RENDERER_USE_VMA
     /// Allocator that owns the buffer allocation.
     VmaAllocator allocator_ = VK_NULL_HANDLE;

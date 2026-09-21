@@ -369,6 +369,8 @@ void VulkanRenderer::createPresentation(const CreateInfo& createInfo)
             "VulkanRenderer requires a non-zero render object capacity");
     }
 
+    if (!render::validMaterialParameterMemory(createInfo.resourcePreparation.material.parameterMemory))
+        throw std::invalid_argument("invalid material parameter memory policy");
     reset();
     context_ = createInfo.context;
     outputMode_ = createInfo.outputMode;
@@ -382,9 +384,10 @@ void VulkanRenderer::createPresentation(const CreateInfo& createInfo)
             createInfo.framebufferExtent;
         swapchainResources_.create(device, swapchainCreateInfo);
 
-        createFrameContexts(createInfo.framesInFlight);
+        createFrameSlots(createInfo.framesInFlight);
         uploads_ = std::make_unique<VulkanUploadService>(device);
-        resourcePreparation_ = std::make_unique<VulkanResourcePreparation>(device, *uploads_);
+        resourcePreparation_ = std::make_unique<VulkanResourcePreparation>(
+            device, *uploads_, pendingRetired_, createInfo.resourcePreparation);
     }
     catch (...)
     {
@@ -488,17 +491,6 @@ ResourcePreparationResult VulkanRenderer::prepareMaterial(
                 "resource preparation requires presentation and no scene preparation"};
     }
     return resourcePreparation_->prepareMaterial(cache, std::move(source));
-}
-ResourcePreparationResult VulkanRenderer::prepareModel(
-    RenderAssetCache& cache, asset::AssetSnapshot<asset::ModelAsset> source)
-{
-    if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
-    {
-        return {ResourcePreparationCode::InvalidRequest,
-                {},
-                "resource preparation requires presentation and no scene preparation"};
-    }
-    return resourcePreparation_->prepareModel(cache, std::move(source));
 }
 GpuTexture VulkanRenderer::uploadTextureAndWait(std::shared_ptr<const asset::TextureAsset> source)
 {
@@ -607,6 +599,7 @@ void VulkanRenderer::releaseSceneResources() noexcept
     if (context_ != nullptr)
     {
         context_->waitIdle();
+        collectRetiredResourcesAfterIdle();
     }
     presentPipeline_.reset();
     graphicsPipeline_.reset();
@@ -637,7 +630,8 @@ void VulkanRenderer::reset() noexcept
     resourcePreparation_.reset();
     if (uploads_) uploads_->shutdown();
     uploads_.reset();
-    frameContexts_.clear();
+    pendingRetired_.clear();
+    frameSlots_.clear();
     swapchainResources_.reset();
     outputMode_ = OutputMode::Runtime;
     context_ = nullptr;
@@ -650,6 +644,19 @@ void VulkanRenderer::waitIdle() const
     {
         context_->waitIdle();
     }
+}
+
+void VulkanRenderer::retireExternalResource(std::shared_ptr<const void> resource)
+{
+    if (!*this || !resource)
+        throw std::invalid_argument("retirement requires a renderer and an owned resource");
+    pendingRetired_.retire(std::move(resource));
+}
+
+void VulkanRenderer::drainRetiredResources()
+{
+    waitIdle();
+    collectRetiredResourcesAfterIdle();
 }
 
 void VulkanRenderer::resize(VkExtent2D framebufferExtent)
@@ -668,10 +675,7 @@ void VulkanRenderer::resize(VkExtent2D framebufferExtent)
     device.waitIdle();
 
     // Recorded commands reference the old framebuffers and render pass.
-    for (FrameContext& frame : frameContexts_)
-    {
-        frame.resetCommands();
-    }
+    collectRetiredResourcesAfterIdle();
 
     VkExtent2D renderExtent = framebufferExtent;
     if (outputMode_ == OutputMode::Editor &&
@@ -697,7 +701,7 @@ void VulkanRenderer::resize(VkExtent2D framebufferExtent)
             outputMode_ == OutputMode::Editor
                 ? renderExtent
                 : swapchainResources_.extent(),
-            static_cast<uint32_t>(frameContexts_.size()),
+            static_cast<uint32_t>(frameSlots_.size()),
             sceneColorFormat_,
             sceneDepthFormat_);
     std::vector<RenderTarget> newEditorViewportTargets;
@@ -707,7 +711,7 @@ void VulkanRenderer::resize(VkExtent2D framebufferExtent)
             device,
             editorViewportRenderPass_.get(),
             renderExtent,
-            static_cast<uint32_t>(frameContexts_.size()),
+            static_cast<uint32_t>(frameSlots_.size()),
             editorViewportFormat_);
     }
     sceneRenderTargets_ = std::move(newSceneRenderTargets);
@@ -717,7 +721,7 @@ void VulkanRenderer::resize(VkExtent2D framebufferExtent)
         ++editorViewportRevision_;
     }
     recreatePresentDescriptorSets(
-        static_cast<uint32_t>(frameContexts_.size()));
+        static_cast<uint32_t>(frameSlots_.size()));
     presentOutputTransferFunction_ =
         selectPresentOutputTransferFunction(
             swapchainResources_.format(),
@@ -767,7 +771,7 @@ void VulkanRenderer::resizeEditorViewport(VkExtent2D extent)
             device,
             sceneRenderPass_.get(),
             extent,
-            static_cast<uint32_t>(frameContexts_.size()),
+            static_cast<uint32_t>(frameSlots_.size()),
             sceneColorFormat_,
             sceneDepthFormat_);
     std::vector<RenderTarget> newEditorViewportTargets =
@@ -775,10 +779,10 @@ void VulkanRenderer::resizeEditorViewport(VkExtent2D extent)
             device,
             editorViewportRenderPass_.get(),
             extent,
-            static_cast<uint32_t>(frameContexts_.size()),
+            static_cast<uint32_t>(frameSlots_.size()),
             editorViewportFormat_);
     const uint32_t frameCount =
-        static_cast<uint32_t>(frameContexts_.size());
+        static_cast<uint32_t>(frameSlots_.size());
     const std::vector<VkDescriptorPoolSize> poolSizes = {
         {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, frameCount},
         {VK_DESCRIPTOR_TYPE_SAMPLER, frameCount}
@@ -799,10 +803,7 @@ void VulkanRenderer::resizeEditorViewport(VkExtent2D extent)
 
     // Recorded commands and presentation descriptors reference the previous
     // scene targets.
-    for (FrameContext& frame : frameContexts_)
-    {
-        frame.resetCommands();
-    }
+    collectRetiredResourcesAfterIdle();
     sceneRenderTargets_ = std::move(newSceneRenderTargets);
     editorViewportTargets_ = std::move(newEditorViewportTargets);
     presentDescriptorSets_.clear();
@@ -872,8 +873,11 @@ VulkanRenderer::RenderResult VulkanRenderer::renderFrame(
     }
 
     const Device& device = context_->device();
-    FrameContext& frame = frameContexts_[currentFrame_];
+    RenderFrameSlot& slot = frameSlots_[currentFrame_];
+    FrameContext& frame = slot.context;
     frame.waitUntilReusable();
+    frame.resetCommands();
+    slot.retired.clear();
 
     uint32_t imageIndex = 0;
     const VkResult acquireResult = swapchainResources_.acquireNextImage(
@@ -900,7 +904,6 @@ VulkanRenderer::RenderResult VulkanRenderer::renderFrame(
     {
         updateFrameData(currentFrame_, *sceneFrame);
     }
-    frame.resetCommands();
     recordCommandBuffer(
         frame.commandBuffer(),
         currentFrame_,
@@ -938,6 +941,11 @@ VulkanRenderer::RenderResult VulkanRenderer::renderFrame(
         throw std::runtime_error("failed to submit draw command buffer");
     }
 
+    // No allocation or destruction after submit: associate only with this NEW
+    // submission, never the previous fence cycle we waited for above. Early
+    // acquire returns and exceptions before submit leave pendingRetired_ intact.
+    slot.retired.swap(pendingRetired_);
+
     const VkResult presentResult =
         swapchainResources_.present(device.presentQueue(), imageIndex);
     if (presentResult == VK_ERROR_OUT_OF_DATE_KHR ||
@@ -951,7 +959,7 @@ VulkanRenderer::RenderResult VulkanRenderer::renderFrame(
     }
 
     currentFrame_ =
-        (currentFrame_ + 1) % static_cast<uint32_t>(frameContexts_.size());
+        (currentFrame_ + 1) % static_cast<uint32_t>(frameSlots_.size());
     return needsResize
         ? RenderResult::NeedsResize
         : RenderResult::Rendered;
@@ -960,7 +968,7 @@ VulkanRenderer::RenderResult VulkanRenderer::renderFrame(
 VulkanRenderer::operator bool() const noexcept
 {
     return context_ != nullptr && static_cast<bool>(swapchainResources_) &&
-        !frameContexts_.empty();
+        !frameSlots_.empty();
 }
 
 bool VulkanRenderer::sceneReady() const noexcept
@@ -972,21 +980,21 @@ bool VulkanRenderer::hasSceneResources() const noexcept
 {
     const bool editorResourcesValid = outputMode_ != OutputMode::Editor ||
         (static_cast<bool>(editorViewportRenderPass_) &&
-         editorViewportTargets_.size() == frameContexts_.size() &&
+         editorViewportTargets_.size() == frameSlots_.size() &&
          editorViewportFormat_ != VK_FORMAT_UNDEFINED &&
          editorViewportRevision_ != 0);
     return context_ != nullptr &&
         frameDataResources_.frameCount() != 0 &&
         static_cast<bool>(swapchainResources_) &&
         static_cast<bool>(sceneRenderPass_) &&
-        sceneRenderTargets_.size() == frameContexts_.size() &&
+        sceneRenderTargets_.size() == frameSlots_.size() &&
         static_cast<bool>(presentSampler_) &&
         static_cast<bool>(presentDescriptorSetLayout_) &&
         static_cast<bool>(presentDescriptorPool_) &&
-        presentDescriptorSets_.size() == frameContexts_.size() &&
+        presentDescriptorSets_.size() == frameSlots_.size() &&
         static_cast<bool>(graphicsPipeline_) &&
         static_cast<bool>(presentPipeline_) &&
-        !frameContexts_.empty() &&
+        !frameSlots_.empty() &&
         editorResourcesValid;
 }
 
@@ -1008,16 +1016,26 @@ VulkanRenderer::editorViewportOutput(uint32_t frameIndex) const
     };
 }
 
-void VulkanRenderer::createFrameContexts(uint32_t frameCount)
+void VulkanRenderer::collectRetiredResourcesAfterIdle()
+{
+    for (RenderFrameSlot& slot : frameSlots_)
+    {
+        slot.context.resetCommands();
+        slot.retired.clear();
+    }
+    pendingRetired_.clear();
+}
+
+void VulkanRenderer::createFrameSlots(uint32_t frameCount)
 {
     const Device& device = context_->device();
-    std::vector<FrameContext> newContexts;
+    std::vector<RenderFrameSlot> newContexts;
     newContexts.reserve(frameCount);
     for (uint32_t i = 0; i < frameCount; ++i)
     {
         newContexts.emplace_back(device);
     }
-    frameContexts_ = std::move(newContexts);
+    frameSlots_ = std::move(newContexts);
     currentFrame_ = 0;
 }
 

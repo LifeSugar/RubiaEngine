@@ -32,13 +32,9 @@ int main(int argc, char** argv)
             editor.runRenderTest();
             std::cout << "[OK] Editor render test passed\n";
         }
-        else if (argc == 3 && std::string_view(argv[1]) == "--editor" &&
-                 std::string_view(argv[2]) == "--empty")
-        {
-            rubia::editor::EditorApp editor;
-            editor.run(false);
-        }
-        else if (argc == 2 && std::string_view(argv[1]) == "--editor")
+        // --empty remains a compatibility alias; every normal launch starts empty.
+        else if ((argc == 2 || (argc == 3 && std::string_view(argv[2]) == "--empty")) &&
+                 std::string_view(argv[1]) == "--editor")
         {
             rubia::editor::EditorApp editor;
             editor.run();

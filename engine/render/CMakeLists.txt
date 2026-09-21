@@ -23,5 +23,11 @@ target_sources(rubia_engine PRIVATE
     RenderView.hpp
     SceneRenderExtractor.cpp
     SceneRenderExtractor.hpp
+    SceneResourcePreparation.cpp
+    ResourcePreparationSource.hpp
+    ResourcePreparationTypes.hpp
+    ResourcePreparationOptions.hpp
+    ResourcePreparation.hpp
+    ResourcePreparation.cpp
     SceneResourcePreparation.hpp
 )

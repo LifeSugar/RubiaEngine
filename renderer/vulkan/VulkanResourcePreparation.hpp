@@ -12,10 +12,14 @@ class VulkanUploadService;
 // Render-thread-only. Device/service outlive the manager; caches outlive their requests
 // and all published GPU uses. Source bytes must remain immutable while retained.
 // Scene admission and the once-per-frame UploadService::tick stay with Renderer.
+// The retirement batch outlives the manager; its owner clears it only after all
+// prior graphics uses complete. No publication may interleave draw recording.
 class VulkanResourcePreparation final
 {
 public:
     VulkanResourcePreparation(const Device& device, VulkanUploadService& uploads,
+                              RetiredResources& retired,
+                              render::ResourcePreparationOptions options = {},
                               std::size_t maxRequests = 1024);
     ~VulkanResourcePreparation();
     VulkanResourcePreparation(const VulkanResourcePreparation&) = delete;
@@ -32,15 +36,15 @@ public:
         RenderAssetCache& cache, asset::AssetSnapshot<asset::MaterialTemplateAsset> source);
     ResourcePreparationResult prepareMaterial(RenderAssetCache& cache,
                                               asset::AssetSnapshot<asset::MaterialAsset> source);
-    ResourcePreparationResult prepareModel(RenderAssetCache& cache,
-                                           asset::AssetSnapshot<asset::ModelAsset> source);
+
     // Backend extension point. The operation must publish into the supplied target.
     // Takes ownership even on rejection; source callers retain their own immutable assets for
     // retry.
     ResourcePreparationResult prepare(ResourcePreparationTarget target,
                                       std::unique_ptr<IResourcePreparation> preparation);
     // Call at a frame boundary before recording draws. Never ticks/drains the service;
-    // replacement publication currently waits for submitted GPU users before committing.
+    // replaced owners go to the caller's retirement batch. Texture replacement
+    // creates new descriptor sets and preserves immutable parameter allocations.
     void advance();
     ResourcePreparationStatus status(ResourcePreparationTicket ticket) const;
     // Cancels only this subscriber; the last cancellation retires the shared task.
@@ -65,7 +69,7 @@ private:
         std::size_t subscribers = 0;
         struct Dependency
         {
-            asset::AnyAssetSnapshot source;
+            render::ResourceAssetSnapshot source;
             ResourcePreparationTicket ticket;
             bool ready = false;
         };
@@ -79,14 +83,16 @@ private:
         std::optional<ResourcePreparationStatus> cancelled;
         bool internal = false;
     };
-    ResourcePreparationResult prepareAny(RenderAssetCache& cache, asset::AnyAssetSnapshot source);
+    ResourcePreparationResult prepareAny(RenderAssetCache& cache, render::ResourceAssetSnapshot source);
     bool advanceDependencies(PreparationRecord& record);
     void checkThread() const;
     void retire(PreparationRecord& record);
     ResourcePreparationStatus taskStatus(const PreparationRecord& record) const;
     const Device& device_;
     VulkanUploadService& uploads_;
+    RetiredResources& retired_; // Outlives this manager; caller supplies GPU-safe reclamation.
     std::size_t maxRequests_;
+    const render::ResourcePreparationOptions options_;
     std::thread::id thread_;
     uint64_t nextTicket_ = 1;
     bool dependencyAdmission_ = false;

@@ -11,6 +11,7 @@
 #include "vulkan/VulkanContext.hpp"
 #include "vulkan/VulkanApplicationGuiRenderBridge.hpp"
 #include "vulkan/VulkanRenderer.hpp"
+#include "vulkan/VulkanResourcePreparationBridge.hpp"
 #include "vulkan/Window.hpp"
 
 #include <cstdint>
@@ -41,7 +42,7 @@ public:
         uint32_t windowHeight = 720;
         std::string windowTitle = "RubiaEngine";
         bool enableDocking = true;
-        bool autoLoadDemo = true;
+        render::ResourcePreparationOptions resourcePreparation;
         std::string imguiIniFilename;
         rhi::vulkan::VulkanRenderer::OutputMode outputMode =
             rhi::vulkan::VulkanRenderer::OutputMode::Runtime;
@@ -67,6 +68,11 @@ public:
 
     void run();
     void run(const RunConfig& config, ApplicationGui& gui);
+    // Frontend callers submit CPU handles/snapshots without a Vulkan cache or device.
+    [[nodiscard]] render::ResourcePreparation& resourcePreparation() noexcept
+    {
+        return resourcePreparation_;
+    }
 private:
     struct PreparedContent
     {
@@ -99,6 +105,7 @@ private:
     scene::Scene scene;
     rhi::vulkan::RenderAssetCache renderAssets;
     rhi::vulkan::VulkanRenderer renderer;
+    rhi::vulkan::VulkanResourcePreparationBridge resourcePreparation_{renderer, renderAssets};
     // Must be destroyed before the renderer, device, and GLFW window.
     ImGuiLayer imguiLayer;
     // Must release ImGui descriptors before ImGuiLayer is destroyed.
@@ -108,7 +115,6 @@ private:
     static constexpr uint32_t kMaxFramesInFlight = 2;
     ContentLoadStatus contentLoadStatus_;
     DemoContentLoader::CreateInfo contentLoadConfig_;
-    bool loadAfterFirstFrame_ = false;
     std::shared_ptr<std::atomic<bool>> contentLoadCancelled_;
     std::future<std::unique_ptr<PreparedContent>> contentLoadFuture_;
     std::shared_ptr<PreparedContent> preparedContent_;

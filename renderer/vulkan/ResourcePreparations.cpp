@@ -11,7 +11,7 @@
 namespace rubia::rhi::vulkan
 {
 ResourcePreparationTarget preparationTarget(RenderAssetCache& cache,
-                                            const asset::AnyAssetSnapshot& source)
+                                            const render::ResourceAssetSnapshot& source)
 {
     auto result = std::visit(
         [&](const auto& value)
@@ -27,8 +27,8 @@ ResourcePreparationTarget preparationTarget(RenderAssetCache& cache,
     using Key = std::tuple<size_t, uint32_t, uint32_t>;
     std::map<Key, asset::AssetDependencyVersion> versions;
     std::set<Key> active;
-    std::function<void(const asset::AnyAssetSnapshot&, bool)> walk;
-    walk = [&](const asset::AnyAssetSnapshot& node, bool root)
+    std::function<void(const render::ResourceAssetSnapshot&, bool)> walk;
+    walk = [&](const render::ResourceAssetSnapshot& node, bool root)
     {
         std::visit(
             [&](const auto& value)
@@ -58,7 +58,7 @@ ResourcePreparationTarget preparationTarget(RenderAssetCache& cache,
                 {
                     for (const auto& child : value.dependencies->direct)
                     {
-                        walk(child, false);
+                        walk(render::resourceSnapshot(child), false);
                     }
                 }
                 active.erase(key);
@@ -82,9 +82,12 @@ public:
           dependencies_(std::move(source.dependencies))
     {
     }
-    std::vector<asset::AnyAssetSnapshot> dependencies() const override
+    std::vector<render::ResourceAssetSnapshot> dependencies() const override
     {
-        return dependencies_ ? dependencies_->direct : std::vector<asset::AnyAssetSnapshot>{};
+        std::vector<render::ResourceAssetSnapshot> result;
+        if (dependencies_)
+            for (const auto& source : dependencies_->direct) result.push_back(render::resourceSnapshot(source));
+        return result;
     }
     UploadRequest buildUploadRequest() override
     {
@@ -114,9 +117,9 @@ public:
         source_.reset();
         return request;
     }
-    void publish() override
+    void publish(RetiredResources& retired) override
     {
-        cache_.publishPreparedTexture(*device_, target_, std::move(*texture_));
+        cache_.publishPreparedTexture(*device_, retired, target_, std::move(*texture_));
     }
 
 private:
@@ -148,7 +151,7 @@ public:
         source_.reset();
         return request;
     }
-    void publish() override
+    void publish(RetiredResources& retired) override
     {
         if (reuseGeometry_)
         {
@@ -156,7 +159,7 @@ public:
         }
         else
         {
-            cache_.publishPreparedMesh(*device_, target_, std::move(*mesh_));
+            cache_.publishPreparedMesh(retired, target_, std::move(*mesh_));
         }
     }
 
@@ -173,9 +176,9 @@ public:
         device_ = &device;
         shader_ = std::make_shared<GpuShader>(device, source_);
     }
-    void publish() override
+    void publish(RetiredResources& retired) override
     {
-        cache_.publishPreparedShader(*device_, target_, std::move(shader_));
+        cache_.publishPreparedShader(retired, target_, std::move(shader_));
     }
 
 private:
@@ -195,9 +198,9 @@ public:
         }
         program_ = std::make_shared<GpuShaderProgram>(device, source_, std::move(shaders));
     }
-    void publish() override
+    void publish(RetiredResources& retired) override
     {
-        cache_.publishPreparedShaderProgram(*device_, target_, std::move(program_));
+        cache_.publishPreparedShaderProgram(retired, target_, std::move(program_));
     }
 
 private:
@@ -213,9 +216,9 @@ public:
         layout_ = std::make_shared<GpuMaterialTemplate>(device, source_,
                                                         cache_.shaderProgram(source_->program()));
     }
-    void publish() override
+    void publish(RetiredResources& retired) override
     {
-        cache_.publishPreparedMaterialTemplate(*device_, target_, std::move(layout_));
+        cache_.publishPreparedMaterialTemplate(retired, target_, std::move(layout_));
     }
 
 private:
@@ -224,7 +227,13 @@ private:
 class MaterialPreparation final : public PreparationBase<asset::MaterialAsset>
 {
 public:
-    using PreparationBase::PreparationBase;
+    MaterialPreparation(RenderAssetCache& cache, asset::AssetSnapshot<asset::MaterialAsset> source,
+                        render::MaterialPreparationOptions options)
+        : PreparationBase(cache, std::move(source)), options_(options)
+    {
+        if (!render::validMaterialParameterMemory(options_.parameterMemory))
+            throw std::invalid_argument("invalid material parameter memory policy");
+    }
     void createGpuResources(const Device& device) override
     {
         device_ = &device;
@@ -234,74 +243,67 @@ public:
             throw std::invalid_argument("material template is not prepared");
         }
         const auto& cpuLayout = layout_->source();
-        std::map<VkDescriptorType, uint32_t> counts;
-        for (const auto& binding : cpuLayout.bindings())
-        {
-            VkDescriptorType type;
-            switch (binding.type)
-            {
-            case asset::ShaderResourceType::UniformBuffer:
-                type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-                break;
-            case asset::ShaderResourceType::SampledImage:
-                type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-                break;
-            case asset::ShaderResourceType::Sampler:
-                type = VK_DESCRIPTOR_TYPE_SAMPLER;
-                break;
-            default:
-                throw std::invalid_argument("unsupported material descriptor type");
-            }
-            counts[type] += binding.arrayCount;
-        }
-        std::vector<VkDescriptorPoolSize> sizes;
-        for (const auto& pair : counts)
-        {
-            sizes.push_back({pair.first, pair.second});
-        }
-        pool_.create(device.get(), sizes, 1);
+        pool_ = layout_->createDescriptorPool(device);
         const auto sets = pool_.allocate(layout_->layout(), 1);
         std::vector<const GpuTexture*> textures;
         for (auto handle : source_->textures())
         {
             textures.push_back(cache_.tryTexture(handle));
         }
-        material_.create(device, *source_, cpuLayout, textures, sets.front());
+        const bool mapped = render::hasMemoryProperty(options_.parameterMemory,
+                                                       render::MaterialParameterMemory::HostVisible);
+        VkMemoryPropertyFlags properties = 0;
+        if (render::hasMemoryProperty(options_.parameterMemory, render::MaterialParameterMemory::DeviceLocal))
+            properties |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        if (mapped)
+            properties |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+        const VkBufferUsageFlags usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+            (mapped ? VkBufferUsageFlags{0} : VkBufferUsageFlags{VK_BUFFER_USAGE_TRANSFER_DST_BIT});
+        auto parameters = std::make_shared<Buffer>(device, source_->parameterData().size(), usage, properties);
+        if (mapped)
+            parameters->write(source_->parameterData().data(), source_->parameterData().size());
+        material_.create(device, *source_, cpuLayout, textures, sets.front(), std::move(parameters));
     }
-    void publish() override
+    UploadRequest buildUploadRequest() override
     {
-        cache_.publishPreparedMaterial(*device_, target_, std::move(material_), std::move(pool_),
+        if (render::hasMemoryProperty(options_.parameterMemory, render::MaterialParameterMemory::HostVisible))
+            return {}; // Direct writes (and any needed flush) already completed.
+        BufferUpload parameters;
+        parameters.destination = material_.parameterBufferResource();
+        parameters.source = {source_, source_->parameterData().data(), source_->parameterData().size()};
+        // A material UBO may be consumed by more than the fragment shader.
+        // Use the reflected parameter binding, not texture stages or a fixed pass.
+        const auto& cpuLayout = layout_->source();
+        const auto descriptor = cpuLayout.parameterBlock().descriptor;
+        for (const auto& binding : cpuLayout.bindings())
+        {
+            if (binding.set != descriptor.set || binding.binding != descriptor.binding)
+                continue;
+            if (binding.stages & asset::shaderStageMask(asset::ShaderStage::Vertex))
+                parameters.finalStages |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+            if (binding.stages & asset::shaderStageMask(asset::ShaderStage::Fragment))
+                parameters.finalStages |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            if (binding.stages & asset::shaderStageMask(asset::ShaderStage::Compute))
+                parameters.finalStages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        }
+        if (!parameters.finalStages)
+            throw std::invalid_argument("material parameter binding has no shader consumers");
+        parameters.finalAccess = VK_ACCESS_UNIFORM_READ_BIT;
+        UploadRequest request;
+        request.operations.emplace_back(std::move(parameters));
+        return request;
+    }
+    void publish(RetiredResources& retired) override
+    {
+        cache_.publishPreparedMaterial(retired, target_, std::move(material_), std::move(pool_),
                                        layout_, source_->textures());
     }
 
 private:
+    const render::MaterialPreparationOptions options_;
     std::shared_ptr<const GpuMaterialTemplate> layout_;
     GpuMaterial material_;
     DescriptorPool pool_;
-};
-class ModelPreparation final : public PreparationBase<asset::ModelAsset>
-{
-public:
-    using PreparationBase::PreparationBase;
-    void createGpuResources(const Device& device) override
-    {
-        device_ = &device;
-        // Model is a hierarchy. Its transitive mesh/material dependencies carry GPU objects.
-        for (const auto& node : source_->nodes())
-        {
-            for (auto mesh : node.meshes)
-            {
-                if (!cache_.tryMesh(mesh))
-                {
-                    throw std::invalid_argument("model mesh is not prepared");
-                }
-            }
-        }
-    }
-    void publish() override
-    {
-        cache_.publishPreparedModel(*device_, target_, source_);
-    }
 };
 } // namespace
 std::unique_ptr<IResourcePreparation> makeTexturePreparation(
@@ -350,21 +352,13 @@ std::unique_ptr<IResourcePreparation> makeMaterialTemplatePreparation(
     return std::make_unique<MaterialTemplatePreparation>(cache, std::move(source));
 }
 std::unique_ptr<IResourcePreparation> makeMaterialPreparation(
-    RenderAssetCache& cache, asset::AssetSnapshot<asset::MaterialAsset> source)
+    RenderAssetCache& cache, asset::AssetSnapshot<asset::MaterialAsset> source,
+    render::MaterialPreparationOptions options)
 {
     if (!source)
     {
         throw std::invalid_argument("invalid Material snapshot");
     }
-    return std::make_unique<MaterialPreparation>(cache, std::move(source));
-}
-std::unique_ptr<IResourcePreparation> makeModelPreparation(
-    RenderAssetCache& cache, asset::AssetSnapshot<asset::ModelAsset> source)
-{
-    if (!source)
-    {
-        throw std::invalid_argument("invalid Model snapshot");
-    }
-    return std::make_unique<ModelPreparation>(cache, std::move(source));
+    return std::make_unique<MaterialPreparation>(cache, std::move(source), options);
 }
 } // namespace rubia::rhi::vulkan

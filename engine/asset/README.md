@@ -116,5 +116,6 @@ Runtime/Editor smoke tests 验证 GPU 消费路径。
 MaterialTemplate、Material、Model。快照包含 domain、根版本、不可变数据及直接依赖快照；
 一次捕获内重复依赖共享数据，整个依赖图独立于 AssetManager 后续替换、扩容与销毁。
 例如 Model 快照包含 Mesh → Material → Template → Program → Shader，以及 Material 的 Texture。
-准备层比较完整依赖版本，因此只修改 Texture 也会使父 Material/Model 的准备结果需要刷新。
+GPU 准备层比较具体渲染资源的依赖版本，因此只修改 Texture 也会刷新 Material/Mesh 的准备结果。
+Model 快照仍可在 CPU 侧使用，但不进入后端 Preparation 或 GPU cache；渲染前端负责提取其 Mesh。
 快照捕获会复制数据，宜保存并复用；调用时仍需遵守 AssetManager 的单线程访问约束。

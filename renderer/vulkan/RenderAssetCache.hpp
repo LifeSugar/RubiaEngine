@@ -17,7 +17,8 @@
 namespace rubia::rhi::vulkan
 {
 
-/// Renderer-owned GPU representations reachable from one or more ModelAssets.
+/// Resident GPU representations. Publication hands replaced owners to the caller;
+/// frame slots and GPU-safe retirement belong to Renderer, not this cache.
 class RenderAssetCache final
 {
 public:
@@ -43,36 +44,35 @@ public:
     PreparationVersions inspectPreparation(const ResourcePreparationTarget& target) const;
     void acceptPreparation(const ResourcePreparationTarget& target);
     bool dependenciesCurrent(const ResourcePreparationTarget& target) const;
-    void publishPreparedTexture(const Device& device, const ResourcePreparationTarget& target,
+    void publishPreparedTexture(const Device& device, RetiredResources& retired,
+                                const ResourcePreparationTarget& target,
                                 GpuTexture texture);
-    void publishPreparedMesh(const Device& device, const ResourcePreparationTarget& target,
+    void publishPreparedMesh(RetiredResources& retired, const ResourcePreparationTarget& target,
                              Mesh mesh);
     // Refresh dependency readiness without allocating/uploading unchanged geometry.
     void publishPreparedMeshDependencies(const ResourcePreparationTarget& target);
-    void publishPreparedShader(const Device&, const ResourcePreparationTarget&,
+    void publishPreparedShader(RetiredResources&, const ResourcePreparationTarget&,
                                std::shared_ptr<const GpuShader>);
-    void publishPreparedShaderProgram(const Device&, const ResourcePreparationTarget&,
+    void publishPreparedShaderProgram(RetiredResources&, const ResourcePreparationTarget&,
                                       std::shared_ptr<const GpuShaderProgram>);
-    void publishPreparedMaterialTemplate(const Device&, const ResourcePreparationTarget&,
+    void publishPreparedMaterialTemplate(RetiredResources&, const ResourcePreparationTarget&,
                                          std::shared_ptr<const GpuMaterialTemplate>);
-    void publishPreparedModel(const Device&, const ResourcePreparationTarget&,
-                              std::shared_ptr<const asset::ModelAsset>);
-    void publishPreparedMaterial(const Device&, const ResourcePreparationTarget&, GpuMaterial,
+
+    void publishPreparedMaterial(RetiredResources&, const ResourcePreparationTarget&, GpuMaterial,
                                  DescriptorPool, std::shared_ptr<const GpuMaterialTemplate>,
                                  std::vector<asset::TextureAssetHandle>);
     std::shared_ptr<const GpuShader> shader(asset::ShaderAssetHandle) const;
     std::shared_ptr<const GpuShaderProgram> shaderProgram(asset::ShaderProgramAssetHandle) const;
     std::shared_ptr<const GpuMaterialTemplate> materialTemplate(
         asset::MaterialTemplateAssetHandle) const;
-    std::shared_ptr<const asset::ModelAsset> model(asset::ModelAssetHandle) const;
     // Legacy CPU/GPU transaction: stamp only after committing matching content.
     void setTextureVersion(asset::AssetDomainId domain,
                            asset::AssetVersion<asset::TextureAsset> version);
     uint64_t texturePublication(asset::TextureAssetHandle handle) const noexcept;
 
-    /// Commits a staged texture under the existing handle and rewrites every
-    /// cached material descriptor that references it. The caller must ensure
-    /// no submitted frame is using the old descriptors/resources.
+    /// Legacy synchronous transaction: creates replacement material bindings and
+    /// returns the previous texture for rollback. Caller must first finish all
+    /// GPU users, since the old bindings are reclaimed before this call returns.
     [[nodiscard]] GpuTexture commitTextureReplacement(
         const Device& device,
         const asset::AssetManager& assets,
@@ -107,13 +107,20 @@ private:
         GpuTexture texture;
     };
 
-    struct MaterialEntry : VersionedEntry
+    // Retire as one unit: the descriptor pool must outlive submitted descriptor
+    // uses, and its parameter buffer and prepared template must remain alive too.
+    struct MaterialResources
     {
         GpuMaterial material;
         std::vector<asset::TextureAssetHandle> textures;
         asset::MaterialTemplateAsset layout;
         std::shared_ptr<const GpuMaterialTemplate> preparedTemplate;
         DescriptorPool pool;
+    };
+
+    struct MaterialEntry : VersionedEntry
+    {
+        MaterialResources resources;
     };
 
     struct MeshEntry : VersionedEntry
@@ -153,7 +160,7 @@ private:
         }
         else
         {
-            return models_;
+            static_assert(!std::is_same_v<Handle, Handle>, "unsupported render resource handle");
         }
     }
     template <typename Handle> const auto& entries(Handle handle) const
@@ -161,14 +168,16 @@ private:
         return const_cast<RenderAssetCache*>(this)->entries(handle);
     }
     template <typename Handle, typename Resource>
-    void publishPrepared(const Device&, const ResourcePreparationTarget&,
+    void publishPrepared(RetiredResources&, const ResourcePreparationTarget&,
                          std::shared_ptr<const Resource>);
     std::vector<PreparedEntry<GpuShader>> shaders_;
     std::vector<PreparedEntry<GpuShaderProgram>> programs_;
     std::vector<PreparedEntry<GpuMaterialTemplate>> templates_;
-    std::vector<PreparedEntry<asset::ModelAsset>> models_;
-    GpuTexture replaceTexture(const Device& device, asset::TextureAssetHandle handle,
-                              GpuTexture replacement);
+    // Builds all new descriptors first, then exchanges whole binding versions.
+    // The returned old texture is owned by retired until moved by the legacy path.
+    GpuTexture& replaceTexture(const Device& device, RetiredResources& retired,
+                               asset::TextureAssetHandle handle, GpuTexture replacement,
+                               asset::AssetContentRevision revision);
     asset::AssetDomainId domain_;
     uint64_t nextPublication_ = 1; // Does not reset: GUI tokens must notice cache reuse.
     std::vector<TextureEntry> textures_;

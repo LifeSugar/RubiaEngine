@@ -42,7 +42,7 @@ public:
 private:
     struct Root
     {
-        using Source = std::variant<asset::AssetSnapshot<asset::ModelAsset>,
+        using Source = std::variant<asset::AssetSnapshot<asset::MeshAsset>,
                                     asset::AssetSnapshot<asset::MaterialTemplateAsset>,
                                     asset::AssetSnapshot<asset::ShaderProgramAsset>>;
         std::optional<Source> source;

@@ -2,6 +2,7 @@
 #include "asset/MaterialTemplateAsset.hpp"
 #include "asset/ShaderAsset.hpp"
 #include "vulkan/DescriptorSetLayout.hpp"
+#include "vulkan/DescriptorPool.hpp"
 #include <memory>
 
 namespace rubia::rhi::vulkan
@@ -62,6 +63,8 @@ public:
     GpuMaterialTemplate(const Device& device,
                         std::shared_ptr<const asset::MaterialTemplateAsset> source,
                         std::shared_ptr<const GpuShaderProgram> program);
+    /// Allocates a pool sized for one material binding version.
+    [[nodiscard]] DescriptorPool createDescriptorPool(const Device& device) const;
     VkDescriptorSetLayout layout() const noexcept
     {
         return layout_.get();

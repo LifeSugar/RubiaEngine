@@ -1,3 +1,5 @@
+#include "render/SceneResourcePreparation.hpp"
+#include "render/ResourcePreparationSource.hpp"
 #include "asset/AssetManager.hpp"
 
 #include <iostream>
@@ -222,6 +224,30 @@ void testImmutableSnapshots()
     require(moved.contentRevision(mesh) == 2, "failed mesh replacement changed revision");
 }
 
+void testModelExpansion()
+{
+    static_assert(!std::is_constructible_v<rubia::render::ResourceAssetHandle, ModelAssetHandle>);
+    static_assert(!std::is_constructible_v<rubia::render::ResourceAssetSnapshot, AssetSnapshot<ModelAsset>>);
+    AssetManager assets;
+    MeshAsset::CreateInfo meshInfo;
+    meshInfo.vertices.resize(3);
+    meshInfo.submeshes.push_back({0, 3, 0, 0, {}});
+    const auto mesh = assets.createMesh(meshInfo);
+    ModelAsset::CreateInfo info;
+    info.nodes.resize(2);
+    info.nodes[0].meshes = {mesh, mesh};
+    info.nodes[1].meshes = {mesh};
+    const auto model = assets.createModel(info);
+    const auto resources = rubia::render::collectModelMeshes(assets, {model, model});
+    require(resources.size() == 1 && resources.front() == mesh, "model expansion duplicated mesh resources");
+    rejects<std::invalid_argument>([&] { static_cast<void>(rubia::render::resourceSnapshot(assets.snapshot(model))); });
+    info.nodes.resize(1);
+    info.nodes.front().meshes.clear();
+    const auto empty = assets.createModel(info);
+    require(rubia::render::collectModelMeshes(assets, {empty}).empty(), "hierarchy-only model created a GPU resource");
+    rejects<std::out_of_range>([&] { static_cast<void>(rubia::render::collectModelMeshes(assets, {ModelAssetHandle{}})); });
+}
+
 // Exercise every public overload even for asset types with no replacement API yet.
 template <typename Asset> void testInvalidManagedVersion(const AssetManager& assets)
 {
@@ -241,6 +267,7 @@ int main()
         testManagedReplacement();
         testManagedGeometry();
         testImmutableSnapshots();
+        testModelExpansion();
         const AssetManager assets;
         testInvalidManagedVersion<TextureAsset>(assets);
         testInvalidManagedVersion<MaterialTemplateAsset>(assets);

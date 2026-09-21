@@ -584,13 +584,14 @@ cache 记录 resident revision 与最高已接受请求版本。同槽位更新�
 
 ### 替换提交与外部使用
 
-新对象上传完成后，Texture / Mesh 替换当前先 device.waitIdle，再提交；整个 advance 必须位于
-本帧命令录制之前。原有帧可能仍引用旧 Buffer / ImageView / descriptor，这次保守等待保证其
-完成后才替换并销毁旧资源。后续可优化成按帧延迟回收，目前不声称零阻塞更新。
+新对象上传完成后，通用 Texture 发布为受影响材质创建新 descriptor 并共享不可变参数 buffer，
+再集中切换纹理和绑定。旧 Texture / Mesh / Material 交给 Renderer 按帧槽延迟释放。
+整个 advance 必须位于本帧 GUI 和场景命令构建之前。ImGui 预览 registration 同样版本化并退休。
+编辑器文件重导入事务仍保留显式同步及回滚；不声称所有入口都实现了零阻塞更新。
 
-cache 保存已发布材质的纹理 handle 和布局，纹理替换更新所有受影响材质 descriptor；全部
-引用及临时容器先准备，再进入 descriptor 写入与资源移动。GUI preview 使用独立发布序号
-检测缓存替换，下一次 preview 调用等待旧 GUI 使用结束并重新注册 descriptor。
+cache 保存已发布材质的纹理 handle 和布局，纹理替换为所有受影响材质创建新 descriptor；
+全部绑定及退休存储先准备，再集中移动资源。GUI preview 使用独立发布序号检测缓存替换，
+下一次 preview 创建新 registration，旧 registration 经 Renderer 的帧槽队列延迟释放。
 调用方应每帧获取 preview token，不跨资源推进保留已经录制好的命令或 GUI draw data。
 
 场景路径仍由原 ScenePreparation/prepareNext 协调，但发布时记录 domain/revision，可与独立
@@ -618,7 +619,7 @@ GPU 测试日志未发现 VUID / validation error。
 | Shader | GpuShader / VkShaderModule | 否 |
 | ShaderProgram | GpuShaderProgram、阶段模块引用、反射 descriptor layouts / pipeline layout | 否 |
 | MaterialTemplate | GpuMaterialTemplate、材质 descriptor layout、Program 引用 | 否 |
-| Material | GpuMaterial、参数 buffer、descriptor set 与所属 pool | 否，当前参数直接写 host-visible coherent buffer |
+| Material | GpuMaterial、参数 buffer、descriptor set 与所属 pool | 是，参数经 staging 上传到 device-local buffer（第 19 节更新） |
 | Model | 模型层级快照与依赖已就绪的发布记录 | 否，没有额外的 Model GPU allocation |
 
 “不需要 Upload”仅描述该类型自身。Material 依赖 Texture；Model 依赖 Mesh，
@@ -664,7 +665,7 @@ Shader/Program/Template/Material/Model 的 CPU 内容仍按现有只读资产规
 
 Renderer 暴露所有七类 prepare 方法并统一推进；Demo 的 ScenePreparation/prepareNext
 仍保留原有场景启用和 pipeline 协调，尚未迁移为 prepareModel 的组合调用。
-通用准备既不创建 Scene 实例，也不自动启用场景。GPU 替换仍在帧边界采用 waitIdle 保守提交。
+通用准备既不创建 Scene 实例，也不自动启用场景。Mesh、Material 及共享准备资源的旧对象由 Renderer 按帧槽延迟释放；Texture 发布采用新绑定并共享参数，旧纹理和旧绑定一起退休。详见 `renderer/vulkan/RESOURCE_RETIREMENT.md`。
 
 
 入口示例（调用顺序仍是先推进资源，再录制本帧命令）：
@@ -727,3 +728,101 @@ ScenePreparationState::Uploading 改为 PreparingResources，移除 submitted；
 绘制以及纹理更新。通用准备测试继续覆盖在途依赖取消与来源保活。
 
 本轮验证：Debug 构建通过，CTest 7/7 通过（含默认场景缓存命中断言）；git diff --check 通过，GPU 日志无 VUID / validation error。
+
+
+## 17. Model 留在 CPU 渲染前端（2026-09-21）
+
+本节更新第 15、16 节的 Model 后端准备方案。删除 VulkanRenderer / VulkanResourcePreparation
+的 prepareModel、ModelPreparation、Model 工厂，以及 RenderAssetCache 的 Model 发布、查询和缓存。
+CPU ModelAsset 继续保存节点层级、变换及 Mesh 引用，没有对应 GPU 准备 ticket 或驻留对象。
+
+`engine/render/SceneResourcePreparation.cpp` 提供 collectModelMeshes 和 makeSceneResourceRequest：
+在 CPU 渲染前端遍历模型，按 Mesh handle（含 generation）去重，校验当前场景的共同材质模板，
+然后捕获具体 Mesh、MaterialTemplate 和 Present ShaderProgram 快照。
+App 只调用这个入口，不承担模型遍历或 Vulkan 资源分解。
+
+SceneResourceRequest 不再传递 models 或 shared_ptr<AssetManager>，仅持有具体资源快照。
+VulkanScenePreparation 只接收 Mesh 等根请求并等待它们 Ready；不再理解 Model 节点树。
+纯层级模型不产生额外的 Mesh 请求。场景根进度现在是去重 Mesh 数量 + Template + Present Program。
+
+ResourceAssetHandle / ResourceAssetSnapshot 在后端无关的 render 层限定六种渲染资源，
+类型上排除 Model。依赖快照转换遇到纯 CPU 组合资源会拒绝；不能绕过类型入口把 Model
+作为通用 prepare 的目标。Mesh、Material 等具体渲染资源的依赖协调仍使用现有准备组件。
+
+CPU 的 PreparedContent 由调用方管理，后端不再延长整个模型/场景 bundle 的生命周期；
+具体快照在 CPU bundle 释放后仍有效。CPU 注册表移交不会影响 domain/版本匹配。
+已经存在的按帧延迟回收、不可变材质绑定和参数 buffer 复用保持原有行为。
+
+验证覆盖：多个模型/节点重复引用 Mesh 的去重、纯层级不产生 Mesh 资源、Model 无法转换为
+渲染资源类型、六类资源准备与依赖失败/取消、默认场景加载后的 Mesh CacheHit、CPU bundle
+提前释放后的快照保活，以及真实 Shader 替换在帧提交/fence 周期和 resize 时的延迟回收。
+
+本轮验证：Debug 构建通过，CTest 7/7 通过，git diff --check 通过；GPU 测试日志无 VUID / validation error，renderer/vulkan 源码中已无 ModelAsset / prepareModel / ModelPreparation。
+
+
+## 18. 增量资源准备贯通到前端（2026-09-21）
+
+新增 engine/render/ResourcePreparation 作为绑定一个渲染会话的主线程接口：
+prepare(AssetManager, ResourceAssetHandle) 在前端捕获快照，prepare(ResourceAssetSnapshot)
+接收显式快照，返回同一个 ResourcePreparationTicket，提供 status/cancel/release/cancelAll。
+Ticket、Status、Code、Disposition 移到 render 层，Vulkan 旧头只保留类型别名。
+Model 继续从类型上排除；CPU 前端拆成 Mesh 后逐个请求。
+
+VulkanResourcePreparationBridge 只绑定 renderer/cache、分发六类请求并记录自身订阅的
+归属，不复制任务、版本缓存或上传队列。销毁/清理时只取消释放自身订阅，不驱逐已驻留资源。
+App 在装配处持有适配器，对外暴露 render::ResourcePreparation；GUI context 也提供该端口。
+业务提交无需 Vulkan 对象。主循环独立 advance，移除 updateContentLoading 内隐式推进。
+
+同版本复用/共享、新版本替换、依赖准备、发布及旧资源延迟回收仍使用既有后端链路。
+QueueFull 是未接收，前端业务自行保存并重试；终态 ticket 必须 release。
+Ready 表示该快照及依赖已发布，不代表 Scene 实例加入、CPU/GPU 场景原子切换或 Pipeline
+热重建。新增 Mesh 要等 Ready 才可绘制，改变拓扑也需要调用方协调 CPU 可见性。
+磁盘文件事务式纹理重导入保留现有同步提交，未改变其回滚语义。
+
+测试将空编辑器与已有场景的独立请求改为前端端口，增量循环不再调用 updateContentLoading。
+覆盖所有六类 handle 请求、Shared 的独立取消、CacheHit、无效 handle 拒绝、cancelAll 清理，
+实际 Mesh 顶点 buffer 替换、Texture 替换后材质 descriptor 与 GUI 预览的逐帧切换。
+
+本轮验证：Debug 构建成功，CTest 7/7 通过（21.13 秒），GPU 日志无 VUID / validation error。
+
+
+## 19. Material 参数接入 staging 上传（2026-09-21）
+
+GpuMaterial::allocate 仅分配 DEVICE_LOCAL 参数 buffer 并创建未发布的描述符绑定，
+用途为 UNIFORM_BUFFER | TRANSFER_DST，不再 map/memcpy 参数。MaterialPreparation 构造
+BufferUpload：source.owner 持有不可变 MaterialAsset，destination 持有共享 Buffer，
+确保任务取消/释放后，已排队或在途的复制仍保有所需资源。
+
+finalStages 来自材质模板反射出的参数 UBO binding，finalAccess 为 UNIFORM_READ；
+UploadContext 负责 staging 和 transfer-write → uniform-read 同步。
+沿用通用 preparation 的上传准入、进度、取消和发布流程，参数传输完成前不替换缓存中的
+旧材质。仅纹理变化仍通过 withTextures 共享同一个不可变参数 buffer。
+
+当前统一使用 staging，包括 UMA；不假设驱动消除显式 copy，也没有额外线程或上传服务。
+后续可以在后端增加 DEVICE_LOCAL + HOST_VISIBLE 的直接写入策略，前端 ticket 契约不变。
+
+验证包含参数上传字节/用途/barrier 描述、上传目标保活与释放、队列满后重试、传输完成但
+发布前取消、新版本发布及旧绑定回收、缓存命中不重复上传，以及原有纹理重绑定共享测试。
+
+
+## 20. Renderer 会话级 Material 参数内存策略（2026-09-21）
+
+engine/render/ResourcePreparationOptions.hpp 定义 MaterialParameterMemory 位标志：DeviceLocal、
+HostVisible 及二者组合；默认 DeviceLocal。ResourcePreparationOptions.material.parameterMemory
+经 App::RunConfig / VulkanRenderer::CreateInfo 传给 VulkanResourcePreparation，按值保留为会话
+固定配置，创建 MaterialPreparation 时传入。其余资源类型不受该字段影响。
+
+DeviceLocal 要求设备本地 UBO 并走 staging；包含 HostVisible 则要求可映射内存并直接写入。
+组合为同时满足，不隐式回退；无效位/零值在创建阶段拒绝，不支持的分配在准备阶段报 Failed。
+GpuMaterial 只绑定并持有准备层分配的参数 Buffer，不再决定内存策略。
+
+Buffer 记录实际内存属性并提供 write：先检查边界与可映射属性，再 map/memcpy，非 coherent
+时 flush，最后 unmap。VMA 和原生路径均实现 flush；buffer move/reset 同步维护内存属性。
+直接写入仅用于未发布的新 buffer，完成后通过原有发布流程就绪，旧资源仍按帧延迟回收。
+缓存版本/共享 ticket 规则保持不变；不支持存活期间变更策略，应重建会话并清理旧缓存。
+
+测试：Runtime 渲染使用 HostVisible，Editor 使用默认 staging；检查 App 配置贯通到实际
+材质 buffer。独立测试对 HostVisible/组合策略校验实际属性及上传队列满时零传输发布，
+不支持组合时验证明确失败，另覆盖无效策略拒绝和 Buffer 范围写入、移动后的属性保留。
+
+本轮验证：Debug 构建成功，CTest 7/7 通过（21.53 秒），GPU 日志无 VUID / validation error，git diff --check 通过。

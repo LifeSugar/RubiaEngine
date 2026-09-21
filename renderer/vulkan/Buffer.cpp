@@ -3,6 +3,9 @@
 #include "vulkan/Device.hpp"
 
 #include <stdexcept>
+#include <cstring>
+#include <cstddef>
+#include <limits>
 #include <utility>
 
 namespace rubia::rhi::vulkan
@@ -69,6 +72,7 @@ Buffer::Buffer(Buffer&& other) noexcept
 {
     ownerDevice_ = std::exchange(other.ownerDevice_, VK_NULL_HANDLE);
     usage_ = std::exchange(other.usage_, 0);
+    memoryProperties_ = std::exchange(other.memoryProperties_, 0);
 }
 
 Buffer& Buffer::operator=(Buffer&& other) noexcept
@@ -78,6 +82,7 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept
         reset();
         ownerDevice_ = std::exchange(other.ownerDevice_, VK_NULL_HANDLE);
         usage_ = std::exchange(other.usage_, 0);
+        memoryProperties_ = std::exchange(other.memoryProperties_, 0);
 #if VK_RENDERER_USE_VMA
         allocator_ = std::exchange(other.allocator_, VK_NULL_HANDLE);
 #else
@@ -111,6 +116,7 @@ void Buffer::create(
     bufferInfo.size = size;
     bufferInfo.usage = usage;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkMemoryPropertyFlags selectedProperties = 0;
 
 #if VK_RENDERER_USE_VMA
     VmaAllocationCreateInfo allocationCreateInfo{};
@@ -139,6 +145,7 @@ void Buffer::create(
     allocator_ = device.allocator();
     buffer_ = newBuffer;
     allocation_ = newAllocation;
+    vmaGetAllocationMemoryProperties(allocator_, allocation_, &selectedProperties);
 #else
     VkBuffer newBuffer = VK_NULL_HANDLE;
     VkDeviceMemory newMemory = VK_NULL_HANDLE;
@@ -166,6 +173,9 @@ void Buffer::create(
             device.physical(),
             requirements.memoryTypeBits,
             memoryProperties);
+        VkPhysicalDeviceMemoryProperties physicalMemory{};
+        vkGetPhysicalDeviceMemoryProperties(device.physical(), &physicalMemory);
+        selectedProperties = physicalMemory.memoryTypes[allocationInfo.memoryTypeIndex].propertyFlags;
 
         if (vkAllocateMemory(
                 device.get(),
@@ -202,12 +212,14 @@ void Buffer::create(
     size_ = size;
     ownerDevice_ = device.get();
     usage_ = usage;
+    memoryProperties_ = selectedProperties;
 }
 
 void Buffer::reset() noexcept
 {
     ownerDevice_ = VK_NULL_HANDLE;
     usage_ = 0;
+    memoryProperties_ = 0;
     unmap();
 
 #if VK_RENDERER_USE_VMA
@@ -297,6 +309,36 @@ void Buffer::unmap() noexcept
         mappedData_ = nullptr;
     }
 #endif
+}
+
+void Buffer::write(const void* data, VkDeviceSize size, VkDeviceSize offset)
+{
+    if (!data || !size || offset > size_ || size > size_ - offset ||
+        size > std::numeric_limits<std::size_t>::max() ||
+        offset > std::numeric_limits<std::size_t>::max() ||
+        !(memoryProperties_ & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+        throw std::invalid_argument("buffer write requires valid bytes and host-visible memory");
+    auto* destination = static_cast<std::byte*>(map());
+    std::memcpy(destination + static_cast<std::size_t>(offset), data, static_cast<std::size_t>(size));
+    VkResult result = VK_SUCCESS;
+    if (!(memoryProperties_ & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+    {
+#if VK_RENDERER_USE_VMA
+        // VMA aligns the range to nonCoherentAtomSize within its mapped block.
+        result = vmaFlushAllocation(allocator_, allocation_, offset, size);
+#else
+        // This backend owns a dedicated allocation and map() maps all of it.
+        // Flushing the whole allocation satisfies atom alignment at both ends.
+        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        range.memory = memory_;
+        range.offset = 0;
+        range.size = VK_WHOLE_SIZE;
+        result = vkFlushMappedMemoryRanges(device_, 1, &range);
+#endif
+    }
+    unmap();
+    if (result != VK_SUCCESS)
+        throw std::runtime_error("failed to flush buffer writes");
 }
 
 VkDeviceMemory Buffer::memory() const noexcept

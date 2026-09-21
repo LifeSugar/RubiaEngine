@@ -30,6 +30,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -1076,7 +1077,9 @@ void AppSmokeTests::runRenderTest()
 {
     editor::App app;
     editor::RuntimeGui gui;
-    runRenderTest(app, editor::App::RunConfig{}, gui);
+    editor::App::RunConfig config;
+    config.resourcePreparation.material.parameterMemory = render::MaterialParameterMemory::HostVisible;
+    runRenderTest(app, config, gui);
 }
 
 void AppSmokeTests::runRenderTest(
@@ -1125,6 +1128,7 @@ void AppSmokeTests::runRenderTest(
     while (app.contentLoadStatus_.state == editor::ContentLoadState::Preparing &&
         std::chrono::steady_clock::now() < loadingDeadline)
     {
+        app.resourcePreparation().advance();
         app.updateContentLoading();
         drawLoadingFrame();
     }
@@ -1144,6 +1148,7 @@ void AppSmokeTests::runRenderTest(
     while (app.contentLoadStatus_.state != editor::ContentLoadState::Ready &&
         std::chrono::steady_clock::now() < loadingDeadline)
     {
+        app.resourcePreparation().advance();
         app.updateContentLoading();
         if (app.contentLoadStatus_.state == editor::ContentLoadState::Failed)
         {
@@ -1181,14 +1186,50 @@ void AppSmokeTests::runRenderTest(
     {
         throw std::runtime_error("preparation request or cancellation destroyed the activated scene");
     }
-    // The default scene must publish through the same versioned preparation cache.
-    const auto loadedModel = app.renderer.prepareModel(
-        app.renderAssets, app.assetManager.snapshot(app.demoContent.model));
-    if (!loadedModel.accepted() || loadedModel.disposition !=
-            rhi::vulkan::ResourcePreparationDisposition::CacheHit ||
-        !app.renderAssets.shaderProgram(app.demoContent.presentProgram))
-        throw std::runtime_error("default scene bypassed generic asset preparation");
-    app.renderer.releaseResourcePreparation(loadedModel.ticket);
+    // Every render asset type is reachable through the backend-neutral frontend
+    // port. Models are expanded here, before crossing that boundary.
+    std::array<bool, 6> frontendTypes{};
+    std::function<void(const render::ResourceAssetSnapshot&)> verifyFrontend;
+    verifyFrontend = [&](const render::ResourceAssetSnapshot& snapshot)
+    {
+        frontendTypes[snapshot.index()] = true;
+        std::visit([&](const auto& source)
+        {
+            const auto loaded = app.resourcePreparation().prepare(app.assetManager, source.version.handle);
+            if (!loaded.accepted() || loaded.disposition != render::ResourcePreparationDisposition::CacheHit ||
+                app.resourcePreparation().status(loaded.ticket).state != render::ResourcePreparationState::Ready)
+                throw std::runtime_error("frontend resource did not reuse the scene cache");
+            app.resourcePreparation().release(loaded.ticket);
+            if (source.dependencies)
+                for (const auto& dependency : source.dependencies->direct)
+                    verifyFrontend(render::resourceSnapshot(dependency));
+        }, snapshot);
+    };
+    const auto sceneMeshes = render::collectModelMeshes(app.assetManager, {app.demoContent.model});
+    for (auto mesh : sceneMeshes)
+        verifyFrontend(app.assetManager.snapshot(mesh));
+    if (!std::all_of(frontendTypes.begin(), frontendTypes.end(), [](bool seen) { return seen; }))
+        throw std::runtime_error("frontend preparation did not cover all six render asset types");
+    if (!app.renderAssets.shaderProgram(app.demoContent.presentProgram))
+        throw std::runtime_error("default scene did not prepare its present program");
+    // Verify App config reaches every material created via scene dependencies.
+    const bool mappedParameters = render::hasMemoryProperty(
+        config.resourcePreparation.material.parameterMemory, render::MaterialParameterMemory::HostVisible);
+    for (auto handle : app.assetManager.materialHandles())
+    {
+        const auto* gpu = app.renderAssets.tryMaterial(handle);
+        if (!gpu) continue;
+        const auto& buffer = *gpu->parameterBufferResource();
+        if (mappedParameters)
+        {
+            if (!(buffer.memoryProperties() & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ||
+                (buffer.usage() & VK_BUFFER_USAGE_TRANSFER_DST_BIT))
+                throw std::runtime_error("renderer ignored the mapped material policy");
+        }
+        else if (!(buffer.memoryProperties() & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ||
+                 !(buffer.usage() & VK_BUFFER_USAGE_TRANSFER_DST_BIT))
+            throw std::runtime_error("renderer ignored the staging material policy");
+    }
     // Incremental texture preparation while the existing scene keeps drawing.
     asset::TextureAsset::CreateInfo incrementalInfo;
     incrementalInfo.name = "Incremental upload during scene rendering";
@@ -1197,27 +1238,64 @@ void AppSmokeTests::runRenderTest(
     incrementalInfo.payload.assign(4, std::byte{0xff});
     const auto incrementalHandle = app.assetManager.createTexture(incrementalInfo);
     auto incremental =
-        app.renderer.prepareTexture(app.renderAssets, app.assetManager.snapshot(incrementalHandle));
+        app.resourcePreparation().prepare(app.assetManager, incrementalHandle);
     if (!incremental.accepted()) throw std::runtime_error(incremental.error);
     const auto incrementalDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
     while (std::chrono::steady_clock::now() < incrementalDeadline)
     {
-        app.updateContentLoading();
+        app.resourcePreparation().advance();
         app.imguiLayer.beginFrame();
         app.drawGui(gui);
         const auto result = app.renderer.render(app.makeRenderFrame(), app.renderAssets, app.imguiLayer.endFrame());
         if (result == rhi::vulkan::VulkanRenderer::RenderResult::NeedsResize) app.recreateSwapChain(gui);
-        if (app.renderer.resourcePreparationStatus(incremental.ticket).state ==
-            rhi::vulkan::ResourcePreparationState::Ready)
+        if (app.resourcePreparation().status(incremental.ticket).state ==
+            render::ResourcePreparationState::Ready)
         {
             break;
         }
     }
     if (!app.renderer.sceneReady() || !app.renderAssets.tryTexture(incrementalHandle))
         throw std::runtime_error("incremental texture upload did not preserve the active scene");
-    app.renderer.releaseResourcePreparation(incremental.ticket);
+    app.resourcePreparation().release(incremental.ticket);
     std::clog << "[Startup] GUI remained active for " << uploadFrames
         << " upload frames; failure, resize and retry passed\n";
+    // Replace a live mesh via the same frontend port while retaining the scene
+    // setup. Keep draw ranges compatible while the CPU/GPU revisions overlap.
+    const auto meshHandle = sceneMeshes.front();
+    const auto& oldMesh = app.assetManager.mesh(meshHandle);
+    asset::MeshAsset::CreateInfo replacementMesh;
+    replacementMesh.name = "Frontend mesh revision";
+    replacementMesh.vertices = oldMesh.vertices();
+    replacementMesh.indices = oldMesh.indices();
+    replacementMesh.submeshes = oldMesh.submeshes();
+    replacementMesh.vertices.front().position.x += 0.001f;
+    const auto oldVertexBuffer = app.renderAssets.mesh(meshHandle).vertexBuffer();
+    static_cast<void>(app.assetManager.replaceMesh(meshHandle, asset::MeshAsset(std::move(replacementMesh))));
+    const auto meshUpdate = app.resourcePreparation().prepare(app.assetManager, meshHandle);
+    if (!meshUpdate.accepted()) throw std::runtime_error(meshUpdate.error);
+    const auto meshDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    bool meshReady = false;
+    while (std::chrono::steady_clock::now() < meshDeadline)
+    {
+        app.resourcePreparation().advance();
+        const auto status = app.resourcePreparation().status(meshUpdate.ticket);
+        if (status.state == render::ResourcePreparationState::Failed)
+            throw std::runtime_error(status.error);
+        app.imguiLayer.beginFrame();
+        app.drawGui(gui);
+        if (app.renderer.render(app.makeRenderFrame(), app.renderAssets, app.imguiLayer.endFrame()) ==
+            rhi::vulkan::VulkanRenderer::RenderResult::NeedsResize)
+            app.recreateSwapChain(gui);
+        if (status.state == render::ResourcePreparationState::Ready)
+        {
+            meshReady = true;
+            break;
+        }
+    }
+    if (!meshReady || !app.renderer.sceneReady() ||
+        app.renderAssets.mesh(meshHandle).vertexBuffer() == oldVertexBuffer)
+        throw std::runtime_error("frontend mesh revision did not replace the live GPU buffer");
+    app.resourcePreparation().release(meshUpdate.ticket);
     asset::TextureAssetHandle editorPreviewTexture{};
     const std::vector<render::RenderCandidate> previewCandidates =
         render::SceneRenderExtractor{}.extract(app.scene, app.assetManager);
@@ -1246,22 +1324,36 @@ void AppSmokeTests::runRenderTest(
     }
     // Scene publication records the same domain/version used by standalone requests,
     // even after the prepared AssetManager has been moved into App.
-    auto cached = app.renderer.prepareTexture(app.renderAssets,
-                                              app.assetManager.snapshot(editorPreviewTexture));
+    auto cached = app.resourcePreparation().prepare(app.assetManager, editorPreviewTexture);
     if (!cached.accepted() ||
-        cached.disposition != rhi::vulkan::ResourcePreparationDisposition::CacheHit)
+        cached.disposition != render::ResourcePreparationDisposition::CacheHit)
     {
         throw std::runtime_error("scene texture did not participate in versioned cache reuse");
     }
-    app.renderer.releaseResourcePreparation(cached.ticket);
+    app.resourcePreparation().release(cached.ticket);
     const auto oldView = app.renderAssets.texture(editorPreviewTexture).view();
-    static_cast<void>(app.guiRenderBridge.preview(editorPreviewTexture));
+    const auto oldPreview = app.guiRenderBridge.preview(editorPreviewTexture);
+    struct MaterialBindingBeforeUpdate
+    {
+        asset::MaterialAssetHandle handle;
+        VkBuffer parameters;
+        VkDescriptorSet descriptor;
+    };
+    std::vector<MaterialBindingBeforeUpdate> oldBindings;
+    for (const auto& candidate : previewCandidates)
+    {
+        const auto& textures = app.assetManager.material(candidate.material).textures();
+        if (std::find(textures.begin(), textures.end(), editorPreviewTexture) != textures.end())
+        {
+            const auto& gpu = app.renderAssets.material(candidate.material);
+            oldBindings.push_back({candidate.material, gpu.parameterBuffer(), gpu.descriptorSet()});
+        }
+    }
     auto updateInfo = cloneTextureCreateInfo(app.assetManager.texture(editorPreviewTexture),
                                              "Versioned scene texture replacement");
     static_cast<void>(app.assetManager.replaceTexture(editorPreviewTexture,
                                                       asset::TextureAsset(std::move(updateInfo))));
-    const auto update = app.renderer.prepareTexture(
-        app.renderAssets, app.assetManager.snapshot(editorPreviewTexture));
+    const auto update = app.resourcePreparation().prepare(app.assetManager, editorPreviewTexture);
     if (!update.accepted())
     {
         throw std::runtime_error(update.error);
@@ -1270,7 +1362,7 @@ void AppSmokeTests::runRenderTest(
     bool updateReady = false;
     while (std::chrono::steady_clock::now() < updateDeadline)
     {
-        app.updateContentLoading();
+        app.resourcePreparation().advance();
         // GUI refresh is automatic; this path deliberately does not call invalidatePreview.
         const auto updatedPreview = app.guiRenderBridge.preview(editorPreviewTexture);
         if (!updatedPreview)
@@ -1289,12 +1381,12 @@ void AppSmokeTests::runRenderTest(
         {
             app.recreateSwapChain(gui);
         }
-        const auto state = app.renderer.resourcePreparationStatus(update.ticket);
-        if (state.state == rhi::vulkan::ResourcePreparationState::Failed)
+        const auto state = app.resourcePreparation().status(update.ticket);
+        if (state.state == render::ResourcePreparationState::Failed)
         {
             throw std::runtime_error(state.error);
         }
-        if (state.state == rhi::vulkan::ResourcePreparationState::Ready)
+        if (state.state == render::ResourcePreparationState::Ready)
         {
             updateReady = true;
             break;
@@ -1304,7 +1396,15 @@ void AppSmokeTests::runRenderTest(
     {
         throw std::runtime_error("versioned scene texture was not replaced");
     }
-    app.renderer.releaseResourcePreparation(update.ticket);
+    for (const auto& before : oldBindings)
+    {
+        const auto& gpu = app.renderAssets.material(before.handle);
+        if (gpu.parameterBuffer() != before.parameters || gpu.descriptorSet() == before.descriptor)
+            throw std::runtime_error("live texture update copied parameters or reused a published set");
+    }
+    if (app.guiRenderBridge.preview(editorPreviewTexture).textureId == oldPreview.textureId)
+        throw std::runtime_error("live preview update reused its old descriptor");
+    app.resourcePreparation().release(update.ticket);
     validateGpuTextureReplacement(app.renderer, app.vulkanContext.device(), app.assetManager,
                                   app.renderAssets, editorPreviewTexture);
     if (config.outputMode == rhi::vulkan::VulkanRenderer::OutputMode::Editor)

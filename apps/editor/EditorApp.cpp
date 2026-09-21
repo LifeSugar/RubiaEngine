@@ -5,10 +5,9 @@
 namespace rubia::editor
 {
 
-void EditorApp::run(bool autoLoadDemo)
+void EditorApp::run()
 {
     App::RunConfig config = makeRunConfig();
-    config.autoLoadDemo = autoLoadDemo;
     app_.run(config, editorLayer_);
 }
 

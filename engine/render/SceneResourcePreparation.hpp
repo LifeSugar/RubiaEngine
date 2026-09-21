@@ -1,6 +1,6 @@
 #pragma once
 
-#include "asset/AssetFwd.hpp"
+#include "asset/AssetSnapshot.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -16,16 +16,23 @@ class AssetManager;
 namespace rubia::render
 {
 
-/// The source must remain immutable during preparation. The backend retains
-/// shared ownership until activation, cancellation, or failure.
+// CPU render frontend expands models into concrete, immutable resource inputs.
+// This request contains no model hierarchy or AssetManager owner.
 struct SceneResourceRequest
 {
-    std::shared_ptr<const asset::AssetManager> assets;
-    std::vector<asset::ModelAssetHandle> models;
-    asset::MaterialTemplateAssetHandle materialTemplate;
-    asset::ShaderProgramAssetHandle presentProgram;
+    std::vector<asset::AssetSnapshot<asset::MeshAsset>> meshes;
+    asset::AssetSnapshot<asset::MaterialTemplateAsset> materialTemplate;
+    asset::AssetSnapshot<asset::ShaderProgramAsset> presentProgram;
     uint32_t maxRenderObjects = 1024;
 };
+
+std::vector<asset::MeshAssetHandle> collectModelMeshes(
+    const asset::AssetManager& assets, const std::vector<asset::ModelAssetHandle>& models);
+SceneResourceRequest makeSceneResourceRequest(const asset::AssetManager& assets,
+                                              const std::vector<asset::ModelAssetHandle>& models,
+                                              asset::MaterialTemplateAssetHandle materialTemplate,
+                                              asset::ShaderProgramAssetHandle presentProgram,
+                                              uint32_t maxRenderObjects = 1024);
 
 enum class ScenePreparationState
 {
@@ -42,7 +49,7 @@ struct ScenePreparationStatus
 {
     ScenePreparationState state = ScenePreparationState::Idle;
     std::size_t total = 0;
-    // Counts ready root preparations (models, material template and present program),
+    // Counts ready root preparations (meshes, material template and present program),
     // including all their dependencies. This is not GPU transfer progress.
     std::size_t completed = 0;
     std::string error;

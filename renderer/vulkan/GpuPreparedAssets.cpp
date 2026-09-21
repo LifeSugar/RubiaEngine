@@ -1,6 +1,7 @@
 #include "vulkan/GpuPreparedAssets.hpp"
 #include "vulkan/Device.hpp"
 #include <algorithm>
+#include <map>
 #include <stdexcept>
 
 namespace rubia::rhi::vulkan
@@ -185,5 +186,20 @@ GpuMaterialTemplate::GpuMaterialTemplate(const Device& device,
         bindings.push_back(binding(item));
     }
     layout_.create(device.get(), bindings);
+}
+DescriptorPool GpuMaterialTemplate::createDescriptorPool(const Device& device) const
+{
+    std::map<VkDescriptorType, uint32_t> counts;
+    for (const auto& source : source_->bindings())
+    {
+        const auto converted = binding(source);
+        counts[converted.descriptorType] += converted.descriptorCount;
+    }
+    std::vector<VkDescriptorPoolSize> sizes;
+    for (const auto& count : counts)
+    {
+        sizes.push_back({count.first, count.second});
+    }
+    return DescriptorPool(device.get(), sizes, 1);
 }
 } // namespace rubia::rhi::vulkan

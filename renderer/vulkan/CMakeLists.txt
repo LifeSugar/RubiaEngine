@@ -37,6 +37,7 @@ add_library(rubia_rhi_vulkan STATIC
     PerFrameBuffer.hpp
     RenderAssetCache.cpp
     RenderAssetCache.hpp
+    RetiredResources.hpp
     RenderPass.cpp
     RenderPass.hpp
     RenderTarget.cpp
@@ -76,6 +77,8 @@ add_library(rubia_rhi_vulkan STATIC
     ResourcePreparations.cpp
     VulkanResourcePreparation.cpp
     VulkanResourcePreparation.hpp
+    VulkanResourcePreparationBridge.cpp
+    VulkanResourcePreparationBridge.hpp
     VulkanScenePreparation.cpp
     VulkanScenePreparation.hpp
     Window.cpp
