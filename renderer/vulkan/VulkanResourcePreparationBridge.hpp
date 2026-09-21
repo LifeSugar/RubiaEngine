@@ -24,6 +24,13 @@ class VulkanResourcePreparationBridge final : public render::ResourcePreparation
         render::ResourcePreparationTicket ticket) const override;
     void cancel(render::ResourcePreparationTicket ticket) override;
     void release(render::ResourcePreparationTicket ticket) override;
+    render::PipelinePreparationResult prewarmPipelines(
+        const std::vector<asset::MaterialAssetHandle>& materials) override;
+    render::PipelinePreparationStatus pipelineStatus(render::PipelinePreparationTicket ticket) const override;
+    void cancelPipelines(render::PipelinePreparationTicket ticket) override;
+    void releasePipelines(render::PipelinePreparationTicket ticket) override;
+    void setPublicationTransaction(render::ResourcePreparationTicket,
+        std::shared_ptr<render::ResourcePublicationTransaction>) override;
     void cancelAll() noexcept override;
     void advance() override;
 
@@ -32,5 +39,7 @@ class VulkanResourcePreparationBridge final : public render::ResourcePreparation
     VulkanRenderer& renderer_;
     RenderAssetCache& cache_;
     std::unordered_set<uint64_t> tickets_;
+    std::unordered_set<uint64_t> pipelineTickets_;
+    void checkPipelineTicket(render::PipelinePreparationTicket ticket) const;
 };
 } // namespace rubia::rhi::vulkan

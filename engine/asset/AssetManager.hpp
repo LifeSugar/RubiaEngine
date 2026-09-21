@@ -37,6 +37,22 @@ public:
     [[nodiscard]] TextureAsset replaceTexture(
         TextureAssetHandle handle,
         TextureAsset replacement);
+    class StagedTextureReplacement
+    {
+    public:
+        [[nodiscard]] const AssetSnapshot<TextureAsset>& snapshot() const { return snapshot_; }
+    private:
+        friend class AssetManager;
+        AssetVersion<TextureAsset> expected_;
+        AssetSnapshot<TextureAsset> snapshot_;
+        TextureAsset candidate_;
+        bool committed_ = false;
+    };
+    [[nodiscard]] StagedTextureReplacement stageTextureReplacement(TextureAssetHandle, TextureAsset);
+    void validateStagedTexture(const StagedTextureReplacement&) const;
+    // After validate, no asset mutation may interleave before this nonthrowing commit.
+    void commitStagedTexture(StagedTextureReplacement&) noexcept;
+
     [[nodiscard]] MaterialTemplateAssetHandle createMaterialTemplate(
         MaterialTemplateAsset::CreateInfo createInfo);
     [[nodiscard]] MaterialAssetHandle createMaterial(
@@ -101,6 +117,8 @@ public:
     [[nodiscard]] std::vector<TextureAssetHandle> textureHandles() const;
     [[nodiscard]] std::vector<MaterialAssetHandle> materialHandles() const;
     [[nodiscard]] std::vector<ModelAssetHandle> modelHandles() const;
+
+    [[nodiscard]] std::vector<ShaderAssetHandle> shaderHandles() const;
 
     void reset() noexcept;
 

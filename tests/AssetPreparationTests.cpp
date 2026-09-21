@@ -2,6 +2,7 @@
 #include "VulkanUploadTests.hpp"
 #include "render/SceneResourcePreparation.hpp"
 #include "vulkan/DefaultPipelineFactory.hpp"
+#include "vulkan/GraphicsPipelineCache.hpp"
 #include "vulkan/Device.hpp"
 #include "vulkan/RenderAssetCache.hpp"
 #include "vulkan/RenderPass.hpp"
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <functional>
+#include <future>
 #include <stdexcept>
 #include <type_traits>
 
@@ -178,6 +180,7 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
     {
         auto snapshot = assets.snapshot(material);
         auto probe = makeMaterialPreparation(cache, snapshot);
+        probe->captureDependencies();
         probe->createGpuResources(device);
         auto request = probe->buildUploadRequest();
         require(request.operations.size() == 1, "material must upload its parameter block");
@@ -255,8 +258,13 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
         require(blocker.accepted(), "direct-write test did not fill the upload queue");
         auto result = direct.prepareMaterial(directCache, snapshot);
         require(result.accepted(), "mapped material preparation rejected");
-        for (int i = 0; i < 8 && !resourcePreparationFinished(direct.status(result.ticket).state); ++i)
+        const auto directDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (!resourcePreparationFinished(direct.status(result.ticket).state) &&
+               std::chrono::steady_clock::now() < directDeadline)
+        {
             direct.advance();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
         if (supported)
         {
             require(direct.status(result.ticket).state == ResourcePreparationState::Ready &&
@@ -378,11 +386,13 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
         auto root = single.prepareMesh(cancelledCache, updated);
         require(root.accepted(), "single-slot mesh rejected");
         bool submitted = false;
-        for (int step = 0; step < 1000 && !submitted; ++step)
+        const auto submitDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (!submitted && std::chrono::steady_clock::now() < submitDeadline)
         {
             single.advance();
             uploads.tick();
             submitted = uploads.stagedBytes() != 0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         require(submitted, "parent cancellation did not reach an in-flight dependency");
         single.cancel(root.ticket);
@@ -461,16 +471,40 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
         passInfo.pSubpasses = &subpass;
         RenderPass pass(device.get(), passInfo);
         auto pipelineInfo = makeDefaultPresentPipeline(noUploadCache.shaderProgram(present));
-        pipelineInfo.renderPass = pass.get();
+        pipelineInfo.renderPass = pass.reference();
         pipelineInfo.program = noUploadCache.shaderProgram(present);
-        pipelineInfo.descriptorSetLayouts = pipelineInfo.program->setLayouts();
+        pipelineInfo.descriptorSetLayouts = pipelineInfo.program->setLayoutReferences();
         pipelineInfo.vertexShaderSpirv.clear();
         pipelineInfo.fragmentShaderSpirv.clear();
-        GraphicsPipeline pipeline(device, pipelineInfo);
-        require(bool(pipeline), "prepared modules could not create a graphics pipeline");
+        GraphicsPipelineCache pipelines(device);
+        const auto pipeline = pipelines.getOrCreate(pipelineInfo);
+        require(bool(*pipeline), "prepared modules could not create a graphics pipeline");
+        auto rawInfo = pipelineInfo;
+        for (const auto& shader : rawInfo.program->shaders())
+        {
+            if (shader->source().stage() == asset::ShaderStage::Vertex)
+            {
+                rawInfo.vertexShaderSpirv = shader->source().spirv();
+                rawInfo.vertexEntryPoint = shader->source().entryPoint();
+            }
+            else
+            {
+                rawInfo.fragmentShaderSpirv = shader->source().spirv();
+                rawInfo.fragmentEntryPoint = shader->source().entryPoint();
+            }
+        }
+        rawInfo.program.reset();
+        require(pipelines.getOrCreate(rawInfo) == pipeline && pipelines.statistics().creations == 1,
+                "prepared program and equivalent SPIR-V did not share pipeline cache");
         fullUploads.cancel(blocker.ticket);
         fullUploads.releaseTicket(blocker.ticket);
     }
+    // Capture immutable binding inputs, then retire their original cache owners.
+    // A later worker creation must still have valid image/view/sampler dependencies.
+    auto pinnedMaterial = makeMaterialPreparation(cache, assets.snapshot(material));
+    pinnedMaterial->captureDependencies();
+    auto pinnedTexture = cache.texture(texture).snapshot();
+    const auto pinnedView = pinnedTexture.view();
     // Consecutive standalone texture updates must also share the same parameters.
     // Old binding batches remain alive until explicitly reclaimed by this test owner.
     for (int update = 0; update < 2; ++update)
@@ -495,6 +529,18 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
     }
     device.waitIdle();
     preparationsRetired.clear();
+    require(pinnedTexture.view() == pinnedView && bool(pinnedTexture) &&
+                cache.texture(texture).view() != pinnedView,
+            "texture replacement mutated or destroyed a captured allocation");
+    auto detachedCreation = std::async(std::launch::async, [&] {
+        pinnedMaterial->createGpuResources(device);
+        return pinnedMaterial->buildUploadRequest();
+    });
+    auto detachedUpload = detachedCreation.get();
+    require(!detachedUpload.operations.empty(), "detached material creation lost its upload");
+    pinnedMaterial.reset();
+    detachedUpload.operations.clear();
+    pinnedTexture.reset();
     for (const auto& binding : bindings)
         require(cache.material(binding.handle).parameterBuffer() == binding.parameters,
                 "retiring old bindings released the current parameter buffer");
@@ -530,7 +576,14 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
                 "queue-full material update published uninitialized parameters");
         materialUploads.cancel(blocker.ticket);
         materialUploads.releaseTicket(blocker.ticket);
-        materials.advance();
+        const auto uploadDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (!materials.status(request.ticket).totalBytes &&
+               !resourcePreparationFinished(materials.status(request.ticket).state) &&
+               std::chrono::steady_clock::now() < uploadDeadline)
+        {
+            materials.advance();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
         require(materials.status(request.ticket).totalBytes == source.data->parameterData().size(),
                 "material did not retry its parameter upload after queue capacity recovered");
         materialUploads.drain();
@@ -559,5 +612,51 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
         device.waitIdle();
         materialRetired.clear();
     }
+    // Another texture can change a shared material while a rebind plan is being
+    // built. Reject the stale plan atomically; a fresh snapshot can retry it.
+    {
+        asset::TextureAssetHandle otherTexture;
+        for (const auto& binding : bindings)
+            for (auto handle : assets.material(binding.handle).textures())
+                if (handle != texture) otherTexture = handle;
+        require(bool(otherTexture), "texture conflict fixture has no shared material textures");
+        auto firstTarget = preparationTarget(cache, assets.snapshot(texture));
+        ++firstTarget.revision;
+        auto secondTarget = preparationTarget(cache, assets.snapshot(otherTexture));
+        ++secondTarget.revision;
+        auto firstImage = cache.texture(texture).snapshot();
+        auto secondImage = cache.texture(otherTexture).snapshot();
+        auto stale = cache.captureTextureRebind(texture, firstTarget.revision);
+        auto newer = cache.captureTextureRebind(otherTexture, secondTarget.revision);
+        auto creation = std::async(std::launch::async, [&] {
+            RenderAssetCache::buildTextureRebind(device, *stale, firstImage);
+            RenderAssetCache::buildTextureRebind(device, *newer, secondImage);
+        });
+        creation.get();
+        cache.acceptPreparation(firstTarget);
+        cache.acceptPreparation(secondTarget);
+        cache.publishPreparedTexture(preparationsRetired, secondTarget, std::move(secondImage), std::move(newer));
+        const auto unchangedPublication = cache.texturePublication(texture);
+        const auto unchangedView = cache.texture(texture).view();
+        const auto bindingAfterSecondUpdate = cache.material(bindings.front().handle).descriptorSet();
+        bool rejected = false;
+        try { cache.publishPreparedTexture(preparationsRetired, firstTarget, firstImage.snapshot(), std::move(stale)); }
+        catch (const std::runtime_error&) { rejected = true; }
+        require(rejected && cache.texturePublication(texture) == unchangedPublication &&
+                    cache.texture(texture).view() == unchangedView &&
+                    cache.material(bindings.front().handle).descriptorSet() == bindingAfterSecondUpdate,
+                "stale texture bindings partially overwrote the newer cache state");
+        auto retry = cache.captureTextureRebind(texture, firstTarget.revision);
+        auto retryCreation = std::async(std::launch::async, [&] {
+            RenderAssetCache::buildTextureRebind(device, *retry, firstImage);
+        });
+        retryCreation.get();
+        cache.publishPreparedTexture(preparationsRetired, firstTarget, std::move(firstImage), std::move(retry));
+        require(cache.inspectPreparation(firstTarget).resident == firstTarget.revision,
+                "fresh texture binding snapshot could not retry after conflict");
+        device.waitIdle();
+        preparationsRetired.clear();
+    }
+
 }
 } // namespace rubia::test

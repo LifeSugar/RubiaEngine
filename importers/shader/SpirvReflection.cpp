@@ -315,6 +315,20 @@ void hashString(uint64_t& hash, const std::string& value) noexcept
         hashValue(hash, push.offset);
         hashValue(hash, push.byteSize);
         hashValue(hash, push.stage);
+        for (const auto& member : push.members)
+        {
+            hashValue(hash, member.offset);
+            hashValue(hash, member.type);
+            hashValue(hash, member.size);
+        }
+    }
+    auto constants = interface.specializationConstants;
+    std::sort(constants.begin(), constants.end(), [](const auto& a, const auto& b)
+        { return a.constantId < b.constantId; });
+    for (const auto& constant : constants)
+    {
+        hashValue(hash, constant.constantId);
+        hashValue(hash, constant.type);
     }
     return hash;
 }
@@ -436,6 +450,21 @@ asset::ShaderInterface SpirvReflection::reflect(
                 stage,
                 offset
             });
+            auto& push = result.pushConstants.back();
+            for (uint32_t i = 0; i < type.member_types.size(); ++i)
+            {
+                const auto& member = compiler.get_type(type.member_types[i]);
+                push.members.push_back({
+                    compiler.get_member_name(resource.base_type_id, i), valueType(member),
+                    compiler.type_struct_member_offset(type, i),
+                    static_cast<uint32_t>(compiler.get_declared_struct_member_size(type, i)),
+                    arrayCount(member)});
+            }
+        }
+        for (const auto& constant : compiler.get_specialization_constants())
+        {
+            const auto& type = compiler.get_type(compiler.get_constant(constant.id).constant_type);
+            result.specializationConstants.push_back({constant.constant_id, valueType(type)});
         }
 
         result.signature = interfaceSignature(result);

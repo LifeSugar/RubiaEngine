@@ -20,6 +20,7 @@ public:
     {
         return module_;
     }
+    VkDevice device() const noexcept { return device_; }
     VkPipelineShaderStageCreateInfo stageInfo() const;
     const asset::ShaderAsset& source() const
     {
@@ -45,6 +46,9 @@ public:
     }
     std::vector<VkPipelineShaderStageCreateInfo> stages() const;
     std::vector<VkDescriptorSetLayout> setLayouts() const;
+    std::vector<std::shared_ptr<const DescriptorSetLayoutState>> setLayoutReferences() const;
+    const std::vector<std::shared_ptr<const GpuShader>>& shaders() const noexcept { return shaders_; }
+    VkDevice device() const noexcept { return device_; }
     VkPipelineLayout layout() const noexcept
     {
         return layout_;
@@ -68,6 +72,10 @@ public:
     VkDescriptorSetLayout layout() const noexcept
     {
         return layout_.get();
+    }
+    std::shared_ptr<const DescriptorSetLayoutState> layoutReference() const noexcept
+    {
+        return layout_.reference();
     }
     const asset::MaterialTemplateAsset& source() const
     {

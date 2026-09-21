@@ -76,102 +76,6 @@ void RenderAssetCache::publishMesh(asset::MeshAssetHandle handle, Mesh mesh)
     meshes_[handle.index].generation = handle.generation;
 }
 
-GpuTexture RenderAssetCache::commitTextureReplacement(
-    const Device& device,
-    const asset::AssetManager& assets,
-    asset::TextureAssetHandle handle,
-    GpuTexture replacement)
-{
-    if (domain_ && domain_ != assets.domain())
-    {
-        throw std::invalid_argument("texture replacement uses another asset domain");
-    }
-    // This API deliberately preserves its synchronous rollback contract.
-    RetiredResources retired;
-    return std::move(replaceTexture(device, retired, handle, std::move(replacement), 0));
-}
-
-GpuTexture& RenderAssetCache::replaceTexture(
-    const Device& device, RetiredResources& retired, asset::TextureAssetHandle handle,
-    GpuTexture replacement, asset::AssetContentRevision revision)
-{
-    if (!device || !replacement || tryTexture(handle) == nullptr)
-    {
-        throw std::invalid_argument("cannot replace a texture absent from RenderAssetCache");
-    }
-    if (!nextPublication_)
-    {
-        throw std::overflow_error("texture publication counter exhausted");
-    }
-
-    struct MaterialTextureUpdate
-    {
-        std::size_t index = 0;
-        MaterialResources resources;
-        std::vector<asset::AssetDependencyVersion> dependencies;
-    };
-    struct TextureReplacement
-    {
-        // Reverse destruction order releases old descriptor pools before images.
-        GpuTexture texture;
-        std::vector<MaterialTextureUpdate> materials;
-    };
-    TextureReplacement prepared;
-    prepared.texture = std::move(replacement);
-    for (std::size_t index = 0; index < materials_.size(); ++index)
-    {
-        const MaterialEntry& entry = materials_[index];
-        const auto& current = entry.resources;
-        if (!current.material || entry.generation == 0 ||
-            std::find(current.textures.begin(), current.textures.end(), handle) ==
-                current.textures.end())
-        {
-            continue;
-        }
-        MaterialTextureUpdate update;
-        update.index = index;
-        update.resources.layout = current.layout;
-        update.resources.textures = current.textures;
-        update.resources.preparedTemplate = current.preparedTemplate;
-        update.resources.pool = current.preparedTemplate->createDescriptorPool(device);
-        const auto sets = update.resources.pool.allocate(current.preparedTemplate->layout(), 1);
-        std::vector<const GpuTexture*> textures;
-        textures.reserve(current.textures.size());
-        for (const auto textureHandle : current.textures)
-        {
-            textures.push_back(textureHandle == handle ? &prepared.texture : &texture(textureHandle));
-        }
-        update.resources.material = current.material.withTextures(
-            device, current.layout, textures, sets.front());
-        update.dependencies = entry.residentDependencies;
-        if (revision)
-        {
-            for (auto& dependency : update.dependencies)
-            {
-                if (dependency.handle == asset::AnyAssetHandle(handle))
-                    dependency.revision = revision;
-            }
-        }
-        prepared.materials.push_back(std::move(update));
-    }
-
-    // Allocate retirement ownership BEFORE changing live entries. From here all
-    // exchanges are no-throw: allocation failure above leaves the whole cache intact.
-    auto& previous = retired.retire(std::move(prepared));
-    for (auto& update : previous.materials)
-    {
-        auto& entry = materials_[update.index];
-        std::swap(entry.resources, update.resources);
-        entry.residentDependencies.swap(update.dependencies);
-    }
-    auto& entry = textures_[handle.index];
-    std::swap(entry.texture, previous.texture);
-    entry.revision = 0;  // Legacy caller has not yet committed CPU content.
-    entry.requested = 0;
-    entry.publication = nextPublication_++;
-    return previous.texture;
-}
-
 RenderAssetCache::PreparationVersions RenderAssetCache::inspectPreparation(
     const ResourcePreparationTarget& target) const
 {
@@ -238,33 +142,87 @@ void RenderAssetCache::acceptPreparation(const ResourcePreparationTarget& target
     domain_ = target.domain;
 }
 
-void RenderAssetCache::setTextureVersion(asset::AssetDomainId domain,
-                                         asset::AssetVersion<asset::TextureAsset> version)
-{
-    if (!tryTexture(version.handle))
-    {
-        throw std::invalid_argument("texture is not resident");
-    }
-    acceptPreparation({this, version.handle, version.contentRevision, std::move(domain)});
-    textures_[version.handle.index].revision = version.contentRevision;
-    for (auto& material : materials_)
-    {
-        for (auto& dependency : material.residentDependencies)
-        {
-            if (dependency.handle == asset::AnyAssetHandle(version.handle))
-                dependency.revision = version.contentRevision;
-        }
-    }
-}
-
 uint64_t RenderAssetCache::texturePublication(asset::TextureAssetHandle handle) const noexcept
 {
     return tryTexture(handle) ? textures_[handle.index].publication : 0;
 }
 
-void RenderAssetCache::publishPreparedTexture(const Device& device, RetiredResources& retired,
-                                              const ResourcePreparationTarget& target,
-                                              GpuTexture texture)
+struct RenderAssetCache::TextureRebindPlan
+{
+    struct Update
+    {
+        std::size_t index = 0;
+        uint32_t generation = 0;
+        VkDescriptorSet originalSet = VK_NULL_HANDLE;
+        GpuMaterial::ParameterSnapshot parameters;
+        std::vector<GpuTexture> textureOwners;
+        MaterialResources resources;
+        std::vector<asset::AssetDependencyVersion> dependencies;
+        std::vector<asset::AssetDependencyVersion> originalDependencies;
+    };
+    asset::TextureAssetHandle handle;
+    uint64_t originalPublication = 0;
+    asset::AssetContentRevision revision = 0;
+    std::vector<Update> materials;
+    bool built = false;
+};
+std::shared_ptr<RenderAssetCache::TextureRebindPlan> RenderAssetCache::captureTextureRebind(
+    asset::TextureAssetHandle handle, asset::AssetContentRevision revision) const
+{
+    auto plan = std::make_shared<TextureRebindPlan>();
+    plan->handle = handle;
+    plan->revision = revision;
+    plan->originalPublication = texturePublication(handle);
+    for (std::size_t index = 0; index < materials_.size(); ++index)
+    {
+        const auto &entry = materials_[index];
+        const auto &current = entry.resources;
+        if (!current.material || std::find(current.textures.begin(), current.textures.end(),
+                                           handle) == current.textures.end())
+            continue;
+        TextureRebindPlan::Update update;
+        update.index = index;
+        update.generation = entry.generation;
+        update.originalSet = current.material.descriptorSet();
+        update.parameters = current.material.parameterSnapshot();
+        update.resources.layout = current.layout;
+        update.resources.textures = current.textures;
+        update.resources.preparedTemplate = current.preparedTemplate;
+        for (auto textureHandle : current.textures)
+            update.textureOwners.push_back(texture(textureHandle).snapshot());
+        update.originalDependencies = entry.residentDependencies;
+        update.dependencies = entry.residentDependencies;
+        for (auto &dependency : update.dependencies)
+            if (dependency.handle == asset::AnyAssetHandle(handle))
+                dependency.revision = revision;
+        plan->materials.push_back(std::move(update));
+    }
+    return plan;
+}
+void RenderAssetCache::buildTextureRebind(const Device &device, TextureRebindPlan &plan,
+                                          const GpuTexture &replacement)
+{
+    if (plan.built || !replacement)
+        throw std::logic_error("texture rebind plan requires one creation and a valid replacement");
+    for (auto &update : plan.materials)
+    {
+        auto &resources = update.resources;
+        resources.pool = resources.preparedTemplate->createDescriptorPool(device);
+        const auto sets = resources.pool.allocate(resources.preparedTemplate->layout(), 1);
+        std::vector<const GpuTexture *> textures;
+        for (std::size_t i = 0; i < resources.textures.size(); ++i)
+            textures.push_back(resources.textures[i] == plan.handle ? &replacement
+                                                                    : &update.textureOwners[i]);
+        resources.material = GpuMaterial::fromParameters(device, resources.layout, textures,
+                                                         sets.front(), update.parameters);
+    }
+    plan.built = true;
+}
+
+void RenderAssetCache::publishPreparedTexture(RetiredResources &retired,
+                                              const ResourcePreparationTarget &target,
+                                              GpuTexture texture,
+                                              std::shared_ptr<TextureRebindPlan> rebind)
 {
     const auto version = inspectPreparation(target);
     if (version.requested != target.revision ||
@@ -278,21 +236,68 @@ void RenderAssetCache::publishPreparedTexture(const Device& device, RetiredResou
         throw std::logic_error("texture dependencies changed");
     }
     const auto handle = std::get<asset::TextureAssetHandle>(target.asset);
-    if (tryTexture(handle))
+    if (!rebind || !texture)
+        throw std::invalid_argument("texture publication requires a prepared binding snapshot");
     {
-        replaceTexture(device, retired, handle, std::move(texture), target.revision);
-    }
-    else
-    {
-        publishTexture(handle, std::move(texture));
+        // The set of affected materials and each binding version must still match.
+        // Validate before moving any live owner; a race fails without partial publication.
+        if (!rebind->built || rebind->handle != handle || rebind->revision != target.revision ||
+            texturePublication(handle) != rebind->originalPublication || !nextPublication_)
+            throw std::runtime_error("texture binding snapshot changed before publication");
+        std::size_t match = 0;
+        for (std::size_t i = 0; i < materials_.size(); ++i)
+        {
+            const auto &entry = materials_[i];
+            const auto &resources = entry.resources;
+            if (!resources.material ||
+                std::find(resources.textures.begin(), resources.textures.end(), handle) ==
+                    resources.textures.end())
+                continue;
+            if (match >= rebind->materials.size())
+                throw std::runtime_error(
+                    "texture acquired a new material during creation; retry preparation");
+            const auto &update = rebind->materials[match++];
+            if (update.index != i || update.generation != entry.generation ||
+                update.originalSet != resources.material.descriptorSet() ||
+                update.originalDependencies != entry.residentDependencies ||
+                update.parameters.buffer != resources.material.parameterBufferResource() ||
+                update.resources.preparedTemplate != resources.preparedTemplate)
+                throw std::runtime_error(
+                    "material bindings changed during texture creation; retry preparation");
+        }
+        if (match != rebind->materials.size())
+            throw std::runtime_error("texture material snapshot is obsolete");
+        if (!rebind->originalPublication)
+        {
+            publishTexture(handle, std::move(texture));
+        }
+        else
+        {
+            struct RetiredReplacement
+            {
+                GpuTexture texture;
+                std::shared_ptr<TextureRebindPlan> bindings;
+            };
+            auto &previous =
+                retired.retire(RetiredReplacement{std::move(texture), std::move(rebind)});
+            for (auto &update : previous.bindings->materials)
+            {
+                auto &entry = materials_[update.index];
+                std::swap(entry.resources, update.resources);
+                entry.residentDependencies.swap(update.dependencies);
+            }
+            auto &entry = textures_.at(handle.index); // Admission already reserves the slot.
+            std::swap(entry.texture, previous.texture);
+            entry.publication = nextPublication_++;
+        }
     }
     textures_[handle.index].residentDependencies = std::move(dependencies);
     textures_[handle.index].revision = target.revision;
     textures_[handle.index].requested = target.revision;
 }
 
-void RenderAssetCache::publishPreparedMesh(RetiredResources& retired,
-                                           const ResourcePreparationTarget& target, Mesh mesh)
+void RenderAssetCache::publishPreparedMesh(RetiredResources &retired,
+                                           const ResourcePreparationTarget &target, Mesh mesh)
 {
     const auto version = inspectPreparation(target);
     if (!mesh || version.requested != target.revision ||
@@ -486,6 +491,14 @@ const GpuMaterial* RenderAssetCache::tryMaterial(
     return entry.generation == handle.generation && entry.resources.material
         ? &entry.resources.material
         : nullptr;
+}
+
+std::shared_ptr<const GpuMaterialTemplate> RenderAssetCache::materialTemplateForMaterial(
+    asset::MaterialAssetHandle handle) const
+{
+    if (!tryMaterial(handle))
+        throw std::out_of_range("MaterialAsset is absent from RenderAssetCache");
+    return materials_[handle.index].resources.preparedTemplate;
 }
 
 const GpuTexture& RenderAssetCache::texture(

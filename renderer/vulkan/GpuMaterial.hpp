@@ -47,6 +47,17 @@ public:
         const asset::MaterialTemplateAsset& materialTemplate,
         const std::vector<const GpuTexture*>& textures,
         VkDescriptorSet descriptorSet) const;
+    struct ParameterSnapshot
+    {
+        std::shared_ptr<const Buffer> buffer;
+        asset::MaterialTemplateAssetHandle materialTemplate;
+        asset::MaterialRenderState renderState;
+    };
+    [[nodiscard]] ParameterSnapshot parameterSnapshot() const
+    { return {parameterBuffer_, materialTemplate_, renderState_}; }
+    // Creates new descriptors without reading any resident material or its old pool.
+    static GpuMaterial fromParameters(const Device&, const asset::MaterialTemplateAsset&,
+        const std::vector<const GpuTexture*>&, VkDescriptorSet, const ParameterSnapshot&);
     void reset() noexcept;
 
     [[nodiscard]] VkDescriptorSet descriptorSet() const noexcept

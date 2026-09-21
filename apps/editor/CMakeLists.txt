@@ -16,6 +16,10 @@ add_library(rubia_editor STATIC
     ImGuiLayer.hpp
     RuntimeGui.cpp
     RuntimeGui.hpp
+    content/EditorAssetController.cpp
+    content/EditorAssetController.hpp
+    panels/MaterialAuthoringPanel.cpp
+    panels/MaterialAuthoringPanel.hpp
     content/DemoContent.cpp
     content/DemoContent.hpp
     inspectors/InspectorWidgets.cpp

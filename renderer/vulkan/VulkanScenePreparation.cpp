@@ -139,17 +139,45 @@ void VulkanScenePreparation::advance()
         }
         else if (status_.state == ScenePreparationState::PreparingPipelines)
         {
-            const auto materialTemplate =
-                cache_.materialTemplate(request_.materialTemplate.version.handle);
-            const auto present = cache_.shaderProgram(request_.presentProgram.version.handle);
-            if (!materialTemplate || !present)
+            if (!sceneResourcesCreated_)
             {
-                throw std::logic_error("scene pipeline dependencies are missing");
+                const auto materialTemplate = cache_.materialTemplate(request_.materialTemplate.version.handle);
+                const auto present = cache_.shaderProgram(request_.presentProgram.version.handle);
+                if (!materialTemplate || !present)
+                    throw std::logic_error("scene pipeline dependencies are missing");
+                renderer_.createSceneResources(
+                    makeDefaultScenePipeline(materialTemplate->program(), materialTemplate->layoutReference()),
+                    makeDefaultPresentPipeline(present), request_.maxRenderObjects);
+                sceneResourcesCreated_ = true;
             }
-            renderer_.createSceneResources(
-                makeDefaultScenePipeline(materialTemplate->program(), materialTemplate->layout()),
-                makeDefaultPresentPipeline(present), request_.maxRenderObjects);
-            status_.state = ScenePreparationState::Ready;
+            if (!pipelines_)
+            {
+                std::vector<asset::MaterialAssetHandle> materials;
+                for (const auto& mesh : request_.meshes)
+                    for (const auto& submesh : cache_.mesh(mesh.version.handle).submeshes())
+                        materials.push_back(submesh.material);
+                if (materials.empty())
+                {
+                    status_.state = ScenePreparationState::Ready;
+                    return;
+                }
+                const auto result = renderer_.prewarmScenePipelines(cache_, materials);
+                if (result.code == ResourcePreparationCode::QueueFull) return;
+                if (!result.accepted()) throw std::runtime_error("scene pipeline request failed: " + result.error);
+                pipelines_ = result.ticket;
+            }
+            const auto progress = renderer_.pipelinePreparationStatus(pipelines_);
+            status_.pipelinesTotal = progress.total;
+            status_.pipelinesCompleted = progress.completed;
+            if (progress.state == render::PipelinePreparationState::Failed ||
+                progress.state == render::PipelinePreparationState::Cancelled)
+                throw std::runtime_error("scene pipeline preparation failed: " + progress.error);
+            if (progress.state == render::PipelinePreparationState::Ready)
+            {
+                renderer_.releasePipelinePreparation(pipelines_);
+                pipelines_ = {};
+                status_.state = ScenePreparationState::Ready;
+            }
         }
     }
     catch (const std::exception& error)
@@ -173,6 +201,12 @@ void VulkanScenePreparation::activate()
 
 void VulkanScenePreparation::discardResources() noexcept
 {
+    if (pipelines_)
+    {
+        renderer_.cancelPipelinePreparation(pipelines_);
+        renderer_.releasePipelinePreparation(pipelines_);
+        pipelines_ = {};
+    }
     for (auto& root : roots_)
     {
         if (root.ticket)

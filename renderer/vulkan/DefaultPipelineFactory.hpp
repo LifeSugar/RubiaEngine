@@ -7,7 +7,7 @@ namespace rubia::rhi::vulkan
 
 [[nodiscard]] GraphicsPipeline::CreateInfo makeDefaultScenePipeline(
     std::shared_ptr<const GpuShaderProgram> program,
-    VkDescriptorSetLayout materialDescriptorSetLayout);
+    std::shared_ptr<const DescriptorSetLayoutState> materialDescriptorSetLayout);
 
 [[nodiscard]] GraphicsPipeline::CreateInfo makeDefaultPresentPipeline(
     std::shared_ptr<const GpuShaderProgram> program);

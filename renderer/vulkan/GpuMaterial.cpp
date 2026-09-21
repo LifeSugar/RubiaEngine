@@ -158,6 +158,23 @@ GpuMaterial GpuMaterial::withTextures(
     return result;
 }
 
+GpuMaterial GpuMaterial::fromParameters(const Device& device,
+    const asset::MaterialTemplateAsset& layout, const std::vector<const GpuTexture*>& textures,
+    VkDescriptorSet set, const ParameterSnapshot& source)
+{
+    if (!device || !set || !source.buffer || !*source.buffer || !source.materialTemplate ||
+        source.buffer->ownerDevice() != device.get())
+        throw std::invalid_argument("invalid material parameter snapshot");
+    writeTextureDescriptors(device.get(), set, layout, textures);
+    writeParameterDescriptor(device.get(), set, layout, *source.buffer);
+    GpuMaterial result;
+    result.parameterBuffer_ = source.buffer;
+    result.materialTemplate_ = source.materialTemplate;
+    result.renderState_ = source.renderState;
+    result.descriptorSet_ = set;
+    return result;
+}
+
 void GpuMaterial::reset() noexcept
 {
     descriptorSet_ = VK_NULL_HANDLE;

@@ -5,6 +5,7 @@
 #include "vulkan/Mesh.hpp"
 #include "vulkan/RenderAssetCache.hpp"
 #include "vulkan/VulkanDrawListCompiler.hpp"
+#include "vulkan/VulkanDrawListRecorder.hpp"
 #include "vulkan/VulkanContext.hpp"
 #include "vulkan/VulkanScenePreparation.hpp"
 #include "vulkan/GpuTexture.hpp"
@@ -206,7 +207,7 @@ std::vector<RenderTarget> makeEditorViewportTargets(
     colorAttachment.format = colorFormat;
     colorAttachment.usage =
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-        VK_IMAGE_USAGE_SAMPLED_BIT;
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     colorAttachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 
     RenderTarget::CreateInfo createInfo{};
@@ -385,6 +386,8 @@ void VulkanRenderer::createPresentation(const CreateInfo& createInfo)
         swapchainResources_.create(device, swapchainCreateInfo);
 
         createFrameSlots(createInfo.framesInFlight);
+        pipelineCache_ = std::make_unique<GraphicsPipelineCache>(device);
+        pipelinePreparation_ = std::make_unique<VulkanPipelinePreparation>(device, *pipelineCache_);
         uploads_ = std::make_unique<VulkanUploadService>(device);
         resourcePreparation_ = std::make_unique<VulkanResourcePreparation>(
             device, *uploads_, pendingRetired_, createInfo.resourcePreparation);
@@ -394,6 +397,58 @@ void VulkanRenderer::createPresentation(const CreateInfo& createInfo)
         reset();
         throw;
     }
+}
+
+std::shared_ptr<const GraphicsPipeline> VulkanRenderer::preparePipeline(const GraphicsPipeline::CreateInfo& info)
+{
+    if (!pipelineCache_) throw std::logic_error("renderer pipeline cache is not initialized");
+    return pipelineCache_->getOrCreate(info);
+}
+
+GraphicsPipelineCache::Statistics VulkanRenderer::pipelineCacheStatistics() const
+{
+    return pipelineCache_ ? pipelineCache_->statistics() : GraphicsPipelineCache::Statistics{};
+}
+
+render::PipelinePreparationResult VulkanRenderer::prewarmScenePipelines(
+    const RenderAssetCache& resources, const std::vector<asset::MaterialAssetHandle>& materials)
+{
+    if (!pipelinePreparation_ || !hasSceneResources())
+        return {ResourcePreparationCode::InvalidRequest, {}, "pipeline prewarming requires a scene pass"};
+    try
+    {
+        const auto pass = makePipelineCreateInfo();
+        std::vector<GraphicsPipeline::CreateInfo> descriptions;
+        descriptions.reserve(materials.size());
+        for (auto handle : materials)
+        {
+            const auto& material = resources.material(handle);
+            const auto prepared = resources.materialTemplateForMaterial(handle);
+            if (!prepared) throw std::invalid_argument("material has no resident template");
+            descriptions.push_back(VulkanDrawListCompiler::describeMaterialPipeline(*prepared,
+                render::makePipelineVariantKey(material.materialTemplate(), material.renderState()), pass));
+        }
+        return pipelinePreparation_->request(std::move(descriptions));
+    }
+    catch (const std::exception& error)
+    {
+        return {ResourcePreparationCode::InvalidRequest, {}, error.what()};
+    }
+}
+render::PipelinePreparationStatus VulkanRenderer::pipelinePreparationStatus(render::PipelinePreparationTicket ticket) const
+{
+    if (!pipelinePreparation_) throw std::out_of_range("pipeline preparation is not initialized");
+    return pipelinePreparation_->status(ticket);
+}
+void VulkanRenderer::cancelPipelinePreparation(render::PipelinePreparationTicket ticket)
+{
+    if (!pipelinePreparation_) throw std::out_of_range("pipeline preparation is not initialized");
+    pipelinePreparation_->cancel(ticket);
+}
+void VulkanRenderer::releasePipelinePreparation(render::PipelinePreparationTicket ticket)
+{
+    if (!pipelinePreparation_) throw std::out_of_range("pipeline preparation is not initialized");
+    pipelinePreparation_->release(ticket);
 }
 
 void VulkanRenderer::beginScenePreparation(
@@ -422,6 +477,7 @@ void VulkanRenderer::advanceResourcePreparation()
     {
         scenePreparation_->advance();
     }
+    if (pipelinePreparation_) pipelinePreparation_->advance();
 }
 
 ResourcePreparationResult VulkanRenderer::prepareTexture(
@@ -492,14 +548,11 @@ ResourcePreparationResult VulkanRenderer::prepareMaterial(
     }
     return resourcePreparation_->prepareMaterial(cache, std::move(source));
 }
-GpuTexture VulkanRenderer::uploadTextureAndWait(std::shared_ptr<const asset::TextureAsset> source)
+void VulkanRenderer::setResourcePublicationTransaction(ResourcePreparationTicket ticket,
+    std::shared_ptr<render::ResourcePublicationTransaction> publication)
 {
-    if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
-    {
-        throw std::logic_error(
-            "blocking texture upload requires presentation and no scene preparation");
-    }
-    return resourcePreparation_->uploadTextureAndWait(std::move(source));
+    if (!resourcePreparation_) throw std::logic_error("resource preparation is unavailable");
+    resourcePreparation_->setPublicationTransaction(ticket, std::move(publication));
 }
 
 ResourcePreparationStatus VulkanRenderer::resourcePreparationStatus(
@@ -574,8 +627,8 @@ void VulkanRenderer::createSceneResources(
             createEditorViewportResources(extent(), count);
         }
         createPresentResources(count);
-        graphicsPipeline_.create(device, makePipelineCreateInfo());
-        presentPipeline_.create(device, makePresentPipelineCreateInfo());
+        graphicsPipeline_ = preparePipeline(makePipelineCreateInfo());
+        presentPipeline_ = preparePipeline(makePresentPipelineCreateInfo());
     }
     catch (...)
     {
@@ -603,6 +656,8 @@ void VulkanRenderer::releaseSceneResources() noexcept
     }
     presentPipeline_.reset();
     graphicsPipeline_.reset();
+    if (pipelinePreparation_) pipelinePreparation_->cancelAll();
+    if (pipelineCache_) pipelineCache_->clear();
     presentDescriptorSets_.clear();
     presentDescriptorPool_.reset();
     presentDescriptorSetLayout_.reset();
@@ -630,6 +685,8 @@ void VulkanRenderer::reset() noexcept
     resourcePreparation_.reset();
     if (uploads_) uploads_->shutdown();
     uploads_.reset();
+    pipelinePreparation_.reset();
+    pipelineCache_.reset();
     pendingRetired_.clear();
     frameSlots_.clear();
     swapchainResources_.reset();
@@ -687,8 +744,7 @@ void VulkanRenderer::resize(VkExtent2D framebufferExtent)
     SwapchainResources::CreateInfo createInfo{};
     createInfo.surface = context_->surface();
     createInfo.framebufferExtent = framebufferExtent;
-    const bool pipelineCompatibilityChanged =
-        swapchainResources_.recreate(device, createInfo);
+    static_cast<void>(swapchainResources_.recreate(device, createInfo));
     if (!hasSceneResources())
     {
         return;
@@ -727,10 +783,10 @@ void VulkanRenderer::resize(VkExtent2D framebufferExtent)
             swapchainResources_.format(),
             swapchainResources_.colorSpace());
 
-    if (outputMode_ == OutputMode::Runtime &&
-        pipelineCompatibilityChanged)
+    if (outputMode_ == OutputMode::Runtime)
     {
-        presentPipeline_.create(device, makePresentPipelineCreateInfo());
+        // The complete key decides compatibility, including recreated pass/layout objects.
+        presentPipeline_ = preparePipeline(makePresentPipelineCreateInfo());
     }
 }
 
@@ -861,15 +917,7 @@ VulkanRenderer::RenderResult VulkanRenderer::renderFrame(
             throw std::invalid_argument(
                 "RenderList object-data count does not match its draw count");
         }
-        drawList = VulkanDrawListCompiler{}.compile(
-            frameData.renderList,
-            *renderAssets);
-
-        if (!drawList.transparent.empty())
-        {
-            throw std::logic_error(
-                "transparent RenderList requires a transparent pipeline variant");
-        }
+        drawList = compileDrawList(frameData.renderList, *renderAssets);
     }
 
     const Device& device = context_->device();
@@ -1083,7 +1131,7 @@ void VulkanRenderer::createEditorViewportResources(
         },
         VK_IMAGE_TILING_OPTIMAL,
         VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
-            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT);
     RenderPass renderPass = makeEditorViewportRenderPass(
         device,
         colorFormat);
@@ -1168,13 +1216,21 @@ void VulkanRenderer::recreatePresentDescriptorSets(uint32_t frameCount)
     presentDescriptorSets_ = std::move(descriptorSets);
 }
 
+VulkanDrawList VulkanRenderer::compileDrawList(const render::RenderList& source,
+                                              const RenderAssetCache& resources)
+{
+    if (!pipelineCache_ || !sceneRenderPass_ || !frameDataResources_.descriptorSetLayoutReference())
+        throw std::logic_error("draw compilation requires initialized scene resources");
+    return VulkanDrawListCompiler{}.compile(source, resources, makePipelineCreateInfo(), *pipelineCache_);
+}
+
 GraphicsPipeline::CreateInfo VulkanRenderer::makePipelineCreateInfo() const
 {
     GraphicsPipeline::CreateInfo createInfo = pipelineCreateInfo_;
-    createInfo.renderPass = sceneRenderPass_.get();
+    createInfo.renderPass = sceneRenderPass_.reference();
     createInfo.descriptorSetLayouts.insert(
         createInfo.descriptorSetLayouts.begin(),
-        frameDataResources_.descriptorSetLayout());
+        frameDataResources_.descriptorSetLayoutReference());
     return createInfo;
 }
 
@@ -1183,11 +1239,11 @@ VulkanRenderer::makePresentPipelineCreateInfo() const
 {
     GraphicsPipeline::CreateInfo createInfo = presentPipelineCreateInfo_;
     createInfo.renderPass = outputMode_ == OutputMode::Editor
-        ? editorViewportRenderPass_.get()
-        : swapchainResources_.renderPass();
+        ? editorViewportRenderPass_.reference()
+        : swapchainResources_.renderPassReference();
     createInfo.descriptorSetLayouts.insert(
         createInfo.descriptorSetLayouts.begin(),
-        presentDescriptorSetLayout_.get());
+        presentDescriptorSetLayout_.reference());
     return createInfo;
 }
 
@@ -1288,95 +1344,7 @@ void VulkanRenderer::recordScenePass(
         commandBuffer,
         &renderPassInfo,
         VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(
-        commandBuffer,
-        VK_PIPELINE_BIND_POINT_GRAPHICS,
-        graphicsPipeline_.get());
-
-    VkViewport viewport{};
-    viewport.width = static_cast<float>(renderExtent.width);
-    viewport.height = static_cast<float>(renderExtent.height);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
-    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-
-    VkRect2D scissor{};
-    scissor.extent = renderExtent;
-    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-
-    vkCmdBindDescriptorSets(
-        commandBuffer,
-        VK_PIPELINE_BIND_POINT_GRAPHICS,
-        graphicsPipeline_.layout(),
-        0,
-        1,
-        &descriptorSet,
-        0,
-        nullptr);
-
-    const std::vector<VulkanDrawItem>& opaque = drawList.opaque;
-    const Mesh* boundMesh = nullptr;
-    VkDescriptorSet boundMaterialDescriptorSet = VK_NULL_HANDLE;
-    for (uint32_t itemIndex = 0;
-         itemIndex < static_cast<uint32_t>(opaque.size());
-         ++itemIndex)
-    {
-        const VulkanDrawItem& item = opaque[itemIndex];
-        const Mesh& mesh = *item.mesh;
-        if (item.mesh != boundMesh)
-        {
-            mesh.bind(commandBuffer);
-            boundMesh = item.mesh;
-        }
-
-        const VkDescriptorSet materialDescriptorSet =
-            item.material->descriptorSet();
-        if (materialDescriptorSet != boundMaterialDescriptorSet)
-        {
-            vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                graphicsPipeline_.layout(),
-                1,
-                1,
-                &materialDescriptorSet,
-                0,
-                nullptr);
-            boundMaterialDescriptorSet = materialDescriptorSet;
-        }
-
-        render::DrawPushConstants pushConstants{};
-        pushConstants.objectIndex = item.objectIndex;
-        vkCmdPushConstants(
-            commandBuffer,
-            graphicsPipeline_.layout(),
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            sizeof(pushConstants),
-            &pushConstants);
-
-        const asset::SubmeshData& submesh =
-            mesh.submeshes()[item.submeshIndex];
-        if (submesh.indexed())
-        {
-            vkCmdDrawIndexed(
-                commandBuffer,
-                submesh.indexCount,
-                1,
-                submesh.firstIndex,
-                0,
-                0);
-        }
-        else
-        {
-            vkCmdDraw(
-                commandBuffer,
-                submesh.vertexCount,
-                1,
-                submesh.firstVertex,
-                0);
-        }
-    }
+    recordVulkanDrawList(commandBuffer, descriptorSet, renderExtent, drawList);
 
     vkCmdEndRenderPass(commandBuffer);
 }
@@ -1446,7 +1414,7 @@ void VulkanRenderer::recordPresentPass(
     vkCmdBindPipeline(
         commandBuffer,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
-        presentPipeline_.get());
+        presentPipeline_->get());
 
     VkViewport viewport{};
     viewport.width = static_cast<float>(presentExtent.width);
@@ -1464,7 +1432,7 @@ void VulkanRenderer::recordPresentPass(
     vkCmdBindDescriptorSets(
         commandBuffer,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
-        presentPipeline_.layout(),
+        presentPipeline_->layout(),
         0,
         1,
         &descriptorSet,
@@ -1476,7 +1444,7 @@ void VulkanRenderer::recordPresentPass(
         presentOutputTransferFunction_;
     vkCmdPushConstants(
         commandBuffer,
-        presentPipeline_.layout(),
+        presentPipeline_->layout(),
         VK_SHADER_STAGE_FRAGMENT_BIT,
         0,
         sizeof(pushConstants),
@@ -1515,7 +1483,7 @@ void VulkanRenderer::recordEditorViewportPass(
     vkCmdBindPipeline(
         commandBuffer,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
-        presentPipeline_.get());
+        presentPipeline_->get());
 
     VkViewport viewport{};
     viewport.width = static_cast<float>(renderExtent.width);
@@ -1533,7 +1501,7 @@ void VulkanRenderer::recordEditorViewportPass(
     vkCmdBindDescriptorSets(
         commandBuffer,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
-        presentPipeline_.layout(),
+        presentPipeline_->layout(),
         0,
         1,
         &descriptorSet,
@@ -1546,7 +1514,7 @@ void VulkanRenderer::recordEditorViewportPass(
     pushConstants.outputTransferFunction = 1;
     vkCmdPushConstants(
         commandBuffer,
-        presentPipeline_.layout(),
+        presentPipeline_->layout(),
         VK_SHADER_STAGE_FRAGMENT_BIT,
         0,
         sizeof(pushConstants),

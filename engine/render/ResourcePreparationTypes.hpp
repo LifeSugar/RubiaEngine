@@ -15,7 +15,7 @@ struct ResourcePreparationTicket
 };
 enum class ResourcePreparationState
 {
-    Preparing, // Waiting for dependencies, transfer admission, or publication.
+    Preparing, // Waiting for dependencies, worker creation, transfer admission, or publication.
     Uploading,
     Ready, // This snapshot and its dependencies are resident; not a pipeline rebuild.
     Failed,

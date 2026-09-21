@@ -44,9 +44,14 @@ public:
     PreparationVersions inspectPreparation(const ResourcePreparationTarget& target) const;
     void acceptPreparation(const ResourcePreparationTarget& target);
     bool dependenciesCurrent(const ResourcePreparationTarget& target) const;
-    void publishPreparedTexture(const Device& device, RetiredResources& retired,
+    struct TextureRebindPlan;
+    // Main-thread snapshot -> worker build -> main-thread atomic publication.
+    std::shared_ptr<TextureRebindPlan> captureTextureRebind(asset::TextureAssetHandle,
+                                                          asset::AssetContentRevision) const;
+    static void buildTextureRebind(const Device&, TextureRebindPlan&, const GpuTexture&);
+    void publishPreparedTexture(RetiredResources& retired,
                                 const ResourcePreparationTarget& target,
-                                GpuTexture texture);
+                                GpuTexture texture, std::shared_ptr<TextureRebindPlan> rebind);
     void publishPreparedMesh(RetiredResources& retired, const ResourcePreparationTarget& target,
                              Mesh mesh);
     // Refresh dependency readiness without allocating/uploading unchanged geometry.
@@ -65,19 +70,11 @@ public:
     std::shared_ptr<const GpuShaderProgram> shaderProgram(asset::ShaderProgramAssetHandle) const;
     std::shared_ptr<const GpuMaterialTemplate> materialTemplate(
         asset::MaterialTemplateAssetHandle) const;
-    // Legacy CPU/GPU transaction: stamp only after committing matching content.
-    void setTextureVersion(asset::AssetDomainId domain,
-                           asset::AssetVersion<asset::TextureAsset> version);
+    /// Exact template/program version used to publish this material's descriptors.
+    std::shared_ptr<const GpuMaterialTemplate> materialTemplateForMaterial(
+        asset::MaterialAssetHandle handle) const;
     uint64_t texturePublication(asset::TextureAssetHandle handle) const noexcept;
 
-    /// Legacy synchronous transaction: creates replacement material bindings and
-    /// returns the previous texture for rollback. Caller must first finish all
-    /// GPU users, since the old bindings are reclaimed before this call returns.
-    [[nodiscard]] GpuTexture commitTextureReplacement(
-        const Device& device,
-        const asset::AssetManager& assets,
-        asset::TextureAssetHandle handle,
-        GpuTexture replacement);
     void reset() noexcept;
 
     [[nodiscard]] const Mesh& mesh(asset::MeshAssetHandle handle) const;
@@ -173,11 +170,6 @@ private:
     std::vector<PreparedEntry<GpuShader>> shaders_;
     std::vector<PreparedEntry<GpuShaderProgram>> programs_;
     std::vector<PreparedEntry<GpuMaterialTemplate>> templates_;
-    // Builds all new descriptors first, then exchanges whole binding versions.
-    // The returned old texture is owned by retired until moved by the legacy path.
-    GpuTexture& replaceTexture(const Device& device, RetiredResources& retired,
-                               asset::TextureAssetHandle handle, GpuTexture replacement,
-                               asset::AssetContentRevision revision);
     asset::AssetDomainId domain_;
     uint64_t nextPublication_ = 1; // Does not reset: GUI tokens must notice cache reuse.
     std::vector<TextureEntry> textures_;

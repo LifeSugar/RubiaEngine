@@ -35,9 +35,9 @@ SceneResourceRequest makeSceneResourceRequest(const asset::AssetManager& assets,
                                               asset::ShaderProgramAssetHandle presentProgram,
                                               uint32_t maxRenderObjects)
 {
-    if (models.empty() || !maxRenderObjects)
+    if (!maxRenderObjects)
     {
-        throw std::invalid_argument("scene requires models and object capacity");
+        throw std::invalid_argument("scene requires object capacity");
     }
     SceneResourceRequest request;
     request.materialTemplate = assets.snapshot(materialTemplate);
@@ -45,15 +45,6 @@ SceneResourceRequest makeSceneResourceRequest(const asset::AssetManager& assets,
     request.maxRenderObjects = maxRenderObjects;
     for (auto mesh : collectModelMeshes(assets, models))
     {
-        // Current scene pipeline uses one material interface; this is a frontend policy.
-        for (const auto& submesh : assets.mesh(mesh).submeshes())
-        {
-            if (assets.material(submesh.material).materialTemplate() != materialTemplate)
-            {
-                throw std::invalid_argument(
-                    "scene requires the requested shared material template");
-            }
-        }
         request.meshes.push_back(assets.snapshot(mesh));
     }
     return request;

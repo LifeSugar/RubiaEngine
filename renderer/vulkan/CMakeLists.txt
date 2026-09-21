@@ -1,4 +1,5 @@
 add_library(rubia_rhi_vulkan STATIC
+    VulkanViewportCapture.cpp
     Buffer.cpp
     Buffer.hpp
     CommandPool.cpp
@@ -27,6 +28,12 @@ add_library(rubia_rhi_vulkan STATIC
     GpuTexture.hpp
     GraphicsPipeline.cpp
     GraphicsPipeline.hpp
+    GraphicsPipelineState.hpp
+    PipelineKeyData.hpp
+    GraphicsPipelineKey.cpp
+    GraphicsPipelineKey.hpp
+    GraphicsPipelineCache.cpp
+    GraphicsPipelineCache.hpp
     Image.cpp
     Image.hpp
     ImageView.cpp
@@ -66,6 +73,10 @@ add_library(rubia_rhi_vulkan STATIC
     VulkanApplicationGuiRenderBridge.hpp
     VulkanContext.cpp
     VulkanContext.hpp
+    VulkanDrawListRecorder.hpp
+    VulkanDrawListRecorder.cpp
+    VulkanPipelinePreparation.hpp
+    VulkanPipelinePreparation.cpp
     VulkanDrawList.hpp
     VulkanDrawListCompiler.cpp
     VulkanDrawListCompiler.hpp

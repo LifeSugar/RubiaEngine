@@ -4,7 +4,12 @@
 #include "vulkan/RenderAssetCache.hpp"
 #include "vulkan/VulkanResourcePreparation.hpp"
 #include "vulkan/VulkanUploadService.hpp"
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
+#include <future>
+#include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 
@@ -304,6 +309,22 @@ std::shared_ptr<asset::MeshAsset> preparationMesh()
     info.submeshes.push_back({0, 3, 0, 3, {}});
     return std::make_shared<asset::MeshAsset>(std::move(info));
 }
+// Pump CPU creation separately from transfer execution, so tests can still observe
+// admission, partial upload, and publication as distinct boundaries.
+void waitPreparation(VulkanResourcePreparation& preparation, ResourcePreparationTicket ticket,
+                     VulkanUploadService* uploads = nullptr, bool untilUpload = false)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    for (;;)
+    {
+        if (uploads) uploads->drain();
+        preparation.advance();
+        const auto progress = preparation.status(ticket);
+        if (resourcePreparationFinished(progress.state) || (untilUpload && progress.totalBytes)) return;
+        require(std::chrono::steady_clock::now() < deadline, "resource creation worker timed out");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
 void runMeshPreparationTests(const Device& device)
 {
     VulkanUploadService uploads(device);
@@ -341,6 +362,8 @@ void runMeshPreparationTests(const Device& device)
     }
     require(releaseRejected, "unfinished preparation could be released");
 
+    waitPreparation(preparation, mesh.ticket, nullptr, true);
+    waitPreparation(preparation, texture.ticket, nullptr, true);
     // One indexed mesh has vertex and index operations; finish only the first batch.
     uploads.tick({4096, 1, std::chrono::seconds(1)});
     device.waitIdle();
@@ -374,8 +397,7 @@ void runMeshPreparationTests(const Device& device)
     const auto oldVertices = cache.mesh(meshHandle).vertexBuffer();
     const auto replacement = preparation.prepareMesh(cache, {domain, {meshHandle, 2}, source});
     require(replacement.accepted(), "mesh replacement was rejected");
-    uploads.drain();
-    preparation.advance();
+    waitPreparation(preparation, replacement.ticket, &uploads);
     require(preparation.status(replacement.ticket).state == ResourcePreparationState::Ready &&
                 cache.mesh(meshHandle).vertexBuffer() != oldVertices &&
                 preparationRetired.size() == 1,
@@ -393,6 +415,7 @@ void runMeshPreparationTests(const Device& device)
         preparation.prepareMesh(cache, {domain, {cancelledHandle, 1}, cancelledSource});
     require(cancelled.accepted(), "cancelled mesh test enqueue failed");
     cancelledSource.reset();
+    waitPreparation(preparation, cancelled.ticket, nullptr, true);
     uploads.tick({4096, 1, std::chrono::seconds(1)});
     preparation.cancel(cancelled.ticket);
     require(preparation.status(cancelled.ticket).state == ResourcePreparationState::Cancelled &&
@@ -405,12 +428,40 @@ void runMeshPreparationTests(const Device& device)
             "cancelled mesh leaked or was published");
 }
 
+struct CreationGate
+{
+    std::mutex mutex;
+    std::condition_variable wake;
+    bool open = false;
+    std::atomic_bool entered{false};
+    void release()
+    {
+        { std::lock_guard<std::mutex> lock(mutex); open = true; }
+        wake.notify_all();
+    }
+    void wait()
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        entered = true;
+        if (!wake.wait_for(lock, std::chrono::seconds(10), [&] { return open; }))
+            throw std::runtime_error("creation test gate timed out");
+    }
+};
+struct GateRelease
+{
+    std::shared_ptr<CreationGate> gate;
+    ~GateRelease() { gate->release(); }
+};
 struct PreparationProbe
 {
-    int created = 0;
-    int built = 0;
-    int published = 0;
-    int destroyed = 0;
+    std::atomic_int created{0};
+    std::atomic_int built{0};
+    std::atomic_int published{0};
+    std::atomic_int destroyed{0};
+    std::thread::id capturedThread;
+    std::thread::id createdThread;
+    std::thread::id publishedThread;
+    std::shared_ptr<CreationGate> gate;
     bool failCreate = false;
     bool failPublish = false;
 };
@@ -424,9 +475,12 @@ public:
     {
         ++probe_.destroyed;
     }
+    void captureDependencies() override { probe_.capturedThread = std::this_thread::get_id(); }
     void createGpuResources(const Device&) override
     {
+        probe_.createdThread = std::this_thread::get_id();
         ++probe_.created;
+        if (probe_.gate) probe_.gate->wait();
         if (probe_.failCreate)
         {
             throw std::runtime_error("probe create failed");
@@ -439,6 +493,7 @@ public:
     }
     void publish(RetiredResources&) override
     {
+        probe_.publishedThread = std::this_thread::get_id();
         if (probe_.failPublish)
         {
             throw std::runtime_error("probe publish failed");
@@ -449,6 +504,20 @@ public:
 private:
     PreparationProbe& probe_;
 };
+struct PublicationProbe final : render::ResourcePublicationTransaction
+{
+    int begun = 0, committed = 0, rolledBack = 0;
+    bool failBegin = false;
+    std::thread::id thread;
+    void begin() override
+    {
+        thread = std::this_thread::get_id();
+        ++begun;
+        if (failBegin) throw std::runtime_error("transaction begin failed");
+    }
+    void commit() noexcept override { ++committed; }
+    void rollback() noexcept override { ++rolledBack; }
+};
 void runNoUploadPreparationTests(const Device& device)
 {
     // Occupy the only upload ticket. Empty-transfer preparations must still work.
@@ -458,7 +527,7 @@ void runNoUploadPreparationTests(const Device& device)
     const auto occupied = uploads.tryEnqueue(pending);
     require(occupied.accepted(), "no-upload test could not occupy service capacity");
     RenderAssetCache cache;
-    PreparationProbe ready, cancelled, failed, retry, rejected, createFailed;
+    PreparationProbe ready, cancelled, failed, retry, rejected, createFailed, blocked, fresh, queued;
     RetiredResources preparationRetired;
     VulkanResourcePreparation preparation(device, uploads, preparationRetired, {}, 2);
     const auto domain = std::make_shared<asset::AssetDomainTag>();
@@ -469,7 +538,7 @@ void runNoUploadPreparationTests(const Device& device)
     };
     auto a = enqueue(0, ready);
     auto b = enqueue(1, cancelled);
-    require(a.accepted() && b.accepted() && ready.created == 1 && ready.built == 1 &&
+    require(a.accepted() && b.accepted() && ready.created == 0 && ready.built == 0 &&
                 ready.published == 0 && preparation.status(a.ticket).totalBytes == 0,
             "empty-transfer preparation required upload capacity or published early");
     require(enqueue(2, rejected).code == ResourcePreparationCode::QueueFull &&
@@ -491,7 +560,11 @@ void runNoUploadPreparationTests(const Device& device)
     foreign.join();
     require(foreignThreadRejected, "no-upload preparation bypassed render-thread ownership");
     preparation.cancel(b.ticket);
-    preparation.advance();
+    waitPreparation(preparation, a.ticket);
+    require(ready.capturedThread == std::this_thread::get_id() &&
+                ready.publishedThread == std::this_thread::get_id() &&
+                ready.createdThread != std::this_thread::get_id(),
+            "capture/create/publish violated thread boundaries");
     preparation.advance();
     require(preparation.status(a.ticket).state == ResourcePreparationState::Ready &&
                 ready.published == 1 && ready.destroyed == 1 &&
@@ -504,7 +577,8 @@ void runNoUploadPreparationTests(const Device& device)
     a = enqueue(0, failed);
     b = enqueue(1, retry);
     require(a.accepted() && b.accepted(), "terminal records did not release preparation capacity");
-    preparation.advance();
+    waitPreparation(preparation, a.ticket);
+    waitPreparation(preparation, b.ticket);
     require(preparation.status(a.ticket).state == ResourcePreparationState::Failed &&
                 preparation.status(a.ticket).error == "probe publish failed" &&
                 failed.destroyed == 1 &&
@@ -513,14 +587,87 @@ void runNoUploadPreparationTests(const Device& device)
     preparation.release(a.ticket);
     preparation.release(b.ticket);
     createFailed.failCreate = true;
-    require(enqueue(0, createFailed).code == ResourcePreparationCode::Failed &&
-                createFailed.destroyed == 1 && preparation.empty(),
-            "creation failure leaked a record");
+    a = enqueue(0, createFailed);
+    require(a.accepted(), "creation failure must be reported asynchronously");
+    waitPreparation(preparation, a.ticket);
+    require(preparation.status(a.ticket).state == ResourcePreparationState::Failed &&
+                preparation.status(a.ticket).error == "probe create failed" && createFailed.destroyed == 1,
+            "worker creation failure was lost");
+    preparation.release(a.ticket);
+    require(preparation.empty(), "creation failure leaked a record");
+    for (int failure = 0; failure < 3; ++failure)
+    {
+        PreparationProbe probe;
+        probe.failPublish = failure == 2;
+        auto transaction = std::make_shared<PublicationProbe>();
+        transaction->failBegin = failure == 1;
+        auto result = preparation.prepare({&cache, asset::MeshAssetHandle{3, 1}, static_cast<uint64_t>(failure + 1), domain},
+                                           std::make_unique<NoUploadPreparation>(probe));
+        preparation.setPublicationTransaction(result.ticket, transaction);
+        waitPreparation(preparation, result.ticket);
+        require(transaction->thread == std::this_thread::get_id() && transaction->begun == 1 &&
+                    transaction->committed == (failure == 0 ? 1 : 0) &&
+                    transaction->rolledBack == (failure == 0 ? 0 : 1) &&
+                    preparation.status(result.ticket).state == (failure == 0 ? ResourcePreparationState::Ready : ResourcePreparationState::Failed),
+                "publication transaction failed its commit/rollback boundary");
+        preparation.release(result.ticket);
+    }
+    // Deterministic in-flight cancellation: the worker is held at a gate while
+    // main-thread advance/cancel/reset/retry must continue without waiting on it.
+    auto gate = std::make_shared<CreationGate>();
+    blocked.gate = gate;
+    GateRelease releaseOnFailure{gate};
+    a = enqueue(0, blocked);
+    preparation.advance();
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!gate->entered && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    require(gate->entered && blocked.built == 0 && blocked.published == 0,
+            "resource worker did not execute independently of advance");
+    preparation.cancel(a.ticket);
+    preparation.release(a.ticket);
+    cache.reset();
+    a = enqueue(0, fresh);
+    b = enqueue(1, queued);
+    preparation.advance();
+    require(a.accepted() && b.accepted() && fresh.created == 0 && queued.created == 0 &&
+                preparation.status(a.ticket).state == ResourcePreparationState::Preparing,
+            "blocked creation stalled scheduling or exceeded the single-worker boundary");
+    gate->release();
+    waitPreparation(preparation, a.ticket);
+    waitPreparation(preparation, b.ticket);
+    require(blocked.published == 0 && blocked.destroyed == 1 && fresh.published == 1 && queued.published == 1,
+            "cancelled worker completion damaged same-key retry after cache reset");
+    preparation.release(a.ticket);
+    preparation.release(b.ticket);
+
+    PreparationProbe shutdownProbe;
+    shutdownProbe.gate = std::make_shared<CreationGate>();
+    {
+        auto shutdown = std::make_unique<VulkanResourcePreparation>(device, uploads, preparationRetired);
+        GateRelease releaseShutdown{shutdownProbe.gate};
+        const auto request = shutdown->prepare({&cache, asset::MeshAssetHandle{2, 1}, 1, domain},
+                                               std::make_unique<NoUploadPreparation>(shutdownProbe));
+        require(request.accepted(), "shutdown worker request rejected");
+        shutdown->advance();
+        deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!shutdownProbe.gate->entered && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        require(shutdownProbe.gate->entered, "shutdown worker did not start");
+        auto unblock = std::async(std::launch::async, [&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            shutdownProbe.gate->release();
+        });
+        shutdown.reset(); // Must join before returning, without publishing or touching uploads.
+        require(shutdownProbe.built == 1 && shutdownProbe.destroyed == 1 && shutdownProbe.published == 0,
+                "resource manager destruction did not join and discard active creation");
+    }
     require(uploads.query(occupied.ticket).state == UploadState::Queued &&
                 uploads.stagedBytes() == 0,
             "preparation advanced unrelated service uploads");
     uploads.cancel(occupied.ticket);
     uploads.releaseTicket(occupied.ticket);
+    std::clog << "[Vulkan] Resource preparation worker tests passed (thread ownership, cancellation, retry, failure, shutdown)\n";
 }
 void runVersionedPreparationTests(const Device& device)
 {
@@ -529,7 +676,7 @@ void runVersionedPreparationTests(const Device& device)
     RenderAssetCache cache;
     PreparationProbe failed;
     RetiredResources preparationRetired;
-    VulkanResourcePreparation preparation(device, uploads, preparationRetired);
+    VulkanResourcePreparation preparation(device, uploads, preparationRetired, {}, 2);
     asset::AssetManager assets;
     asset::TextureAsset::CreateInfo info;
     info.width = info.height = 2;
@@ -549,6 +696,7 @@ void runVersionedPreparationTests(const Device& device)
             "identical texture versions did not share one upload with separate caller tickets");
     preparation.cancel(a.ticket);
     preparation.release(a.ticket);
+    waitPreparation(preparation, b.ticket, nullptr, true);
     uploads.drain();
     // Sharing still works after transfer completion but before publication.
     auto c = preparation.prepareTexture(cache, v1);
@@ -574,6 +722,7 @@ void runVersionedPreparationTests(const Device& device)
     a = preparation.prepareTexture(cache, v2);
     b = preparation.prepareTexture(cache, v2);
     require(a.accepted() && b.accepted(), "updated version was rejected");
+    waitPreparation(preparation, a.ticket, nullptr, true);
     uploads.tick({1024, 1, std::chrono::seconds(1)});
     preparation.cancel(a.ticket);
     preparation.cancel(b.ticket);
@@ -587,8 +736,11 @@ void runVersionedPreparationTests(const Device& device)
 
     a = preparation.prepareTexture(cache, v2);
     require(a.accepted(), "cancelled version could not be retried");
+    waitPreparation(preparation, a.ticket, nullptr, true);
     uploads.drain();
-    // No free record until the completed upload is published; rejection must preserve it.
+    auto capacityBlocker = preparation.prepareTexture(cache, v1);
+    require(capacityBlocker.accepted(), "preparation capacity blocker failed");
+    // No free preparation ticket until the completed upload is published; rejection must preserve it.
     info.payload.assign(16, std::byte{0x63});
     static_cast<void>(assets.replaceTexture(handle, asset::TextureAsset(info)));
     const auto v3 = assets.snapshot(handle);
@@ -597,6 +749,7 @@ void runVersionedPreparationTests(const Device& device)
                 preparation.status(a.ticket).state == ResourcePreparationState::Uploading &&
                 cache.inspectPreparation(target(v2)).requested == 2,
             "rejected newer version superseded accepted work");
+    preparation.release(capacityBlocker.ticket);
     preparation.advance();
     require(preparation.status(a.ticket).state == ResourcePreparationState::Ready &&
                 cache.texture(handle).view() != originalView &&
@@ -609,7 +762,7 @@ void runVersionedPreparationTests(const Device& device)
     failed.failPublish = true;
     a = preparation.prepare(target(v3), std::make_unique<NoUploadPreparation>(failed));
     require(a.accepted(), "failure probe was not accepted");
-    preparation.advance();
+    waitPreparation(preparation, a.ticket);
     require(preparation.status(a.ticket).state == ResourcePreparationState::Failed &&
                 cache.texture(handle).view() == secondView &&
                 cache.inspectPreparation(target(v3)).resident == 2,
@@ -617,8 +770,7 @@ void runVersionedPreparationTests(const Device& device)
     preparation.release(a.ticket);
     a = preparation.prepareTexture(cache, v3);
     require(a.accepted(), "failed version could not be retried");
-    uploads.drain();
-    preparation.advance();
+    waitPreparation(preparation, a.ticket, &uploads);
     preparation.release(a.ticket);
     require(cache.inspectPreparation(target(v3)).resident == 3 &&
                 !preparation.prepareTexture(cache, v2).accepted(),
@@ -643,6 +795,7 @@ void runVersionedPreparationTests(const Device& device)
     a = updates.prepareTexture(cache, v4);
     b = updates.prepareTexture(cache, v4);
     require(a.accepted() && b.accepted(), "supersession setup failed");
+    waitPreparation(updates, a.ticket, nullptr, true);
     concurrent.tick({1024, 1, std::chrono::seconds(1)});
     static_cast<void>(assets.replaceTexture(handle, asset::TextureAsset(info)));
     const auto v5 = assets.snapshot(handle);
@@ -650,8 +803,7 @@ void runVersionedPreparationTests(const Device& device)
     require(c.accepted() && updates.status(a.ticket).state == ResourcePreparationState::Cancelled &&
                 updates.status(b.ticket).state == ResourcePreparationState::Cancelled,
             "new revision failed to supersede all observers of older pending work");
-    concurrent.drain();
-    updates.advance();
+    waitPreparation(updates, c.ticket, &concurrent);
     require(updates.status(c.ticket).state == ResourcePreparationState::Ready &&
                 cache.inspectPreparation(target(v5)).resident == 5,
             "older in-flight completion overwrote the latest texture");
@@ -669,8 +821,7 @@ void runVersionedPreparationTests(const Device& device)
     b = updates.prepareMesh(cache, assets.snapshot(meshHandle));
     require(a.accepted() && b.disposition == ResourcePreparationDisposition::Shared,
             "mesh preparation did not share");
-    concurrent.drain();
-    updates.advance();
+    waitPreparation(updates, a.ticket, &concurrent);
     const auto originalBuffer = cache.mesh(meshHandle).vertexBuffer();
     updates.release(a.ticket);
     updates.release(b.ticket);
@@ -685,8 +836,7 @@ void runVersionedPreparationTests(const Device& device)
     a = updates.prepareMesh(cache, meshV2);
     require(a.accepted() && cache.mesh(meshHandle).vertexBuffer() == originalBuffer,
             "mesh update replaced the old buffer before completion");
-    concurrent.drain();
-    updates.advance();
+    waitPreparation(updates, a.ticket, &concurrent);
     require(updates.status(a.ticket).state == ResourcePreparationState::Ready &&
                 cache.mesh(meshHandle).vertexBuffer() != originalBuffer &&
                 cache.inspectPreparation(target(meshV2)).resident == 2,
@@ -730,6 +880,7 @@ void runPreparationLifetimeTests(const Device& device)
                     "preparation advance submitted or prematurely published work");
             if (submitted)
             {
+                waitPreparation(preparation, textureTicket, nullptr, true);
                 uploads.tick({64, 2, std::chrono::seconds(1)});
                 require(preparation.status(textureTicket).submittedBytes == 16,
                         "texture did not enter the shared batch");

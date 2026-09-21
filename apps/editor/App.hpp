@@ -42,6 +42,7 @@ public:
         uint32_t windowHeight = 720;
         std::string windowTitle = "RubiaEngine";
         bool enableDocking = true;
+        bool initializeEmptyScene = false;
         render::ResourcePreparationOptions resourcePreparation;
         std::string imguiIniFilename;
         rhi::vulkan::VulkanRenderer::OutputMode outputMode =
@@ -88,6 +89,8 @@ private:
         importer::texture::TextureImportRecord record;
         std::filesystem::path stagedPath;
         asset::TextureAsset replacementAsset;
+        asset::AssetVersion<asset::TextureAsset> baseVersion;
+        asset::AssetDomainId domain;
         std::string error;
     };
 
@@ -121,6 +124,8 @@ private:
     bool preferIntegratedGpu = false;
     bool swapChainRecreationRequested = false;
     std::deque<importer::texture::TextureReimportRequest> pendingTextureReimports_;
+    struct TextureReimportTransaction;
+    std::shared_ptr<TextureReimportTransaction> textureReimportTransaction_;
     std::future<PreparedTextureReimport> textureReimportFuture_;
     asset::TextureAssetHandle activeTextureReimport_;
     std::filesystem::path activeTextureReimportStagedPath_;
@@ -130,6 +135,7 @@ private:
 private:
     void initWindow(const RunConfig& config, bool visible = true);
     void initVulkan(const RunConfig& config);
+    void startEmptyScene(const RunConfig& config);
     void startContentLoading();
     void updateContentLoading();
     void discardContentLoading() noexcept;

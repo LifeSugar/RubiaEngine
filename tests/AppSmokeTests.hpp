@@ -17,6 +17,8 @@ class AppSmokeTests final
 public:
     static void runAssetImportTest();
     static void runStartupTest();
+    static void runEditorAssetTest();
+    static void runPreparationGallery(bool interactive);
     static void runRenderTest();
     static void runRenderTest(
         editor::App& app,

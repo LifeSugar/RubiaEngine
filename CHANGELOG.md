@@ -3,6 +3,47 @@
 记录 RubiaEngine 在 `dev` 分支上的功能、架构演进与修复，按版本倒序排列。
 
 
+## 0.25.0 — 2026-09-21 — 异步资源与 PSO 准备、编辑器资产导入及材质展厅
+
+本节记录当前工作区的阶段成果，尚未提交。
+
+### Pipeline 状态、缓存与绘制
+
+- 扩展可表达的图形 Pipeline 状态，涵盖顶点输入、图元装配、光栅化、深度/模板、多重采样、颜色混合、viewport/scissor、动态状态与阶段 specialization。
+- 新增 `GraphicsPipelineKey` 与设备范围的 `GraphicsPipelineCache`，按 Shader、布局、RenderPass 兼容信息及受支持的 Pipeline 状态统一匹配；比较完整字段，避免仅依赖哈希。此处为应用层 PSO 缓存，不是驱动 `VkPipelineCache` 的磁盘持久化。
+- 贯通 `VulkanDrawListCompiler` 的逐材质 Pipeline 选择与 `VulkanDrawListRecorder` 的绘制切换；相同 Shader/状态的材质共享 PSO，颜色和纹理参数不单独产生 Pipeline。
+- 接入 AlphaClip：开关参与 specialization 与 Pipeline Key，阈值通过 Draw Push Constants 传入；不同阈值共享同一裁剪 PSO。
+
+### 异步准备与纹理重导入
+
+- 新增 `PipelinePreparationTicket`，接入场景加载阶段预热与增量材质请求；资源驻留与特定 RenderPass 下的 PSO 就绪分为两个阶段。
+- ResourcePreparation 与 PipelinePreparation 各自拥有专用创建线程；主线程继续通过 `advance()` 调度、收集结果与发布，GPU 上传仍由共享 UploadService 管理。
+- 保留同版本任务共享、缓存命中、独立订阅取消与新版本替换语义；跨线程创建使用不可变输入，并保活设备相关依赖。
+- 将纹理文件重导入迁入现有 preparation 链路，使用 staged CPU 版本与发布事务协调磁盘产物、CPU Asset 和 GPU 驻留内容，移除原有独立同步上传路径。
+- 纹理替换为依赖材质创建新 descriptor，复用不可变参数 Buffer；旧资源和 GUI 预览继续通过帧完成信号安全退休，失败时保留原有内容。
+
+### 编辑器资产工作流
+
+- 新增 `EditorAssetController`，支持浏览任意目录、导入 GLB/贴图/Shader，以及将模型拖入 Hierarchy；CPU 导入与准备流程在 update 中推进，GUI 提交操作请求。
+- 支持通过 DXC 直接编译 HLSL 为 SPIR-V，选择 VS/PS 阶段及入口函数，再反射生成 ShaderProgram 和 MaterialTemplate；材质参数布局无需手写偏移。
+- 新增材质编辑面板，设置参数和纹理并准备材质/PSO；SceneNode 支持实例材质覆盖，相同 Model 的多个实例可使用不同材质。
+- 重复模型/纹理导入复用资产；失败的编译、准备或材质切换保留当前可用场景，补充取消、错误诊断及中文/空格路径覆盖。
+- 正常启动保持空场景，只准备内置渲染资源，移除自动加载 DemoContent 模型的行为；调整窗口重建逻辑，保留编辑器业务层正在进行的导入任务。
+- 新增 `Frame Scene` 自动取景：合并场景世界包围盒，更新相机位置、固定朝向与裁剪面。当前会包含背景平面，尚无排除背景、Frame Selected 或 Reset View 功能。
+
+### Material Atelier 与回归验证
+
+- 通过 BlenderMCP 制作 40 个测试几何体和 10 种测试材质，另加一个合并的建筑网格/材质；包含大背景平面、展墙、倒角展台、标签及玻璃内部/后方的实体参照物。
+- 生成釉面/镂空 Alpha、法线、ORM 与发光纹理；测试 Shader 覆盖无贴图、顶点色、多贴图、不同 VS/PS 组合、AlphaClip、透明与双面，补充 GGX 高光、粗糙度、金属度和 Fresnel 效果。
+- 新增 `--preparation-gallery` 交互入口、`--preparation-gallery-test` 自动回归入口，以及编辑器视口的阻塞式工具读回；保存全景、关闭玻璃的对照、玻璃近景和纹理更新结果。
+- 展厅验证 52 个根资源的 Started/Shared/CacheHit 与订阅取消；4 VS + 6 PS 组成 7 Program、11 Material、9 个唯一 PSO，绘制为 33 个不透明/裁剪项及 8 个透明项。
+- 验证渲染过程中共享纹理更新与恢复：8 个材质切换 descriptor，UBO 和 PSO 保持复用，预热后的绘制不新增 PSO。
+- 本阶段 Debug 构建通过，RTX 4070 上完整 CTest **9/9 通过，无 Vulkan validation error**。
+
+当前边界：Mesh 导入后的 GPU 存储仍统一为 `asset::Vertex`，展厅覆盖的是不同源属性与 VS 输入签名；尚未实现多种 GPU 顶点存储布局。玻璃为 Alpha 混合加 Fresnel，没有折射；展厅照明和接触暗部为解析近似，没有新增 skybox、完整 IBL 或阴影贴图。专用展厅装配也不代表已实现通用 Scene 保存/加载。
+
+阅读入口：[资产导入与准备流程](apps/editor/content/README.md) → [资源准备接口](engine/render/ResourcePreparation.hpp) → [PSO 准备](renderer/vulkan/VulkanPipelinePreparation.hpp) → [绘制列表编译](renderer/vulkan/VulkanDrawListCompiler.cpp)。实际案例见 [展厅说明、材质矩阵与渲染结果](assets/preparation_gallery/README.md)。
+
 ## 0.24.0 — 资源准备前端与 GPU 资源延迟释放
 
 

@@ -2,6 +2,7 @@
 
 #include "asset/AssetHandle.hpp"
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -57,6 +58,7 @@ public:
             freeIndices_.pop_back();
         }
         slot.contentRevision = 1;
+        slot.lastIssuedRevision = 1;
         ++size_;
         return {index, slot.generation};
     }
@@ -118,14 +120,38 @@ public:
         }
 
         Slot& slot = slots_[handle.index];
-        if (slot.contentRevision == std::numeric_limits<AssetContentRevision>::max())
+        if (slot.lastIssuedRevision == std::numeric_limits<AssetContentRevision>::max())
         {
             throw std::overflow_error("asset content revision exhausted");
         }
         std::optional<Asset> candidate(std::move(replacement));
         slot.asset.swap(candidate);
-        ++slot.contentRevision;
+        slot.contentRevision = ++slot.lastIssuedRevision;
         return std::move(*candidate);
+    }
+
+    // Reserve a unique identity for unpublished content. Abandoned reservations
+    // leave gaps; subsequent edits must never reuse a candidate's revision.
+    [[nodiscard]] AssetVersion<Asset> reserveVersion(Handle handle)
+    {
+        static_cast<void>(get(handle));
+        auto& slot = slots_[handle.index];
+        if (slot.lastIssuedRevision == std::numeric_limits<AssetContentRevision>::max())
+            throw std::overflow_error("asset content revision exhausted");
+        return {handle, ++slot.lastIssuedRevision};
+    }
+    // Caller validates expected immediately before a non-interleaved commit.
+    void commitReserved(AssetVersion<Asset> expected, AssetVersion<Asset> reserved,
+                        Asset& candidate) noexcept
+    {
+        static_assert(std::is_nothrow_swappable_v<Asset>);
+        assert(isCurrent(expected) && expected.handle == reserved.handle &&
+               reserved.contentRevision > expected.contentRevision &&
+               reserved.contentRevision <= slots_[expected.handle.index].lastIssuedRevision);
+        auto& slot = slots_[expected.handle.index];
+        using std::swap;
+        swap(*slot.asset, candidate);
+        slot.contentRevision = reserved.contentRevision;
     }
 
     bool erase(Handle handle) noexcept
@@ -186,6 +212,7 @@ private:
         std::optional<Asset> asset;
         uint32_t generation = 1;
         AssetContentRevision contentRevision = kInvalidAssetContentRevision;
+        AssetContentRevision lastIssuedRevision = kInvalidAssetContentRevision;
     };
 
     [[nodiscard]] static uint32_t nextGeneration(uint32_t generation) noexcept

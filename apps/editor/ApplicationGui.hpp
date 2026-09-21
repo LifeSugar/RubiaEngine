@@ -5,6 +5,7 @@
 #include "texture/TextureImportRegistry.hpp"
 #include "render/ResourcePreparation.hpp"
 
+#include "math/Aabb.hpp"
 #include <optional>
 #include <vector>
 
@@ -22,12 +23,14 @@ struct ApplicationGuiContext
     // Optional non-owning port. Store tickets for status/cancel/release; the App
     // advances work before GUI/frame recording, never from draw().
     render::ResourcePreparation* preparations = nullptr;
+    asset::MaterialAssetHandle defaultModelMaterial;
 };
 
 /// Per-frame GUI decisions consumed before building the scene RenderFrame.
 struct ApplicationGuiFrameOutput
 {
     std::optional<float> sceneAspectRatio;
+    std::optional<math::Aabb> sceneFocus;
     std::vector<importer::texture::TextureReimportRequest> textureReimports;
 };
 
@@ -39,6 +42,8 @@ public:
 
     virtual void attach(const ApplicationGuiContext&) {}
     virtual void detach() noexcept {}
+    // Main-loop work, before ImGui: consume commands and advance editor jobs.
+    virtual void update(const ApplicationGuiContext&) {}
     [[nodiscard]] virtual ApplicationGuiFrameOutput draw(
         const ApplicationGuiContext& context) = 0;
 };

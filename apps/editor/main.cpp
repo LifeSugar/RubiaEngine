@@ -11,7 +11,13 @@ int main(int argc, char** argv)
 {
     try
     {
-        if (argc == 2 && std::string_view(argv[1]) == "--asset-test")
+        if (argc == 2 && (std::string_view(argv[1]) == "--preparation-gallery" ||
+                          std::string_view(argv[1]) == "--preparation-gallery-test"))
+        {
+            rubia::test::AppSmokeTests::runPreparationGallery(
+                std::string_view(argv[1]) == "--preparation-gallery");
+        }
+        else if (argc == 2 && std::string_view(argv[1]) == "--asset-test")
         {
             rubia::test::AppSmokeTests::runAssetImportTest();
             std::cout << "[OK] Asset import test passed\n";
@@ -25,6 +31,11 @@ int main(int argc, char** argv)
         {
             rubia::test::AppSmokeTests::runRenderTest();
             std::cout << "[OK] Render test passed\n";
+        }
+        else if (argc == 2 && std::string_view(argv[1]) == "--editor-assets-test")
+        {
+            rubia::test::AppSmokeTests::runEditorAssetTest();
+            std::cout << "[OK] Editor asset workflow test passed\n";
         }
         else if (argc == 2 && std::string_view(argv[1]) == "--editor-test")
         {

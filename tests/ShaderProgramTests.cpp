@@ -115,6 +115,19 @@ void testMergeAndSignatures()
     require(layout != assets.shaderProgram(push).layoutSignature(),
             "push constant changes must invalidate layout signature");
 
+    auto specialized = shaderInfo(ShaderStage::Fragment);
+    specialized.interface.specializationConstants = {{1000, ShaderValueType::Bool}};
+    const auto specializedProgram = program(assets, shaderInfo(ShaderStage::Vertex), specialized);
+    require(interface != assets.shaderProgram(specializedProgram).interfaceSignature() &&
+                layout == assets.shaderProgram(specializedProgram).layoutSignature(),
+            "specialization contract must affect interface but not pipeline layout");
+    auto pushMember = shaderInfo(ShaderStage::Fragment);
+    pushMember.interface.pushConstants[0].members = {{"threshold", ShaderValueType::Float, 8, 4, 1}};
+    const auto memberProgram = program(assets, shaderInfo(ShaderStage::Vertex), pushMember);
+    require(interface != assets.shaderProgram(memberProgram).interfaceSignature() &&
+                layout == assets.shaderProgram(memberProgram).layoutSignature(),
+            "push member ABI must affect interface without changing an unchanged range");
+
     auto changedIo = shaderInfo(ShaderStage::Fragment);
     changedIo.interface.outputs[0].location = 1;
     const auto io = program(assets, shaderInfo(ShaderStage::Vertex), changedIo);

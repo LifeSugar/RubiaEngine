@@ -1,4 +1,6 @@
 add_library(rubia_smoke_tests STATIC
+    PreparationGallery.cpp
+    EditorAssetImportTests.cpp
     AppSmokeTests.cpp
     AppStartupTests.cpp
     AssetPreparationTests.cpp
@@ -17,6 +19,8 @@ target_link_libraries(rubia_smoke_tests
         imgui
         KTX::ktx
 )
+
+target_compile_definitions(rubia_smoke_tests PRIVATE PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 
 # The editor keeps its existing command-line smoke-test entry points.
 target_link_libraries(VulkanApp PRIVATE rubia_smoke_tests)
@@ -39,11 +43,33 @@ if(BUILD_TESTING)
     )
     option(RUBIA_ENABLE_GPU_TESTS "Register hidden-window Vulkan smoke tests" OFF)
     if(RUBIA_ENABLE_GPU_TESTS)
+        if(NOT Vulkan_GLSLC_EXECUTABLE)
+            message(FATAL_ERROR "GPU pipeline tests require the Vulkan SDK glslc compiler")
+        endif()
+        set(pipeline_test_spirv)
+        foreach(shader pipeline_state.vert pipeline_state.frag draw_list.vert draw_list.frag draw_list_alternate.frag)
+            set(source "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}")
+            set(output "${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader}.spv")
+            add_custom_command(OUTPUT "${output}"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/shaders"
+                COMMAND "${Vulkan_GLSLC_EXECUTABLE}" --target-env=vulkan1.0 "${source}" -o "${output}"
+                DEPENDS "${source}" VERBATIM)
+            list(APPEND pipeline_test_spirv "${output}")
+        endforeach()
+        add_custom_target(pipeline_test_shaders DEPENDS ${pipeline_test_spirv})
+        add_dependencies(rubia_smoke_tests pipeline_test_shaders)
+        target_sources(rubia_smoke_tests PRIVATE GraphicsPipelineTests.cpp GraphicsPipelineCacheTests.cpp VulkanDrawListTests.cpp PipelinePreparationTests.cpp)
+        target_compile_definitions(rubia_smoke_tests PRIVATE
+            RUBIA_PIPELINE_STATE_TESTS
+            RUBIA_PIPELINE_TEST_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders")
         add_test(NAME startup-smoke-test COMMAND VulkanApp --startup-test)
         add_test(NAME runtime-smoke-test COMMAND VulkanApp --render-test)
         add_test(NAME editor-smoke-test COMMAND VulkanApp --editor-test)
-        set_tests_properties(startup-smoke-test runtime-smoke-test editor-smoke-test
+        add_test(NAME preparation-gallery-test COMMAND VulkanApp --preparation-gallery-test)
+        add_test(NAME editor-assets-test COMMAND VulkanApp --editor-assets-test)
+        set_tests_properties(preparation-gallery-test startup-smoke-test runtime-smoke-test editor-smoke-test editor-assets-test
             PROPERTIES WORKING_DIRECTORY "$<TARGET_FILE_DIR:VulkanApp>"
+            FAIL_REGULAR_EXPRESSION "validation layer [(]error[)]|Validation Error"
             RUN_SERIAL TRUE TIMEOUT 180)
     endif()
 endif()

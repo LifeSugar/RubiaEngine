@@ -15,6 +15,12 @@
 namespace rubia::editor
 {
 
+void EditorLayer::update(const ApplicationGuiContext& context)
+{
+    if (!browsed_) { assetController_.browse(std::filesystem::path(PROJECT_SOURCE_DIR) / "assets"); browsed_ = true; }
+    assetController_.update(context, selection_);
+}
+
 ApplicationGuiFrameOutput EditorLayer::draw(
     const ApplicationGuiContext& context)
 {
@@ -29,7 +35,7 @@ ApplicationGuiFrameOutput EditorLayer::draw(
             context.scene,
             context.assets,
             selection_,
-            &showSceneHierarchy_);
+            &showSceneHierarchy_, &assetController_);
     }
     if (showInspector_)
     {
@@ -39,7 +45,7 @@ ApplicationGuiFrameOutput EditorLayer::draw(
             context.render,
             context.textureImports,
             selection_,
-            &showInspector_);
+            &showInspector_, &assetController_);
     }
     if (showAssets_)
     {
@@ -48,7 +54,7 @@ ApplicationGuiFrameOutput EditorLayer::draw(
                 context.assets,
                 context.textureImports,
                 selection_,
-                &showAssets_);
+                &showAssets_, &assetController_);
         output.textureReimports.insert(
             output.textureReimports.end(),
             std::make_move_iterator(assetReimports.begin()),
@@ -70,6 +76,7 @@ ApplicationGuiFrameOutput EditorLayer::draw(
     {
         drawPreferencesPanel(&showPreferences_);
     }
+    output.sceneFocus = assetController_.takeFocus();
     return output;
 }
 
@@ -203,6 +210,8 @@ std::optional<float> EditorLayer::drawSceneViewport(
         return std::nullopt;
     }
 
+    if (ImGui::Button("Frame Scene")) assetController_.frameScene();
+    ImGui::SameLine();
     ImGui::TextDisabled("SCENE");
     ImGui::SameLine();
     ImGui::TextUnformatted(context.scene.name().empty()

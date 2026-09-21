@@ -129,6 +129,34 @@ TextureAsset::CreateInfo textureInfo(std::byte value)
     return info;
 }
 
+void testStagedTextureReplacement()
+{
+    AssetManager assets;
+    auto handle = assets.createTexture(textureInfo(std::byte{0x11}));
+    auto original = assets.version(handle);
+    auto staged = assets.stageTextureReplacement(handle, TextureAsset(textureInfo(std::byte{0x22})));
+    auto candidate = staged.snapshot();
+    require(assets.isCurrent(original) && candidate.version.contentRevision > original.contentRevision &&
+                candidate.data->payload()[0] == std::byte{0x22}, "staging changed live content");
+    assets.validateStagedTexture(staged);
+    assets.commitStagedTexture(staged);
+    require(assets.version(handle) == candidate.version && assets.texture(handle).payload()[0] == std::byte{0x22},
+            "reserved texture commit lost its snapshot version");
+    rejects<std::runtime_error>([&] { assets.validateStagedTexture(staged); });
+    auto abandoned = assets.stageTextureReplacement(handle, TextureAsset(textureInfo(std::byte{0x33})));
+    auto abandonedVersion = abandoned.snapshot().version;
+    static_cast<void>(assets.replaceTexture(handle, TextureAsset(textureInfo(std::byte{0x44}))));
+    require(assets.contentRevision(handle) > abandonedVersion.contentRevision,
+            "ordinary edit reused an unpublished candidate revision");
+    rejects<std::runtime_error>([&] { assets.validateStagedTexture(abandoned); });
+    auto cancelled = assets.stageTextureReplacement(handle, TextureAsset(textureInfo(std::byte{0x55})));
+    auto next = assets.stageTextureReplacement(handle, TextureAsset(textureInfo(std::byte{0x66})));
+    require(next.snapshot().version.contentRevision > cancelled.snapshot().version.contentRevision,
+            "two staged candidates shared a revision");
+    assets.reset();
+    rejects<std::runtime_error>([&] { assets.validateStagedTexture(next); });
+}
+
 void testManagedReplacement()
 {
     AssetManager assets;
@@ -265,6 +293,7 @@ int main()
         testIdentityAndContent();
         testFailedPublication();
         testManagedReplacement();
+        testStagedTextureReplacement();
         testManagedGeometry();
         testImmutableSnapshots();
         testModelExpansion();

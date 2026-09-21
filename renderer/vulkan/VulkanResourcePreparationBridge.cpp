@@ -63,6 +63,12 @@ render::ResourcePreparationResult VulkanResourcePreparationBridge::prepare(
     }
     return result;
 }
+void VulkanResourcePreparationBridge::setPublicationTransaction(render::ResourcePreparationTicket ticket,
+    std::shared_ptr<render::ResourcePublicationTransaction> publication)
+{
+    checkTicket(ticket);
+    renderer_.setResourcePublicationTransaction(ticket, std::move(publication));
+}
 void VulkanResourcePreparationBridge::checkTicket(render::ResourcePreparationTicket ticket) const
 {
     if (tickets_.find(ticket.value) == tickets_.end())
@@ -87,6 +93,43 @@ void VulkanResourcePreparationBridge::release(render::ResourcePreparationTicket 
     renderer_.releaseResourcePreparation(ticket);
     tickets_.erase(ticket.value);
 }
+render::PipelinePreparationResult VulkanResourcePreparationBridge::prewarmPipelines(
+    const std::vector<asset::MaterialAssetHandle>& materials)
+{
+    auto result = renderer_.prewarmScenePipelines(cache_, materials);
+    if (result.accepted())
+    {
+        try { pipelineTickets_.insert(result.ticket.value); }
+        catch (...)
+        {
+            renderer_.cancelPipelinePreparation(result.ticket);
+            renderer_.releasePipelinePreparation(result.ticket);
+            throw;
+        }
+    }
+    return result;
+}
+void VulkanResourcePreparationBridge::checkPipelineTicket(render::PipelinePreparationTicket ticket) const
+{
+    if (!pipelineTickets_.count(ticket.value))
+        throw std::out_of_range("pipeline ticket does not belong to this session");
+}
+render::PipelinePreparationStatus VulkanResourcePreparationBridge::pipelineStatus(render::PipelinePreparationTicket ticket) const
+{
+    checkPipelineTicket(ticket);
+    return renderer_.pipelinePreparationStatus(ticket);
+}
+void VulkanResourcePreparationBridge::cancelPipelines(render::PipelinePreparationTicket ticket)
+{
+    checkPipelineTicket(ticket);
+    renderer_.cancelPipelinePreparation(ticket);
+}
+void VulkanResourcePreparationBridge::releasePipelines(render::PipelinePreparationTicket ticket)
+{
+    checkPipelineTicket(ticket);
+    renderer_.releasePipelinePreparation(ticket);
+    pipelineTickets_.erase(ticket.value);
+}
 void VulkanResourcePreparationBridge::cancelAll() noexcept
 {
     for (auto id : tickets_)
@@ -101,6 +144,16 @@ void VulkanResourcePreparationBridge::cancelAll() noexcept
         }
     }
     tickets_.clear();
+    for (auto id : pipelineTickets_)
+    {
+        try
+        {
+            renderer_.cancelPipelinePreparation({id});
+            renderer_.releasePipelinePreparation({id});
+        }
+        catch (...) {}
+    }
+    pipelineTickets_.clear();
 }
 void VulkanResourcePreparationBridge::advance()
 {

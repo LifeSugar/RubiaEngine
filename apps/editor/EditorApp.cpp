@@ -26,6 +26,7 @@ App::RunConfig EditorApp::makeRunConfig()
     config.windowHeight = 900;
     config.windowTitle = "Vulkan Editor";
     config.enableDocking = true;
+    config.initializeEmptyScene = true;
     config.imguiIniFilename = "editor_imgui.ini";
     config.outputMode = rhi::vulkan::VulkanRenderer::OutputMode::Editor;
     config.demoContent = DemoContentLoader::CreateInfo{

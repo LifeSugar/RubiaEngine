@@ -318,6 +318,32 @@ ShaderProgramAsset ShaderProgramBuilder::build(ShaderProgramAsset::CreateInfo cr
     hashIo(interface, outputs);
     hashIo(interface, inputs);
     hashIo(interface, result.interface_.fragmentOutputs);
+    // Specialization and push-member types are shader-interface metadata, not
+    // descriptor/pipeline-layout identity. Preserve stage-local constant IDs.
+    for (const auto& [stage, shader] : stages)
+    {
+        interface.add(static_cast<uint64_t>(stage));
+        auto constants = shader->interface().specializationConstants;
+        std::sort(constants.begin(), constants.end(), [](const auto& a, const auto& b)
+            { return a.constantId < b.constantId; });
+        interface.add(constants.size());
+        for (const auto& constant : constants)
+        {
+            interface.add(constant.constantId);
+            interface.add(static_cast<uint64_t>(constant.type));
+        }
+        for (const auto& push : shader->interface().pushConstants)
+        {
+            interface.add(push.members.size());
+            for (const auto& member : push.members)
+            {
+                interface.add(member.offset);
+                interface.add(member.size);
+                interface.add(static_cast<uint64_t>(member.type));
+                interface.add(member.arrayCount);
+            }
+        }
+    }
     result.codeSignature_ = code.value;
     result.layoutSignature_ = layout.value;
     result.interfaceSignature_ = interface.value;

@@ -76,12 +76,19 @@ struct ShaderStageIoDesc
     ShaderValueType type = ShaderValueType::Unknown;
 };
 
+struct ShaderSpecializationConstantDesc
+{
+    uint32_t constantId = 0;
+    ShaderValueType type = ShaderValueType::Unknown;
+};
+
 struct ShaderPushConstantDesc
 {
     std::string name;
     uint32_t byteSize = 0;
     ShaderStage stage = ShaderStage::Vertex;
     uint32_t offset = 0;
+    std::vector<ShaderBlockMemberDesc> members;
 };
 
 /// Backend-independent interface reflected from one SPIR-V entry point.
@@ -94,6 +101,7 @@ struct ShaderInterface
     std::vector<ShaderStageIoDesc> inputs;
     std::vector<ShaderStageIoDesc> outputs;
     std::vector<ShaderPushConstantDesc> pushConstants;
+    std::vector<ShaderSpecializationConstantDesc> specializationConstants;
     uint64_t signature = 0;
 };
 

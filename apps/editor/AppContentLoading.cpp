@@ -11,6 +11,17 @@
 namespace rubia::editor
 {
 
+void App::startEmptyScene(const RunConfig& config)
+{
+    preparedContent_ = std::make_shared<PreparedContent>();
+    preparedContent_->content = DemoContentLoader::loadBuiltins(preparedContent_->assets, config.demoContent);
+    preparedContent_->scene.create({"Untitled Scene", {}});
+    renderer.beginScenePreparation(renderAssets, render::makeSceneResourceRequest(
+        preparedContent_->assets, {}, preparedContent_->content.materialTemplate,
+        preparedContent_->content.presentProgram));
+    contentLoadStatus_ = {ContentLoadState::Uploading, "Preparing editor defaults..."};
+}
+
 void App::startContentLoading()
 {
     if (contentLoadStatus_.state != ContentLoadState::Idle &&
@@ -91,23 +102,32 @@ void App::updateContentLoading()
                 throw std::runtime_error("Scene resource preparation cancelled");
             }
 
-            const std::size_t previousCompleted = contentLoadStatus_.completed;
-            contentLoadStatus_.completed = status.completed;
-            contentLoadStatus_.total = status.total;
-            if (status.total != 0 && status.completed * 10 / status.total >
-                previousCompleted * 10 / status.total)
+            if (status.state == render::ScenePreparationState::PreparingResources)
             {
-                std::clog << "[Content] Prepared " << status.completed
-                    << '/' << status.total << " root resources ("
-                    << status.completed * 100 / status.total << "%)\n";
+                const std::size_t previousCompleted = contentLoadStatus_.completed;
+                contentLoadStatus_.completed = status.completed;
+                contentLoadStatus_.total = status.total;
+                if (status.total != 0 && status.completed * 10 / status.total >
+                    previousCompleted * 10 / status.total)
+                {
+                    std::clog << "[Content] Prepared " << status.completed
+                        << '/' << status.total << " root resources ("
+                        << status.completed * 100 / status.total << "%)\n";
+                }
             }
             if (status.state == render::ScenePreparationState::PreparingPipelines &&
                 contentLoadStatus_.state != ContentLoadState::Finalizing)
             {
                 contentLoadStatus_.state = ContentLoadState::Finalizing;
-                contentLoadStatus_.message = "Preparing scene rendering...";
+                contentLoadStatus_.message = "Prewarming scene pipelines...";
                 std::clog << "[Content] " << contentLoadStatus_.message << '\n';
             }
+            if (status.state == render::ScenePreparationState::PreparingPipelines)
+            {
+                contentLoadStatus_.completed = status.pipelinesCompleted;
+                contentLoadStatus_.total = status.pipelinesTotal;
+            }
+
             if (status.state != render::ScenePreparationState::Ready)
             {
                 return;

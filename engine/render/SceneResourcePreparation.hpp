@@ -21,6 +21,7 @@ namespace rubia::render
 struct SceneResourceRequest
 {
     std::vector<asset::AssetSnapshot<asset::MeshAsset>> meshes;
+    // Bootstrap pipeline only; individual meshes may depend on other templates.
     asset::AssetSnapshot<asset::MaterialTemplateAsset> materialTemplate;
     asset::AssetSnapshot<asset::ShaderProgramAsset> presentProgram;
     uint32_t maxRenderObjects = 1024;
@@ -52,6 +53,8 @@ struct ScenePreparationStatus
     // Counts ready root preparations (meshes, material template and present program),
     // including all their dependencies. This is not GPU transfer progress.
     std::size_t completed = 0;
+    std::size_t pipelinesTotal = 0;
+    std::size_t pipelinesCompleted = 0;
     std::string error;
 };
 

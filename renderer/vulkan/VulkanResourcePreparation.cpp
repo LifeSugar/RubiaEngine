@@ -12,32 +12,16 @@ namespace rubia::rhi::vulkan
 {
 namespace
 {
-bool sameSlot(const ResourcePreparationTarget& a, const ResourcePreparationTarget& b)
+bool sameSlot(const ResourcePreparationTarget &a, const ResourcePreparationTarget &b)
 {
     return a.cache == b.cache && a.asset.index() == b.asset.index() &&
            std::visit([](auto handle) { return handle.index; }, a.asset) ==
                std::visit([](auto handle) { return handle.index; }, b.asset);
 }
-ResourcePreparationCode preparationCode(UploadEnqueueCode code)
-{
-    switch (code)
-    {
-    case UploadEnqueueCode::Accepted:
-        return ResourcePreparationCode::Accepted;
-    case UploadEnqueueCode::QueueFull:
-        return ResourcePreparationCode::QueueFull;
-    case UploadEnqueueCode::InvalidRequest:
-        return ResourcePreparationCode::InvalidRequest;
-    case UploadEnqueueCode::UnsupportedRequest:
-        return ResourcePreparationCode::UnsupportedRequest;
-    default:
-        return ResourcePreparationCode::Failed;
-    }
-}
 } // namespace
-VulkanResourcePreparation::VulkanResourcePreparation(const Device& device,
-                                                     VulkanUploadService& uploads,
-                                                     RetiredResources& retired,
+VulkanResourcePreparation::VulkanResourcePreparation(const Device &device,
+                                                     VulkanUploadService &uploads,
+                                                     RetiredResources &retired,
                                                      render::ResourcePreparationOptions options,
                                                      std::size_t maxRequests)
     : device_(device), uploads_(uploads), retired_(retired), maxRequests_(maxRequests),
@@ -49,6 +33,77 @@ VulkanResourcePreparation::VulkanResourcePreparation(const Device& device,
     }
     if (!render::validMaterialParameterMemory(options_.material.parameterMemory))
         throw std::invalid_argument("invalid material parameter memory policy");
+    activeCreations_.reserve(maxCreationsInFlight_);
+    creationThread_ = std::thread([this] { runCreationWorker(); });
+}
+void VulkanResourcePreparation::runCreationWorker() noexcept
+{
+    for (;;)
+    {
+        std::shared_ptr<CreationWork> work;
+        {
+            std::unique_lock<std::mutex> lock(creationMutex_);
+            creationWake_.wait(lock, [this] { return stopping_ || !creationQueue_.empty(); });
+            if (stopping_)
+                return;
+            work = std::move(creationQueue_.front());
+            creationQueue_.pop_front();
+        }
+        try
+        {
+            if (!work->cancelled.load())
+            {
+                work->preparation->createGpuResources(device_);
+                work->upload = work->preparation->buildUploadRequest();
+            }
+        }
+        catch (...)
+        {
+            work->error = std::current_exception();
+        }
+        {
+            std::lock_guard<std::mutex> lock(creationMutex_);
+            work->done = true;
+        }
+    }
+}
+bool VulkanResourcePreparation::advanceCreation(PreparationRecord &record)
+{
+    if (record.created)
+        return true;
+    if (record.creation)
+    {
+        auto work = record.creation;
+        {
+            std::lock_guard<std::mutex> lock(creationMutex_);
+            if (!work->done)
+                return false;
+        }
+        if (work->error)
+            std::rethrow_exception(work->error);
+        record.preparation = std::move(work->preparation);
+        record.pendingUpload = std::move(work->upload);
+        record.creation.reset();
+        record.created = true;
+        return true;
+    }
+    if (activeCreations_.size() >= maxCreationsInFlight_ ||
+        dispatchedThisAdvance_ >= maxCreationsInFlight_)
+        return false;
+    if (!record.target.cache->dependenciesCurrent(record.target))
+        throw std::runtime_error("dependency version changed before resource creation");
+    record.preparation->captureDependencies();
+    auto work = std::make_shared<CreationWork>();
+    work->preparation = std::move(record.preparation);
+    {
+        std::lock_guard<std::mutex> lock(creationMutex_);
+        creationQueue_.push_back(work);
+    }
+    record.creation = work;
+    activeCreations_.push_back(std::move(work)); // Constructor reserved capacity.
+    ++dispatchedThisAdvance_;
+    creationWake_.notify_one();
+    return false;
 }
 void VulkanResourcePreparation::checkThread() const
 {
@@ -66,16 +121,29 @@ VulkanResourcePreparation::~VulkanResourcePreparation()
         tasks_.erase(tasks_.begin());
         retire(*record);
     }
+    {
+        std::lock_guard<std::mutex> lock(creationMutex_);
+        stopping_ = true;
+        creationQueue_.clear();
+    }
+    creationWake_.notify_one();
+    if (creationThread_.joinable())
+        creationThread_.join();
 }
-void VulkanResourcePreparation::retire(PreparationRecord& record)
+void VulkanResourcePreparation::retire(PreparationRecord &record)
 {
+    if (record.creation)
+    {
+        record.creation->cancelled.store(true);
+        record.creation.reset(); // Active worker keeps exclusive ownership until completion.
+    }
     if (record.upload)
     {
         uploads_.cancel(record.upload);
         uploads_.releaseTicket(record.upload);
         record.upload = {};
     }
-    for (auto& dependency : record.dependencies)
+    for (auto &dependency : record.dependencies)
     {
         if (dependency.ticket)
         {
@@ -87,9 +155,10 @@ void VulkanResourcePreparation::retire(PreparationRecord& record)
     record.dependencies.clear();
     record.pendingUpload.operations.clear();
     record.preparation.reset();
+    record.publication.reset();
 }
 ResourcePreparationResult VulkanResourcePreparation::prepareTexture(
-    RenderAssetCache& cache, asset::AssetSnapshot<asset::TextureAsset> source)
+    RenderAssetCache &cache, asset::AssetSnapshot<asset::TextureAsset> source)
 {
     checkThread();
     try
@@ -97,13 +166,13 @@ ResourcePreparationResult VulkanResourcePreparation::prepareTexture(
         auto target = preparationTarget(cache, source);
         return prepare(std::move(target), makeTexturePreparation(cache, std::move(source)));
     }
-    catch (const std::invalid_argument& error)
+    catch (const std::invalid_argument &error)
     {
         return {ResourcePreparationCode::InvalidRequest, {}, error.what()};
     }
 }
 ResourcePreparationResult VulkanResourcePreparation::prepareMesh(
-    RenderAssetCache& cache, asset::AssetSnapshot<asset::MeshAsset> source)
+    RenderAssetCache &cache, asset::AssetSnapshot<asset::MeshAsset> source)
 {
     checkThread();
     try
@@ -111,13 +180,13 @@ ResourcePreparationResult VulkanResourcePreparation::prepareMesh(
         auto target = preparationTarget(cache, source);
         return prepare(std::move(target), makeMeshPreparation(cache, std::move(source)));
     }
-    catch (const std::invalid_argument& error)
+    catch (const std::invalid_argument &error)
     {
         return {ResourcePreparationCode::InvalidRequest, {}, error.what()};
     }
 }
 ResourcePreparationResult VulkanResourcePreparation::prepareShader(
-    RenderAssetCache& cache, asset::AssetSnapshot<asset::ShaderAsset> source)
+    RenderAssetCache &cache, asset::AssetSnapshot<asset::ShaderAsset> source)
 {
     checkThread();
     try
@@ -125,13 +194,13 @@ ResourcePreparationResult VulkanResourcePreparation::prepareShader(
         auto target = preparationTarget(cache, source);
         return prepare(std::move(target), makeShaderPreparation(cache, std::move(source)));
     }
-    catch (const std::invalid_argument& error)
+    catch (const std::invalid_argument &error)
     {
         return {ResourcePreparationCode::InvalidRequest, {}, error.what()};
     }
 }
 ResourcePreparationResult VulkanResourcePreparation::prepareShaderProgram(
-    RenderAssetCache& cache, asset::AssetSnapshot<asset::ShaderProgramAsset> source)
+    RenderAssetCache &cache, asset::AssetSnapshot<asset::ShaderProgramAsset> source)
 {
     checkThread();
     try
@@ -139,13 +208,13 @@ ResourcePreparationResult VulkanResourcePreparation::prepareShaderProgram(
         auto target = preparationTarget(cache, source);
         return prepare(std::move(target), makeShaderProgramPreparation(cache, std::move(source)));
     }
-    catch (const std::invalid_argument& error)
+    catch (const std::invalid_argument &error)
     {
         return {ResourcePreparationCode::InvalidRequest, {}, error.what()};
     }
 }
 ResourcePreparationResult VulkanResourcePreparation::prepareMaterialTemplate(
-    RenderAssetCache& cache, asset::AssetSnapshot<asset::MaterialTemplateAsset> source)
+    RenderAssetCache &cache, asset::AssetSnapshot<asset::MaterialTemplateAsset> source)
 {
     checkThread();
     try
@@ -154,31 +223,32 @@ ResourcePreparationResult VulkanResourcePreparation::prepareMaterialTemplate(
         return prepare(std::move(target),
                        makeMaterialTemplatePreparation(cache, std::move(source)));
     }
-    catch (const std::invalid_argument& error)
+    catch (const std::invalid_argument &error)
     {
         return {ResourcePreparationCode::InvalidRequest, {}, error.what()};
     }
 }
 ResourcePreparationResult VulkanResourcePreparation::prepareMaterial(
-    RenderAssetCache& cache, asset::AssetSnapshot<asset::MaterialAsset> source)
+    RenderAssetCache &cache, asset::AssetSnapshot<asset::MaterialAsset> source)
 {
     checkThread();
     try
     {
         auto target = preparationTarget(cache, source);
-        return prepare(std::move(target), makeMaterialPreparation(cache, std::move(source), options_.material));
+        return prepare(std::move(target),
+                       makeMaterialPreparation(cache, std::move(source), options_.material));
     }
-    catch (const std::invalid_argument& error)
+    catch (const std::invalid_argument &error)
     {
         return {ResourcePreparationCode::InvalidRequest, {}, error.what()};
     }
 }
-ResourcePreparationResult VulkanResourcePreparation::prepareAny(RenderAssetCache& cache,
-                                                                render::ResourceAssetSnapshot source)
+ResourcePreparationResult VulkanResourcePreparation::prepareAny(
+    RenderAssetCache &cache, render::ResourceAssetSnapshot source)
 {
     struct Restore
     {
-        bool& flag;
+        bool &flag;
         bool previous;
         ~Restore()
         {
@@ -187,8 +257,7 @@ ResourcePreparationResult VulkanResourcePreparation::prepareAny(RenderAssetCache
     } restore{dependencyAdmission_, dependencyAdmission_};
     dependencyAdmission_ = true;
     return std::visit(
-        [&](auto value) -> ResourcePreparationResult
-        {
+        [&](auto value) -> ResourcePreparationResult {
             using Snapshot = decltype(value);
             if constexpr (std::is_same_v<Snapshot, asset::AssetSnapshot<asset::TextureAsset>>)
             {
@@ -216,7 +285,6 @@ ResourcePreparationResult VulkanResourcePreparation::prepareAny(RenderAssetCache
             {
                 return prepareMaterial(cache, std::move(value));
             }
-
         },
         std::move(source));
 }
@@ -234,12 +302,12 @@ ResourcePreparationResult VulkanResourcePreparation::prepare(
     {
         versions = target.cache->inspectPreparation(target);
     }
-    catch (const std::exception& error)
+    catch (const std::exception &error)
     {
         return {ResourcePreparationCode::InvalidRequest, {}, error.what()};
     }
     const auto externalCount = static_cast<std::size_t>(std::count_if(
-        records_.begin(), records_.end(), [](const auto& pair) { return !pair.second.internal; }));
+        records_.begin(), records_.end(), [](const auto &pair) { return !pair.second.internal; }));
     if (!dependencyAdmission_ && externalCount >= maxRequests_)
     {
         return {ResourcePreparationCode::QueueFull, {}, "preparation ticket capacity exhausted"};
@@ -274,9 +342,9 @@ ResourcePreparationResult VulkanResourcePreparation::prepare(
     }
     if (target.revision == versions.requested)
     {
-        for (const auto& wanted : target.dependencies)
+        for (const auto &wanted : target.dependencies)
         {
-            for (const auto& previous : versions.requestedDependencies)
+            for (const auto &previous : versions.requestedDependencies)
             {
                 if (wanted.handle == previous.handle && wanted.revision < previous.revision)
                 {
@@ -287,7 +355,7 @@ ResourcePreparationResult VulkanResourcePreparation::prepare(
             }
         }
     }
-    for (const auto& pair : tasks_)
+    for (const auto &pair : tasks_)
     {
         auto task = pair.second;
         if (sameSlot(task->target, target) && task->target.asset == target.asset &&
@@ -295,6 +363,8 @@ ResourcePreparationResult VulkanResourcePreparation::prepare(
             task->target.dependencies == target.dependencies &&
             !resourcePreparationFinished(taskStatus(*task).state))
         {
+            if (task->publication)
+                return {ResourcePreparationCode::InvalidRequest, {}, "resource has an exclusive publication transaction"};
             records_.emplace(id, Subscription{task, {}, dependencyAdmission_});
             ++task->subscribers;
             ++nextTicket_;
@@ -304,35 +374,12 @@ ResourcePreparationResult VulkanResourcePreparation::prepare(
                     ResourcePreparationDisposition::Shared};
         }
     }
-    UploadRequest request;
     const auto dependencies = preparation->dependencies();
-    try
-    {
-        if (dependencies.empty())
-        {
-            preparation->createGpuResources(device_);
-            request = preparation->buildUploadRequest();
-        }
-    }
-    catch (const UnsupportedUpload& error)
-    {
-        return {ResourcePreparationCode::UnsupportedRequest, {}, error.what()};
-    }
-    catch (const std::invalid_argument& error)
-    {
-        return {ResourcePreparationCode::InvalidRequest, {}, error.what()};
-    }
-    catch (const std::exception& error)
-    {
-        return {ResourcePreparationCode::Failed, {}, error.what()};
-    }
-
     auto task = std::make_shared<PreparationRecord>();
     task->target = target;
     task->preparation = std::move(preparation);
     task->subscribers = 1;
-    task->created = dependencies.empty();
-    for (const auto& source : dependencies)
+    for (const auto &source : dependencies)
     {
         task->dependencies.push_back({source, {}, false});
     }
@@ -340,20 +387,7 @@ ResourcePreparationResult VulkanResourcePreparation::prepare(
     try
     {
         tasks_.emplace(id, task);
-        if (!request.operations.empty())
-        {
-            auto result = uploads_.tryEnqueue(request);
-            if (!result.accepted())
-            {
-                tasks_.erase(id);
-                records_.erase(id);
-                return {preparationCode(result.code), {}, std::move(result.error)};
-            }
-            task->upload = result.ticket;
-            task->status.totalBytes = uploads_.query(result.ticket).totalBytes;
-        }
-        // Leaf uploads commit after admission. Dependency tasks commit admission now and enqueue
-        // their own transfer later; either way, the old resident object survives until publication.
+        // Admission is CPU-only; object creation and upload admission happen later.
         target.cache->acceptPreparation(target);
     }
     catch (...)
@@ -369,7 +403,7 @@ ResourcePreparationResult VulkanResourcePreparation::prepare(
     // objects.
     for (auto it = tasks_.begin(); it != tasks_.end();)
     {
-        auto& old = *it->second;
+        auto &old = *it->second;
         if (it->first != id && sameSlot(old.target, target))
         {
             old.status = taskStatus(old);
@@ -389,7 +423,7 @@ ResourcePreparationResult VulkanResourcePreparation::prepare(
     return {ResourcePreparationCode::Accepted, {id}, {}, ResourcePreparationDisposition::Started};
 }
 ResourcePreparationStatus VulkanResourcePreparation::taskStatus(
-    const PreparationRecord& record) const
+    const PreparationRecord &record) const
 {
     auto result = record.status;
     if (resourcePreparationFinished(result.state) || !record.upload)
@@ -422,12 +456,12 @@ ResourcePreparationStatus VulkanResourcePreparation::taskStatus(
 ResourcePreparationStatus VulkanResourcePreparation::status(ResourcePreparationTicket ticket) const
 {
     checkThread();
-    const auto& subscription = records_.at(ticket.value);
+    const auto &subscription = records_.at(ticket.value);
     return subscription.cancelled ? *subscription.cancelled : taskStatus(*subscription.task);
 }
-bool VulkanResourcePreparation::advanceDependencies(PreparationRecord& record)
+bool VulkanResourcePreparation::advanceDependencies(PreparationRecord &record)
 {
-    for (auto& dependency : record.dependencies)
+    for (auto &dependency : record.dependencies)
     {
         if (dependency.ready)
         {
@@ -468,11 +502,18 @@ bool VulkanResourcePreparation::advanceDependencies(PreparationRecord& record)
 void VulkanResourcePreparation::advance()
 {
     checkThread();
+    dispatchedThisAdvance_ = 0;
+    {
+        std::lock_guard<std::mutex> lock(creationMutex_);
+        activeCreations_.erase(std::remove_if(activeCreations_.begin(), activeCreations_.end(),
+                                              [](const auto &work) { return work->done; }),
+                               activeCreations_.end());
+    }
     // Newly scheduled dependencies start advancing on the next pump, keeping each pump bounded.
     const auto last = nextTicket_ - 1;
     for (auto it = tasks_.begin(); it != tasks_.end() && it->first <= last;)
     {
-        auto& record = *it->second;
+        auto &record = *it->second;
         record.status = taskStatus(record);
         if (!resourcePreparationFinished(record.status.state))
         {
@@ -490,25 +531,18 @@ void VulkanResourcePreparation::advance()
                     const auto current = record.target.cache->inspectPreparation(record.target);
                     // A texture publication can already have rebuilt these exact
                     // material bindings while preserving their parameter buffer.
-                    if (!record.created && current.resident == record.target.revision &&
+                    if (!record.publication && !record.created && !record.creation &&
+                        current.resident == record.target.revision &&
                         current.residentDependencies == record.target.dependencies &&
                         record.target.cache->dependenciesCurrent(record.target))
                     {
                         record.status.state = ResourcePreparationState::Ready;
                     }
-                    else
+                    else if (advanceCreation(record))
                     {
-                        if (!record.created)
-                        {
-                            if (!record.target.cache->dependenciesCurrent(record.target))
-                            {
-                                throw std::runtime_error(
-                                    "dependency version changed before resource creation");
-                            }
-                            record.preparation->createGpuResources(device_);
-                            record.pendingUpload = record.preparation->buildUploadRequest();
-                            record.created = true;
-                        }
+                        if (!record.target.cache->dependenciesCurrent(record.target))
+                            throw std::runtime_error(
+                                "dependency version changed during resource creation");
                         if (!record.pendingUpload.operations.empty())
                         {
                             const auto result = uploads_.tryEnqueue(record.pendingUpload);
@@ -531,16 +565,31 @@ void VulkanResourcePreparation::advance()
                                 throw std::runtime_error(
                                     "dependency version changed before publication");
                             }
-                            record.preparation->publish(retired_);
+                            try
+                            {
+                                if (record.publication) record.publication->begin();
+                                record.preparation->publish(retired_);
+                                if (record.publication) record.publication->commit();
+                            }
+                            catch (...)
+                            {
+                                if (record.publication) record.publication->rollback();
+                                throw;
+                            }
                             record.status.state = ResourcePreparationState::Ready;
                         }
                     }
                 }
             }
-            catch (const std::exception& error)
+            catch (const std::exception &error)
             {
                 record.status.state = ResourcePreparationState::Failed;
                 record.status.error = error.what();
+            }
+            catch (...)
+            {
+                record.status.state = ResourcePreparationState::Failed;
+                record.status.error = "unknown resource creation failure";
             }
         }
         if (resourcePreparationFinished(record.status.state))
@@ -557,7 +606,7 @@ void VulkanResourcePreparation::advance()
 void VulkanResourcePreparation::cancel(ResourcePreparationTicket ticket)
 {
     checkThread();
-    auto& subscription = records_.at(ticket.value);
+    auto &subscription = records_.at(ticket.value);
     auto current = status(ticket);
     if (resourcePreparationFinished(current.state))
     {
@@ -565,7 +614,7 @@ void VulkanResourcePreparation::cancel(ResourcePreparationTicket ticket)
     }
     current.state = ResourcePreparationState::Cancelled;
     subscription.cancelled = std::move(current);
-    auto& task = *subscription.task;
+    auto &task = *subscription.task;
     if (--task.subscribers == 0)
     {
         task.status = *subscription.cancelled;
@@ -589,46 +638,15 @@ void VulkanResourcePreparation::release(ResourcePreparationTicket ticket)
     }
     records_.erase(ticket.value);
 }
-GpuTexture VulkanResourcePreparation::uploadTextureAndWait(
-    std::shared_ptr<const asset::TextureAsset> source)
+void VulkanResourcePreparation::setPublicationTransaction(ResourcePreparationTicket ticket,
+    std::shared_ptr<render::ResourcePublicationTransaction> publication)
 {
     checkThread();
-    if (!source || !*source)
-    {
-        throw std::logic_error("blocking texture upload requires valid assets");
-    }
-    auto texture = std::make_shared<GpuTexture>();
-    auto info = makeTextureCreateInfo(*source);
-    texture->allocate(device_, info);
-    auto request = makeTextureUploadRequest(texture, std::move(source));
-    auto result = uploads_.tryEnqueue(request);
-    if (result.code == UploadEnqueueCode::QueueFull)
-    {
-        uploads_.drain();
-        result = uploads_.tryEnqueue(request);
-    }
-    if (!result.accepted())
-    {
-        throw std::runtime_error(result.error.empty() ? "texture upload queue is full"
-                                                      : result.error);
-    }
-    try
-    {
-        uploads_.drain();
-        const auto status = uploads_.query(result.ticket);
-        if (status.state != UploadState::Completed)
-        {
-            throw std::runtime_error("texture upload failed: " + status.error);
-        }
-    }
-    catch (...)
-    {
-        uploads_.cancel(result.ticket);
-        uploads_.releaseTicket(result.ticket);
-        throw;
-    }
-    uploads_.releaseTicket(result.ticket);
-    return std::move(*texture);
+    auto& subscription = records_.at(ticket.value);
+    auto& task = *subscription.task;
+    if (!publication || subscription.cancelled || task.subscribers != 1 || task.created ||
+        task.creation || task.publication || resourcePreparationFinished(task.status.state))
+        throw std::logic_error("publication transaction requires an exclusive unstarted task");
+    task.publication = std::move(publication);
 }
-
 } // namespace rubia::rhi::vulkan

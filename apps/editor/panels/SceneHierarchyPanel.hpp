@@ -5,6 +5,7 @@
 namespace rubia::editor
 {
 class EditorSelection;
+class EditorAssetController;
 
 /// Draws the SceneNode hierarchy without depending on Renderer state.
 /// Referenced ModelAsset nodes are projected as a read-only subtree.
@@ -15,7 +16,7 @@ public:
         const scene::Scene& scene,
         const asset::AssetManager& assets,
         EditorSelection& selection,
-        bool* open = nullptr);
+        bool* open = nullptr, EditorAssetController* controller = nullptr);
 };
 
 } // namespace rubia::editor

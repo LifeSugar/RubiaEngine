@@ -7,6 +7,7 @@ target_sources(rubia_engine PRIVATE
     CullingSystem.hpp
     MaterialKey.hpp
     PipelineVariantKey.hpp
+    PipelinePreparationTypes.hpp
     RenderCandidate.hpp
     RenderData.hpp
     RenderFrame.hpp

@@ -3,6 +3,9 @@
 #include "asset/AssetManager.hpp"
 #include "asset/ModelAsset.hpp"
 #include "EditorSelection.hpp"
+#include "content/EditorAssetController.hpp"
+#include <cstring>
+#include <algorithm>
 #include "scene/Scene.hpp"
 
 #include <imgui.h>
@@ -16,6 +19,28 @@ namespace rubia::editor
 
 namespace
 {
+
+void acceptAssetDrop(EditorAssetController* controller, uint32_t node = scene::kInvalidSceneNodeIndex)
+{
+    if (!controller || !ImGui::BeginDragDropTarget()) return;
+    if (const auto* payload = ImGui::AcceptDragDropPayload(ModelPayload))
+        if (payload->DataSize == sizeof(asset::ModelAssetHandle))
+        {
+            asset::ModelAssetHandle handle; std::memcpy(&handle, payload->Data, sizeof(handle));
+            controller->instantiate(handle, node);
+        }
+    if (const auto* payload = ImGui::AcceptDragDropPayload(ModelFilePayload))
+        if (payload->DataSize > 1 && static_cast<const char*>(payload->Data)[payload->DataSize - 1] == '\0')
+            controller->importFile(std::filesystem::u8path(static_cast<const char*>(payload->Data)), {}, true, node);
+    if (node != scene::kInvalidSceneNodeIndex)
+        if (const auto* payload = ImGui::AcceptDragDropPayload(MaterialPayload))
+            if (payload->DataSize == sizeof(asset::MaterialAssetHandle))
+            {
+                asset::MaterialAssetHandle handle; std::memcpy(&handle, payload->Data, sizeof(handle));
+                controller->assignMaterial(node, handle);
+            }
+    ImGui::EndDragDropTarget();
+}
 
 struct ModelHierarchy final
 {
@@ -232,7 +257,7 @@ void SceneHierarchyPanel::draw(
     const scene::Scene& scene,
     const asset::AssetManager& assets,
     EditorSelection& selection,
-    bool* open)
+    bool* open, EditorAssetController* controller)
 {
     const bool visible = ImGui::Begin("Scene Hierarchy", open);
     if (!visible)
@@ -308,6 +333,8 @@ void SceneHierarchyPanel::draw(
         "%s",
         sceneLabel.c_str());
 
+    acceptAssetDrop(controller);
+
     if (sceneOpen)
     {
         if (nodes.empty())
@@ -354,6 +381,7 @@ void SceneHierarchyPanel::draw(
                     ? "Unnamed SceneNode"
                     : node.name.c_str();
                 const bool nodeOpen = ImGui::TreeNodeEx(label, flags);
+                acceptAssetDrop(controller, nodeIndex);
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
                 {
                     selection.select(SceneNodeTarget{nodeIndex});
@@ -385,6 +413,9 @@ void SceneHierarchyPanel::draw(
         }
         ImGui::TreePop();
     }
+
+    ImGui::InvisibleButton("##DropModelHere", ImVec2(-1, std::max(40.0f, ImGui::GetContentRegionAvail().y)));
+    acceptAssetDrop(controller);
 
     if (ImGui::IsWindowHovered() &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&

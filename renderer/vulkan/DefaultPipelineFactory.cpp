@@ -14,7 +14,7 @@ namespace rubia::rhi::vulkan
 
 GraphicsPipeline::CreateInfo makeDefaultScenePipeline(
     std::shared_ptr<const GpuShaderProgram> program,
-    VkDescriptorSetLayout materialDescriptorSetLayout)
+    std::shared_ptr<const DescriptorSetLayoutState> materialDescriptorSetLayout)
 {
     if (!program)
     {
@@ -70,9 +70,9 @@ GraphicsPipeline::CreateInfo makeDefaultPresentPipeline(
     }
     GraphicsPipeline::CreateInfo createInfo{};
     createInfo.program = std::move(program);
-    createInfo.cullMode = VK_CULL_MODE_NONE;
-    createInfo.depthTestEnable = VK_FALSE;
-    createInfo.depthWriteEnable = VK_FALSE;
+    createInfo.rasterization.cullMode = VK_CULL_MODE_NONE;
+    createInfo.depthStencil.depthTestEnable = VK_FALSE;
+    createInfo.depthStencil.depthWriteEnable = VK_FALSE;
 
     VkPushConstantRange pushConstantRange{};
     pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;

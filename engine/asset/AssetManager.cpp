@@ -128,6 +128,29 @@ TextureAsset AssetManager::replaceTexture(
     return textures_.replace(handle, std::move(replacement));
 }
 
+AssetManager::StagedTextureReplacement AssetManager::stageTextureReplacement(
+    TextureAssetHandle handle, TextureAsset candidate)
+{
+    if (!candidate) throw std::invalid_argument("cannot stage an incomplete texture");
+    StagedTextureReplacement result;
+    result.expected_ = version(handle);
+    result.candidate_ = std::move(candidate);
+    auto data = std::make_shared<const TextureAsset>(result.candidate_);
+    result.snapshot_ = {domain(), textures_.reserveVersion(handle), std::move(data)};
+    return result;
+}
+void AssetManager::validateStagedTexture(const StagedTextureReplacement& staged) const
+{
+    if (staged.committed_ || staged.snapshot_.domain != domain() ||
+        !isCurrent(staged.expected_))
+        throw std::runtime_error("texture changed during reimport; retry with current content");
+}
+void AssetManager::commitStagedTexture(StagedTextureReplacement& staged) noexcept
+{
+    textures_.commitReserved(staged.expected_, staged.snapshot_.version, staged.candidate_);
+    staged.committed_ = true;
+}
+
 MaterialTemplateAssetHandle AssetManager::createMaterialTemplate(
     MaterialTemplateAsset::CreateInfo createInfo)
 {
@@ -473,6 +496,11 @@ std::vector<MaterialAssetHandle> AssetManager::materialHandles() const
 std::vector<ModelAssetHandle> AssetManager::modelHandles() const
 {
     return models_.handles();
+}
+
+std::vector<ShaderAssetHandle> AssetManager::shaderHandles() const
+{
+    return shaders_.handles();
 }
 
 void AssetManager::reset() noexcept

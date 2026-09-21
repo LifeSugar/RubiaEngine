@@ -1,7 +1,13 @@
 #pragma once
 #include "vulkan/IResourcePreparation.hpp"
+#include "render/ResourcePreparation.hpp"
 #include "vulkan/ResourcePreparationTypes.hpp"
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <exception>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <thread>
 
@@ -9,32 +15,33 @@ namespace rubia::rhi::vulkan
 {
 class GpuTexture;
 class VulkanUploadService;
-// Render-thread-only. Device/service outlive the manager; caches outlive their requests
+// Render-thread scheduling/publication, dedicated worker for GPU object creation.
+// Device/service outlive the manager (destruction joins); caches outlive their requests
 // and all published GPU uses. Source bytes must remain immutable while retained.
 // Scene admission and the once-per-frame UploadService::tick stay with Renderer.
 // The retirement batch outlives the manager; its owner clears it only after all
 // prior graphics uses complete. No publication may interleave draw recording.
 class VulkanResourcePreparation final
 {
-public:
-    VulkanResourcePreparation(const Device& device, VulkanUploadService& uploads,
-                              RetiredResources& retired,
+  public:
+    VulkanResourcePreparation(const Device &device, VulkanUploadService &uploads,
+                              RetiredResources &retired,
                               render::ResourcePreparationOptions options = {},
                               std::size_t maxRequests = 1024);
     ~VulkanResourcePreparation();
-    VulkanResourcePreparation(const VulkanResourcePreparation&) = delete;
-    VulkanResourcePreparation& operator=(const VulkanResourcePreparation&) = delete;
-    ResourcePreparationResult prepareTexture(RenderAssetCache& cache,
+    VulkanResourcePreparation(const VulkanResourcePreparation &) = delete;
+    VulkanResourcePreparation &operator=(const VulkanResourcePreparation &) = delete;
+    ResourcePreparationResult prepareTexture(RenderAssetCache &cache,
                                              asset::AssetSnapshot<asset::TextureAsset> source);
-    ResourcePreparationResult prepareMesh(RenderAssetCache& cache,
+    ResourcePreparationResult prepareMesh(RenderAssetCache &cache,
                                           asset::AssetSnapshot<asset::MeshAsset> source);
-    ResourcePreparationResult prepareShader(RenderAssetCache& cache,
+    ResourcePreparationResult prepareShader(RenderAssetCache &cache,
                                             asset::AssetSnapshot<asset::ShaderAsset> source);
     ResourcePreparationResult prepareShaderProgram(
-        RenderAssetCache& cache, asset::AssetSnapshot<asset::ShaderProgramAsset> source);
+        RenderAssetCache &cache, asset::AssetSnapshot<asset::ShaderProgramAsset> source);
     ResourcePreparationResult prepareMaterialTemplate(
-        RenderAssetCache& cache, asset::AssetSnapshot<asset::MaterialTemplateAsset> source);
-    ResourcePreparationResult prepareMaterial(RenderAssetCache& cache,
+        RenderAssetCache &cache, asset::AssetSnapshot<asset::MaterialTemplateAsset> source);
+    ResourcePreparationResult prepareMaterial(RenderAssetCache &cache,
                                               asset::AssetSnapshot<asset::MaterialAsset> source);
 
     // Backend extension point. The operation must publish into the supplied target.
@@ -50,15 +57,26 @@ public:
     // Cancels only this subscriber; the last cancellation retires the shared task.
     void cancel(ResourcePreparationTicket ticket);
     void release(ResourcePreparationTicket ticket); // Terminal preparation records only.
-    [[nodiscard]] GpuTexture uploadTextureAndWait(
-        std::shared_ptr<const asset::TextureAsset> source);
+    void setPublicationTransaction(ResourcePreparationTicket,
+        std::shared_ptr<render::ResourcePublicationTransaction>);
     [[nodiscard]] bool empty() const
     {
         checkThread();
         return records_.empty();
     }
 
-private:
+  private:
+    struct CreationWork
+    {
+        std::unique_ptr<IResourcePreparation> preparation;
+        UploadRequest upload;
+        std::exception_ptr error;
+        std::atomic_bool cancelled{false};
+        bool done = false; // Protected by creationMutex_.
+    };
+    void runCreationWorker() noexcept;
+    struct PreparationRecord;
+    bool advanceCreation(PreparationRecord &record);
     // One shared task can have multiple independently cancellable caller tickets.
     struct PreparationRecord
     {
@@ -75,7 +93,9 @@ private:
         };
         std::vector<Dependency> dependencies;
         UploadRequest pendingUpload;
+        std::shared_ptr<render::ResourcePublicationTransaction> publication;
         bool created = false;
+        std::shared_ptr<CreationWork> creation;
     };
     struct Subscription
     {
@@ -83,14 +103,15 @@ private:
         std::optional<ResourcePreparationStatus> cancelled;
         bool internal = false;
     };
-    ResourcePreparationResult prepareAny(RenderAssetCache& cache, render::ResourceAssetSnapshot source);
-    bool advanceDependencies(PreparationRecord& record);
+    ResourcePreparationResult prepareAny(RenderAssetCache &cache,
+                                         render::ResourceAssetSnapshot source);
+    bool advanceDependencies(PreparationRecord &record);
     void checkThread() const;
-    void retire(PreparationRecord& record);
-    ResourcePreparationStatus taskStatus(const PreparationRecord& record) const;
-    const Device& device_;
-    VulkanUploadService& uploads_;
-    RetiredResources& retired_; // Outlives this manager; caller supplies GPU-safe reclamation.
+    void retire(PreparationRecord &record);
+    ResourcePreparationStatus taskStatus(const PreparationRecord &record) const;
+    const Device &device_;
+    VulkanUploadService &uploads_;
+    RetiredResources &retired_; // Outlives this manager; caller supplies GPU-safe reclamation.
     std::size_t maxRequests_;
     const render::ResourcePreparationOptions options_;
     std::thread::id thread_;
@@ -98,5 +119,13 @@ private:
     bool dependencyAdmission_ = false;
     std::map<uint64_t, Subscription> records_;
     std::map<uint64_t, std::shared_ptr<PreparationRecord>> tasks_;
+    static constexpr std::size_t maxCreationsInFlight_ = 2;
+    std::vector<std::shared_ptr<CreationWork>> activeCreations_;
+    std::size_t dispatchedThisAdvance_ = 0;
+    std::mutex creationMutex_;
+    std::condition_variable creationWake_;
+    bool stopping_ = false;
+    std::deque<std::shared_ptr<CreationWork>> creationQueue_;
+    std::thread creationThread_;
 };
 } // namespace rubia::rhi::vulkan

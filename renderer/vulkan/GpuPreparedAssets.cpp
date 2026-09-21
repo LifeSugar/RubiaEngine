@@ -95,6 +95,7 @@ GpuShaderProgram::GpuShaderProgram(const Device& device,
     : device_(device.get()), source_(std::move(source)), shaders_(std::move(shaders))
 {
     if (!device || !source_ || shaders_.size() != 2 || !shaders_[0] || !shaders_[1] ||
+        shaders_[0]->device() != device.get() || shaders_[1]->device() != device.get() ||
         shaders_[0]->source().stage() != asset::ShaderStage::Vertex ||
         shaders_[1]->source().stage() != asset::ShaderStage::Fragment)
     {
@@ -168,6 +169,12 @@ std::vector<VkDescriptorSetLayout> GpuShaderProgram::setLayouts() const
     {
         result.push_back(set.get());
     }
+    return result;
+}
+std::vector<std::shared_ptr<const DescriptorSetLayoutState>> GpuShaderProgram::setLayoutReferences() const
+{
+    std::vector<std::shared_ptr<const DescriptorSetLayoutState>> result;
+    for (const auto& set : sets_) result.push_back(set.reference());
     return result;
 }
 GpuMaterialTemplate::GpuMaterialTemplate(const Device& device,

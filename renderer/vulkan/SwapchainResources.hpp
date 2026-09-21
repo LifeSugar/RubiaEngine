@@ -81,6 +81,7 @@ public:
     [[nodiscard]] std::size_t imageCount() const noexcept { return images_.size(); }
     /// Returns the render pass shared by all swapchain images.
     [[nodiscard]] VkRenderPass renderPass() const noexcept { return renderPass_.get(); }
+    std::shared_ptr<const RenderPassState> renderPassReference() const noexcept { return renderPass_.reference(); }
     /// Returns the framebuffer associated with one swapchain image.
     [[nodiscard]] VkFramebuffer framebuffer(uint32_t imageIndex) const;
     /// Returns the render-complete semaphore for one swapchain image.

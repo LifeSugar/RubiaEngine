@@ -12,6 +12,11 @@
 namespace rubia::test
 {
 
+#ifdef RUBIA_PIPELINE_STATE_TESTS
+void runGraphicsPipelineTests(const rhi::vulkan::Device& device);
+void runVulkanDrawListTests(const rhi::vulkan::Device& device);
+#endif
+
 void AppSmokeTests::runStartupTest()
 {
     using render::ScenePreparationState;
@@ -51,6 +56,10 @@ void AppSmokeTests::runStartupTest()
         draw();
 
         runVulkanUploadTests(app.vulkanContext.device());
+#ifdef RUBIA_PIPELINE_STATE_TESTS
+        runGraphicsPipelineTests(app.vulkanContext.device());
+        runVulkanDrawListTests(app.vulkanContext.device());
+#endif
 
         // Standalone incremental resource preparation: no model, material layout or pipeline.
         {
@@ -141,9 +150,8 @@ void AppSmokeTests::runStartupTest()
             app.resourcePreparation().advance();
             if (app.renderAssets.tryTexture(third) || app.renderAssets.texture(first).view() != firstView)
                 throw std::runtime_error("standalone cancellation damaged the cache");
-            // A synchronous upload drains shared work, but publication still belongs
-            // to the renderer pump. Cancelling in this interval must never publish
-            // or dereference a released texture; another completed request survives.
+            // Cancel after creation dispatch. The old result must not publish or
+            // damage another request that the normal renderer pump later completes.
             auto fourth = sources->createTexture(info);
             auto fifth = sources->createTexture(info);
             auto d = prepare(fourth);
@@ -152,22 +160,24 @@ void AppSmokeTests::runStartupTest()
             {
                 throw std::runtime_error("completion cancellation test enqueue failed");
             }
-            auto unpublished = app.renderer.uploadTextureAndWait(
-                std::shared_ptr<const asset::TextureAsset>(sources, &sources->texture(first)));
-            if (!unpublished || app.renderAssets.tryTexture(fourth) ||
-                app.resourcePreparation().status(d.ticket).state !=
-                    render::ResourcePreparationState::Uploading)
-            {
-                throw std::runtime_error("drain published standalone texture prematurely");
-            }
+            app.resourcePreparation().advance();
+            if (app.renderAssets.tryTexture(fourth) ||
+                app.resourcePreparation().status(d.ticket).state != render::ResourcePreparationState::Preparing)
+                throw std::runtime_error("creation dispatch published standalone texture prematurely");
             app.resourcePreparation().cancel(d.ticket);
             if (app.resourcePreparation().status(d.ticket).state !=
                 render::ResourcePreparationState::Cancelled)
             {
                 throw std::runtime_error("completed but unpublished upload did not cancel");
             }
-            // Keep the cancelled record for a pump to cover accidental re-publication.
-            app.resourcePreparation().advance();
+            // Keep the cancelled record while pumping its surviving sibling.
+            limit = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+            while (!render::resourcePreparationFinished(app.resourcePreparation().status(e.ticket).state) &&
+                   std::chrono::steady_clock::now() < limit)
+            {
+                app.resourcePreparation().advance();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
             if (app.renderAssets.tryTexture(fourth) || !app.renderAssets.tryTexture(fifth) ||
                 app.resourcePreparation().status(e.ticket).state !=
                     render::ResourcePreparationState::Ready)
@@ -283,7 +293,13 @@ void AppSmokeTests::runStartupTest()
                     cache, {domain, {handle, revision}, std::move(owner)});
                 if (!result.accepted())
                     throw std::runtime_error("retirement probe preparation rejected");
-                app.renderer.advanceResourcePreparation();
+                const auto creationDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+                while (!rhi::vulkan::resourcePreparationFinished(app.renderer.resourcePreparationStatus(result.ticket).state) &&
+                       std::chrono::steady_clock::now() < creationDeadline)
+                {
+                    app.renderer.advanceResourcePreparation();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
                 if (app.renderer.resourcePreparationStatus(result.ticket).state !=
                     rhi::vulkan::ResourcePreparationState::Ready)
                     throw std::runtime_error("retirement probe was not published");

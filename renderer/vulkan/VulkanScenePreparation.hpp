@@ -2,6 +2,7 @@
 
 #include "asset/AssetSnapshot.hpp"
 #include "render/SceneResourcePreparation.hpp"
+#include "render/PipelinePreparationTypes.hpp"
 #include "vulkan/ResourcePreparationTypes.hpp"
 #include <exception>
 #include <optional>
@@ -59,5 +60,7 @@ private:
     render::ScenePreparationStatus status_;
     std::vector<Root> roots_;
     bool ownsResources_ = false;
+    bool sceneResourcesCreated_ = false;
+    render::PipelinePreparationTicket pipelines_;
 };
 } // namespace rubia::rhi::vulkan

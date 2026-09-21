@@ -16,6 +16,8 @@ namespace rubia::editor
 class EditorLayer final : public ApplicationGui
 {
 public:
+    void update(const ApplicationGuiContext& context) override;
+    void detach() noexcept override { assetController_.stop(); }
     [[nodiscard]] ApplicationGuiFrameOutput draw(
         const ApplicationGuiContext& context) override;
 
@@ -26,6 +28,8 @@ private:
     void drawRendererStats(const ApplicationGuiContext& context);
 
     EditorSelection selection_;
+    EditorAssetController assetController_;
+    bool browsed_ = false;
     SceneHierarchyPanel sceneHierarchyPanel_;
     InspectorPanel inspectorPanel_;
     AssetBrowserPanel assetBrowserPanel_;

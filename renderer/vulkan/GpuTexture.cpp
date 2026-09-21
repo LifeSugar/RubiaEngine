@@ -12,17 +12,13 @@ namespace rubia::rhi::vulkan
 namespace
 {
 
-VkImageSubresourceRange resolveViewRange(
-    VkImageSubresourceRange range,
-    uint32_t mipLevels,
-    uint32_t arrayLayers)
+VkImageSubresourceRange resolveViewRange(VkImageSubresourceRange range, uint32_t mipLevels,
+                                         uint32_t arrayLayers)
 {
-    if (range.aspectMask == 0 ||
-        range.baseMipLevel >= mipLevels ||
+    if (range.aspectMask == 0 || range.baseMipLevel >= mipLevels ||
         range.baseArrayLayer >= arrayLayers)
     {
-        throw std::invalid_argument(
-            "GpuTexture view range starts outside the image");
+        throw std::invalid_argument("GpuTexture view range starts outside the image");
     }
 
     if (range.levelCount == VK_REMAINING_MIP_LEVELS)
@@ -33,100 +29,100 @@ VkImageSubresourceRange resolveViewRange(
     {
         range.layerCount = arrayLayers - range.baseArrayLayer;
     }
-    if (range.levelCount == 0 ||
-        range.levelCount > mipLevels - range.baseMipLevel ||
-        range.layerCount == 0 ||
-        range.layerCount > arrayLayers - range.baseArrayLayer)
+    if (range.levelCount == 0 || range.levelCount > mipLevels - range.baseMipLevel ||
+        range.layerCount == 0 || range.layerCount > arrayLayers - range.baseArrayLayer)
     {
-        throw std::invalid_argument(
-            "GpuTexture view range exceeds the image");
+        throw std::invalid_argument("GpuTexture view range exceeds the image");
     }
     return range;
 }
 
 } // namespace
 
-GpuTexture::~GpuTexture()
+struct GpuTexture::State
 {
-    reset();
-}
-
-GpuTexture::GpuTexture(GpuTexture&& other) noexcept
-    : device_(std::exchange(other.device_, VK_NULL_HANDLE)),
-      format_(std::exchange(other.format_, VK_FORMAT_UNDEFINED)),
-      image_(std::move(other.image_)),
-      view_(std::move(other.view_)),
-      sampler_(std::exchange(other.sampler_, VK_NULL_HANDLE))
-{
-}
-
-GpuTexture& GpuTexture::operator=(GpuTexture&& other) noexcept
-{
-    if (this != &other)
+    VkDevice device_ = VK_NULL_HANDLE;
+    VkFormat format_ = VK_FORMAT_UNDEFINED;
+    Image image_;
+    ImageView view_;
+    VkSampler sampler_ = VK_NULL_HANDLE;
+    ~State()
     {
-        reset();
-        device_ = std::exchange(other.device_, VK_NULL_HANDLE);
-        format_ = std::exchange(other.format_, VK_FORMAT_UNDEFINED);
-        image_ = std::move(other.image_);
-        view_ = std::move(other.view_);
-        sampler_ = std::exchange(other.sampler_, VK_NULL_HANDLE);
+        if (sampler_)
+            vkDestroySampler(device_, sampler_, nullptr);
+        // Member destruction releases view before image.
     }
-    return *this;
+};
+GpuTexture::~GpuTexture() = default;
+GpuTexture::GpuTexture(GpuTexture &&) noexcept = default;
+GpuTexture &GpuTexture::operator=(GpuTexture &&) noexcept = default;
+GpuTexture GpuTexture::snapshot() const noexcept
+{
+    GpuTexture result;
+    result.state_ = state_;
+    return result;
+}
+const Image &GpuTexture::image() const noexcept
+{
+    static const Image empty;
+    return state_ ? state_->image_ : empty;
+}
+VkFormat GpuTexture::format() const noexcept
+{
+    return state_ ? state_->format_ : VK_FORMAT_UNDEFINED;
+}
+VkImageView GpuTexture::view() const noexcept
+{
+    return state_ ? state_->view_.get() : VK_NULL_HANDLE;
+}
+VkSampler GpuTexture::sampler() const noexcept
+{
+    return state_ ? state_->sampler_ : VK_NULL_HANDLE;
+}
+GpuTexture::operator bool() const noexcept
+{
+    return state_ && state_->format_ != VK_FORMAT_UNDEFINED && state_->image_ && state_->view_ &&
+           state_->sampler_;
 }
 
-void GpuTexture::allocate(const Device& device, const CreateInfo& createInfo)
+void GpuTexture::allocate(const Device &device, const CreateInfo &createInfo)
 {
     if (!device || createInfo.image.format == VK_FORMAT_UNDEFINED ||
         createInfo.sampler.sType != VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO)
     {
         throw std::invalid_argument("cannot create GpuTexture from incomplete inputs");
     }
-    const auto& imageInfo = createInfo.image;
+    const auto &imageInfo = createInfo.image;
     const VkFormat format = device.findSupportedFormat({imageInfo.format}, imageInfo.tiling,
                                                        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
-    GpuTexture replacement;
-    replacement.device_ = device.get();
-    replacement.format_ = format;
-    replacement.image_.create(device, imageInfo);
+    auto replacement = std::make_shared<State>();
+    replacement->device_ = device.get();
+    replacement->format_ = format;
+    replacement->image_.create(device, imageInfo);
 
-    const VkImageSubresourceRange viewRange = resolveViewRange(
-        createInfo.viewRange,
-        imageInfo.mipLevels,
-        imageInfo.arrayLayers);
+    const VkImageSubresourceRange viewRange =
+        resolveViewRange(createInfo.viewRange, imageInfo.mipLevels, imageInfo.arrayLayers);
 
     ImageView::CreateInfo viewInfo{};
-    viewInfo.image = replacement.image_.get();
+    viewInfo.image = replacement->image_.get();
     viewInfo.type = createInfo.viewType;
     viewInfo.format = format;
     viewInfo.components = createInfo.components;
     viewInfo.subresourceRange = viewRange;
-    replacement.view_.create(device.get(), viewInfo);
+    replacement->view_.create(device.get(), viewInfo);
 
     VkSamplerCreateInfo samplerInfo = createInfo.sampler;
     samplerInfo.maxLod = std::min(samplerInfo.maxLod, static_cast<float>(viewRange.levelCount - 1));
-    if (vkCreateSampler(
-            device.get(),
-            &samplerInfo,
-            nullptr,
-            &replacement.sampler_) != VK_SUCCESS)
+    if (vkCreateSampler(device.get(), &samplerInfo, nullptr, &replacement->sampler_) != VK_SUCCESS)
     {
         throw std::runtime_error("failed to create a texture sampler");
     }
 
-    *this = std::move(replacement);
+    state_ = std::move(replacement);
 }
 
 void GpuTexture::reset() noexcept
 {
-    if (device_ != VK_NULL_HANDLE && sampler_ != VK_NULL_HANDLE)
-    {
-        vkDestroySampler(device_, sampler_, nullptr);
-    }
-    sampler_ = VK_NULL_HANDLE;
-    view_.reset();
-    image_.reset();
-    format_ = VK_FORMAT_UNDEFINED;
-    device_ = VK_NULL_HANDLE;
+    state_.reset();
 }
-
 } // namespace rubia::rhi::vulkan
