@@ -64,6 +64,7 @@ float3 brdf(float3 n,float3 v,float3 l,float3 base,float rough,float metal) {
     return ((1-f)*(1-metal)*base/PI + d*g*f/max(4*nv*nl,.001))*nl;
 }
 // Analytic studio illumination, independent of a skybox/IBL/shadow pass.
+static const float studioLightIntensity = 0.5;
 float3 studio(float3 base,float3 n,float3 v,float rough,float metal) {
     float3 result=brdf(n,v,normalize(float3(-.6,1,.6)),base,rough,metal)*float3(3.5,3.1,2.7);
     result+=brdf(n,v,normalize(float3(.8,.5,-.4)),base,rough,metal)*float3(1.1,1.6,2.0);
@@ -71,7 +72,7 @@ float3 studio(float3 base,float3 n,float3 v,float rough,float metal) {
     float3 r=reflect(-v,n);
     float softbox=pow(saturate(dot(r,normalize(float3(-.5,.85,.4)))),lerp(180.0,12.0,rough));
     result+=lerp(.04,base,metal)*softbox*1.8;
-    return result;
+    return result * studioLightIntensity;
 }
 float4 PSSolid(Varyings i) : SV_Target {
     return float4(studio(material.tint.rgb,safeNormal(i.normal),viewDirection(i),material.surface.x,material.surface.y),1);
@@ -121,7 +122,7 @@ float4 PSStage(Varyings i) : SV_Target {
         float z=abs(p.y)-3.55;
         float2 d=max(abs(float2(x,z))-float2(2.25,2.55),0);
         base*=1-.24*exp(-dot(d,d)*3);
-        return float4(base*(.88+.12*saturate(i.normal.y)),1);
+        return float4(base*(.88+.12*saturate(i.normal.y))*studioLightIntensity,1);
     }
     if(i.world.y>.44 && i.world.y<.48 && i.normal.y>.9) {
         // Analytic contact darkening for this fixed display fixture, not a shadow map.

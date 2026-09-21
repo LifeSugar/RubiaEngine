@@ -24,6 +24,30 @@ namespace
 
 constexpr std::size_t kSceneColorAttachment = 0;
 constexpr std::size_t kSceneDepthAttachment = 1;
+constexpr std::size_t kSceneResolveAttachment = 2;
+constexpr VkSampleCountFlagBits kSceneSamples = VK_SAMPLE_COUNT_4_BIT;
+
+void validateSceneSampleCount(const Device& device, VkFormat colorFormat, VkFormat depthFormat)
+{
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(device.physical(), &properties);
+    const auto supported = properties.limits.framebufferColorSampleCounts &
+        properties.limits.framebufferDepthSampleCounts &
+        properties.limits.framebufferStencilSampleCounts;
+    if (!(supported & kSceneSamples))
+        throw std::runtime_error("scene rendering requires 4x MSAA color and depth/stencil support");
+
+    const auto supportsFormat = [&](VkFormat format, VkImageUsageFlags usage) {
+        VkImageFormatProperties imageProperties{};
+        return vkGetPhysicalDeviceImageFormatProperties(device.physical(), format,
+                   VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, 0,
+                   &imageProperties) == VK_SUCCESS &&
+            (imageProperties.sampleCounts & kSceneSamples) != 0;
+    };
+    if (!supportsFormat(colorFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ||
+        !supportsFormat(depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
+        throw std::runtime_error("scene attachment formats do not support 4x MSAA");
+}
 
 RenderPass makeSceneRenderPass(
     const Device& device,
@@ -32,19 +56,18 @@ RenderPass makeSceneRenderPass(
 {
     VkAttachmentDescription colorAttachment{};
     colorAttachment.format = colorFormat;
-    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    colorAttachment.samples = kSceneSamples;
     colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    // The integration step will add an explicit transition from attachment
-    // writes to shader sampling between the scene and present passes.
+    // Only the single-sample resolve is consumed after this pass.
     colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     VkAttachmentDescription depthAttachment{};
     depthAttachment.format = depthFormat;
-    depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthAttachment.samples = kSceneSamples;
     depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -52,6 +75,11 @@ RenderPass makeSceneRenderPass(
     depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     depthAttachment.finalLayout =
         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentDescription resolveAttachment = colorAttachment;
+    resolveAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    resolveAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    resolveAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 
     VkAttachmentReference colorReference{};
     colorReference.attachment =
@@ -64,10 +92,15 @@ RenderPass makeSceneRenderPass(
     depthReference.layout =
         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
+    VkAttachmentReference resolveReference{};
+    resolveReference.attachment = static_cast<uint32_t>(kSceneResolveAttachment);
+    resolveReference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colorReference;
+    subpass.pResolveAttachments = &resolveReference;
     subpass.pDepthStencilAttachment = &depthReference;
 
     VkSubpassDependency dependency{};
@@ -83,9 +116,10 @@ RenderPass makeSceneRenderPass(
         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
-    const std::array<VkAttachmentDescription, 2> attachments = {
+    const std::array<VkAttachmentDescription, 3> attachments = {
         colorAttachment,
-        depthAttachment
+        depthAttachment,
+        resolveAttachment
     };
 
     VkRenderPassCreateInfo createInfo{};
@@ -111,25 +145,30 @@ std::vector<RenderTarget> makeSceneRenderTargets(
 {
     RenderTarget::AttachmentInfo colorAttachment{};
     colorAttachment.format = colorFormat;
-    colorAttachment.usage =
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-        VK_IMAGE_USAGE_SAMPLED_BIT;
+    colorAttachment.samples = kSceneSamples;
+    colorAttachment.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     colorAttachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 
     RenderTarget::AttachmentInfo depthAttachment{};
     depthAttachment.format = depthFormat;
+    depthAttachment.samples = kSceneSamples;
     depthAttachment.usage =
         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     depthAttachment.aspectMask =
         VK_IMAGE_ASPECT_DEPTH_BIT |
         VK_IMAGE_ASPECT_STENCIL_BIT;
 
+    RenderTarget::AttachmentInfo resolveAttachment = colorAttachment;
+    resolveAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    resolveAttachment.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+
     RenderTarget::CreateInfo createInfo{};
     createInfo.renderPass = renderPass;
     createInfo.extent = extent;
     createInfo.attachments = {
         colorAttachment,
-        depthAttachment
+        depthAttachment,
+        resolveAttachment
     };
 
     std::vector<RenderTarget> targets;
@@ -288,7 +327,7 @@ void updatePresentDescriptorSets(
     {
         VkDescriptorImageInfo imageInfo{};
         imageInfo.imageView =
-            sceneRenderTargets[i].imageView(kSceneColorAttachment);
+            sceneRenderTargets[i].imageView(kSceneResolveAttachment);
         imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkDescriptorImageInfo samplerInfo{};
@@ -1098,6 +1137,7 @@ void VulkanRenderer::createSceneRenderTargets(
         VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
             VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
     const VkFormat depthFormat = device.findDepthStencilFormat();
+    validateSceneSampleCount(device, colorFormat, depthFormat);
     RenderPass renderPass = makeSceneRenderPass(
         device,
         colorFormat,
@@ -1228,6 +1268,8 @@ GraphicsPipeline::CreateInfo VulkanRenderer::makePipelineCreateInfo() const
 {
     GraphicsPipeline::CreateInfo createInfo = pipelineCreateInfo_;
     createInfo.renderPass = sceneRenderPass_.reference();
+    // Pass-owned state is shared by bootstrap, prewarm and per-material draws.
+    createInfo.multisample.samples = kSceneSamples;
     createInfo.descriptorSetLayouts.insert(
         createInfo.descriptorSetLayouts.begin(),
         frameDataResources_.descriptorSetLayoutReference());
@@ -1362,7 +1404,7 @@ void VulkanRenderer::transitionSceneColorForSampling(
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image =
-        sceneRenderTargets_.at(frameIndex).image(kSceneColorAttachment);
+        sceneRenderTargets_.at(frameIndex).image(kSceneResolveAttachment);
     barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     barrier.subresourceRange.baseMipLevel = 0;
     barrier.subresourceRange.levelCount = 1;
