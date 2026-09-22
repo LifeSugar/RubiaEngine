@@ -115,7 +115,7 @@ void ConsolePanel::draw(bool* open)
         return;
     }
 
-    if (ImGui::SmallButton("Clear"))
+    if (ImGui::Button("Clear"))
     {
         log_.clear();
     }
@@ -135,7 +135,7 @@ void ConsolePanel::draw(bool* open)
     ImGui::BeginChild(
         "##ConsoleLog",
         ImVec2(0.0f, 0.0f),
-        ImGuiChildFlags_Borders,
+        ImGuiChildFlags_AlwaysUseWindowPadding,
         ImGuiWindowFlags_HorizontalScrollbar);
     if (cachedText_.empty())
     {

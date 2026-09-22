@@ -25,52 +25,55 @@ VkDeviceSize checkedBufferSize(
 
 } // namespace
 
-Mesh::Mesh(
-    UploadContext& uploadContext,
-    const asset::MeshAsset& asset)
-{
-    create(uploadContext, asset);
-}
-
-void Mesh::create(
-    UploadContext& uploadContext,
-    const asset::MeshAsset& asset)
+void Mesh::allocate(const Device& device, const asset::MeshAsset& asset)
 {
     if (asset.empty())
     {
-        throw std::invalid_argument("cannot create a Mesh from an empty mesh asset");
+        throw std::invalid_argument("cannot allocate an empty mesh");
     }
-
-    const VkDeviceSize vertexSize = checkedBufferSize(
-        asset.vertices().size(),
-        sizeof(asset::Vertex),
-        "mesh vertex data");
-
-    std::vector<asset::SubmeshData> newSubmeshes = asset.submeshes();
-    const math::Aabb newLocalBounds = asset.localBounds();
-    Buffer newVertexBuffer = uploadContext.uploadBuffer(
-        asset.vertices().data(),
-        vertexSize,
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-
-    Buffer newIndexBuffer;
+    Mesh replacement;
+    replacement.vertexBuffer_.create(
+        device, checkedBufferSize(asset.vertices().size(), sizeof(asset::Vertex), "vertices"),
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (!asset.indices().empty())
     {
-        const VkDeviceSize indexSize = checkedBufferSize(
-            asset.indices().size(),
-            sizeof(uint32_t),
-            "mesh index data");
-        newIndexBuffer = uploadContext.uploadBuffer(
-            asset.indices().data(),
-            indexSize,
-            VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+        replacement.indexBuffer_.create(
+            device, checkedBufferSize(asset.indices().size(), sizeof(uint32_t), "indices"),
+            VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     }
+    replacement.submeshes_ = asset.submeshes();
+    replacement.localBounds_ = asset.localBounds();
+    *this = std::move(replacement);
+}
 
-    reset();
-    vertexBuffer_ = std::move(newVertexBuffer);
-    indexBuffer_ = std::move(newIndexBuffer);
-    submeshes_ = std::move(newSubmeshes);
-    localBounds_ = newLocalBounds;
+UploadRequest Mesh::makeUploadRequest(std::shared_ptr<Mesh> mesh,
+                                      std::shared_ptr<const asset::MeshAsset> source)
+{
+    if (!mesh || !*mesh || !source)
+    {
+        throw std::invalid_argument("missing mesh upload owner");
+    }
+    UploadRequest request;
+    BufferUpload vertices;
+    vertices.destination = std::shared_ptr<const Buffer>(mesh, &mesh->vertexBuffer_);
+    vertices.source = {source, reinterpret_cast<const std::byte*>(source->vertices().data()),
+                       source->vertices().size() * sizeof(asset::Vertex)};
+    vertices.finalStages = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+    vertices.finalAccess = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+    request.operations.emplace_back(std::move(vertices));
+    if (!source->indices().empty())
+    {
+        BufferUpload indices;
+        indices.destination = std::shared_ptr<const Buffer>(mesh, &mesh->indexBuffer_);
+        indices.source = {source, reinterpret_cast<const std::byte*>(source->indices().data()),
+                          source->indices().size() * sizeof(uint32_t)};
+        indices.finalStages = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+        indices.finalAccess = VK_ACCESS_INDEX_READ_BIT;
+        request.operations.emplace_back(std::move(indices));
+    }
+    return request;
 }
 
 void Mesh::reset() noexcept

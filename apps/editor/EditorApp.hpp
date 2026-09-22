@@ -16,8 +16,9 @@ public:
 private:
     [[nodiscard]] static App::RunConfig makeRunConfig();
 
-    App app_;
+    // App joins content workers before EditorLayer releases its log capture.
     EditorLayer editorLayer_;
+    App app_;
 };
 
 } // namespace rubia::editor

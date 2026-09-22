@@ -58,7 +58,12 @@ public:
     /// Returns whether an image is currently owned.
     [[nodiscard]] explicit operator bool() const noexcept { return image_ != VK_NULL_HANDLE; }
 
+    [[nodiscard]] VkDevice ownerDevice() const noexcept { return ownerDevice_; }
+    [[nodiscard]] const CreateInfo& description() const noexcept { return description_; }
+
 private:
+    VkDevice ownerDevice_ = VK_NULL_HANDLE;
+    CreateInfo description_{};
 #if VK_RENDERER_USE_VMA
     /// Allocator that owns the image allocation.
     VmaAllocator allocator_ = VK_NULL_HANDLE;

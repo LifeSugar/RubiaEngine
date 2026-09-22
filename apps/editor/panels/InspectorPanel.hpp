@@ -11,6 +11,7 @@
 
 namespace rubia::editor
 {
+class EditorAssetController;
 
 /// Owns the Inspector window and routes selections to type inspectors.
 class InspectorPanel final
@@ -22,7 +23,7 @@ public:
         render::ApplicationGuiRenderBridge& texturePreviews,
         const importer::texture::TextureImportRegistry* textureImports,
         EditorSelection& selection,
-        bool* open = nullptr);
+        bool* open = nullptr, EditorAssetController* controller = nullptr);
 
 private:
     SceneNodeInspector sceneNodeInspector_;

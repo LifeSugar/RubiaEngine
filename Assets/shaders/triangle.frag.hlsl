@@ -2,6 +2,9 @@
 
 #include "RenderData.hlsli"
 
+// Scene shader ABI: fragment bool specialization 1000, threshold in DrawPushConstants.
+[[vk::constant_id(1000)]] const bool rubiaAlphaClipEnabled = false;
+
 struct PSInput
 {
     float4 position : SV_Position;
@@ -104,6 +107,11 @@ float4 main(PSInput input) : SV_Target
 {
     const float4 sampledBaseColor =
         baseColorTexture.Sample(baseColorSampler, input.texCoord);
+    const float alpha = sampledBaseColor.a * materialData.baseColorFactor.a * input.color.a;
+    if (rubiaAlphaClipEnabled)
+    {
+        clip(alpha - drawPushConstants.alphaClipThreshold);
+    }
     const float4 sampledMetallicRoughness =
         metallicRoughnessTexture.Sample(
             metallicRoughnessSampler,
@@ -157,5 +165,5 @@ float4 main(PSInput input) : SV_Target
 
     return float4(
         color,
-        sampledBaseColor.a * materialData.baseColorFactor.a * input.color.a);
+        alpha);
 }

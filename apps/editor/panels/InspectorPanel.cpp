@@ -1,4 +1,5 @@
 #include "panels/InspectorPanel.hpp"
+#include "content/EditorAssetController.hpp"
 
 #include "asset/AssetManager.hpp"
 #include "render/ApplicationGuiRenderBridge.hpp"
@@ -35,7 +36,7 @@ namespace rubia::editor
         render::ApplicationGuiRenderBridge &texturePreviews,
         const importer::texture::TextureImportRegistry* textureImports,
         EditorSelection &selection,
-        bool *open)
+        bool *open, EditorAssetController* controller)
     {
         const bool visible = ImGui::Begin("Inspector", open);
         if (!visible)
@@ -54,7 +55,12 @@ namespace rubia::editor
             Overloaded{
                 [](std::monostate) -> std::optional<InspectorTarget>
                 {
-                    ImGui::TextDisabled("Select an object to inspect");
+                    ImGui::Spacing();
+                    ImGui::SeparatorText("Nothing selected");
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                        ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                    ImGui::TextWrapped("Select an object in the scene hierarchy or an asset below to view its properties.");
+                    ImGui::PopStyleColor();
                     return std::nullopt;
                 },
                 [&](SceneNodeTarget target)
@@ -115,6 +121,27 @@ namespace rubia::editor
                     return std::nullopt;
                 }},
             selection.target());
+
+        if (const auto* target = std::get_if<SceneNodeTarget>(&selection.target());
+            controller && target && target->nodeIndex < scene.nodes().size())
+        {
+            glm::vec3 position(scene.nodes()[target->nodeIndex].localTransform[3]);
+            if (ImGui::DragFloat3("Position", &position.x, 0.01f)) controller->setPosition(target->nodeIndex, position);
+            const auto material = scene.nodes()[target->nodeIndex].materialOverride;
+            const char* preview = assets.contains(material) ? assets.material(material).name().c_str() : "GLB materials";
+            if (ImGui::BeginCombo("Instance material", preview))
+            {
+                if (ImGui::Selectable("GLB materials", !material)) controller->assignMaterial(target->nodeIndex, {});
+                for (auto handle : assets.materialHandles())
+                {
+                    ImGui::PushID(static_cast<int>(handle.index));
+                    if (ImGui::Selectable(assets.material(handle).name().c_str(), material == handle))
+                        controller->assignMaterial(target->nodeIndex, handle);
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+        }
 
         if (navigation)
         {

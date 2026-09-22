@@ -56,6 +56,10 @@ public:
     {
         return descriptorSetLayout_.get();
     }
+    std::shared_ptr<const DescriptorSetLayoutState> descriptorSetLayoutReference() const noexcept
+    {
+        return descriptorSetLayout_.reference();
+    }
     /// Returns the descriptor set assigned to one frame slot.
     [[nodiscard]] VkDescriptorSet descriptorSet(uint32_t frameIndex) const;
     /// Returns the number of allocated frame slots.

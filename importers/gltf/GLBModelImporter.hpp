@@ -5,6 +5,7 @@
 #include "gltf/GLBTextureImporter.hpp"
 
 #include <filesystem>
+#include <functional>
 #include <vector>
 
 namespace rubia::importer::gltf
@@ -17,6 +18,8 @@ public:
     struct CreateInfo
     {
         asset::AssetManager* assets = nullptr;
+        /// Optional cooperative cancellation checkpoint between import phases.
+        std::function<void()> checkpoint;
 
         std::filesystem::path baseDirectory;
         asset::TextureColorSpace textureColorSpace = asset::TextureColorSpace::Srgb;

@@ -1,31 +1,31 @@
 #include "vulkan/DefaultPipelineFactory.hpp"
 
 #include "asset/MeshAsset.hpp"
-#include "asset/ShaderAsset.hpp"
 #include "render/RenderData.hpp"
+#include "vulkan/GpuPreparedAssets.hpp"
 
 #include <array>
 #include <cstddef>
+#include <stdexcept>
+#include <utility>
 
 namespace rubia::rhi::vulkan
 {
 
 GraphicsPipeline::CreateInfo makeDefaultScenePipeline(
-    const asset::ShaderAsset& vertexShader,
-    const asset::ShaderAsset& fragmentShader,
-    VkDescriptorSetLayout materialDescriptorSetLayout)
+    std::shared_ptr<const GpuShaderProgram> program,
+    std::shared_ptr<const DescriptorSetLayoutState> materialDescriptorSetLayout)
 {
+    if (!program)
+    {
+        throw std::invalid_argument("pipeline requires a prepared shader program");
+    }
     GraphicsPipeline::CreateInfo createInfo{};
-    createInfo.vertexShaderSpirv = vertexShader.spirv();
-    createInfo.vertexEntryPoint = vertexShader.entryPoint();
-    createInfo.fragmentShaderSpirv = fragmentShader.spirv();
-    createInfo.fragmentEntryPoint = fragmentShader.entryPoint();
+    createInfo.program = std::move(program);
     createInfo.descriptorSetLayouts = {materialDescriptorSetLayout};
 
     VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags =
-        VK_SHADER_STAGE_VERTEX_BIT |
-        VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushConstantRange.size = sizeof(render::DrawPushConstants);
     createInfo.pushConstantRanges = {pushConstantRange};
 
@@ -62,17 +62,17 @@ GraphicsPipeline::CreateInfo makeDefaultScenePipeline(
 }
 
 GraphicsPipeline::CreateInfo makeDefaultPresentPipeline(
-    const asset::ShaderAsset& vertexShader,
-    const asset::ShaderAsset& fragmentShader)
+    std::shared_ptr<const GpuShaderProgram> program)
 {
+    if (!program)
+    {
+        throw std::invalid_argument("pipeline requires a prepared shader program");
+    }
     GraphicsPipeline::CreateInfo createInfo{};
-    createInfo.vertexShaderSpirv = vertexShader.spirv();
-    createInfo.vertexEntryPoint = vertexShader.entryPoint();
-    createInfo.fragmentShaderSpirv = fragmentShader.spirv();
-    createInfo.fragmentEntryPoint = fragmentShader.entryPoint();
-    createInfo.cullMode = VK_CULL_MODE_NONE;
-    createInfo.depthTestEnable = VK_FALSE;
-    createInfo.depthWriteEnable = VK_FALSE;
+    createInfo.program = std::move(program);
+    createInfo.rasterization.cullMode = VK_CULL_MODE_NONE;
+    createInfo.depthStencil.depthTestEnable = VK_FALSE;
+    createInfo.depthStencil.depthWriteEnable = VK_FALSE;
 
     VkPushConstantRange pushConstantRange{};
     pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;

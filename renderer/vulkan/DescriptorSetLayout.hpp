@@ -1,52 +1,70 @@
 #pragma once
-
-#include <vulkan/vulkan.h>
-
+#include <memory>
 #include <vector>
+#include <vulkan/vulkan.h>
 
 namespace rubia::rhi::vulkan
 {
-
-/// RAII wrapper for a Vulkan descriptor set layout.
-class DescriptorSetLayout final
+/// Immutable owning handle and value key, captured directly at creation.
+class DescriptorSetLayoutState final
 {
-public:
-    /// Creates an empty descriptor-set-layout wrapper.
-    DescriptorSetLayout() = default;
-    /// Creates a descriptor set layout from the supplied bindings.
-    DescriptorSetLayout(
-        VkDevice device,
-        const std::vector<VkDescriptorSetLayoutBinding>& bindings,
-        VkDescriptorSetLayoutCreateFlags flags = 0);
-    /// Destroys the owned descriptor set layout.
-    ~DescriptorSetLayout();
+  public:
+    ~DescriptorSetLayoutState();
+    DescriptorSetLayoutState(const DescriptorSetLayoutState &) = delete;
+    DescriptorSetLayoutState &operator=(const DescriptorSetLayoutState &) = delete;
+    VkDescriptorSetLayout get() const noexcept
+    {
+        return handle_;
+    }
+    VkDevice device() const noexcept
+    {
+        return device_;
+    }
+    const std::vector<VkDescriptorSetLayoutBinding>& bindings() const noexcept { return bindings_; }
+    const std::vector<uint32_t> &key() const noexcept
+    {
+        return key_;
+    }
 
-    DescriptorSetLayout(const DescriptorSetLayout&) = delete;
-    DescriptorSetLayout& operator=(const DescriptorSetLayout&) = delete;
-
-    /// Transfers layout ownership from another wrapper.
-    DescriptorSetLayout(DescriptorSetLayout&& other) noexcept;
-    /// Replaces this layout by taking ownership from another wrapper.
-    DescriptorSetLayout& operator=(DescriptorSetLayout&& other) noexcept;
-
-    /// Creates or replaces the descriptor set layout.
-    void create(
-        VkDevice device,
-        const std::vector<VkDescriptorSetLayoutBinding>& bindings,
-        VkDescriptorSetLayoutCreateFlags flags = 0);
-    /// Destroys the descriptor set layout and clears its state.
-    void reset() noexcept;
-
-    /// Returns the owned Vulkan descriptor-set-layout handle.
-    [[nodiscard]] VkDescriptorSetLayout get() const noexcept { return layout_; }
-    /// Returns whether a descriptor set layout is currently owned.
-    [[nodiscard]] explicit operator bool() const noexcept { return layout_ != VK_NULL_HANDLE; }
-
-private:
-    /// Logical device that owns the descriptor set layout.
+  private:
+    friend class DescriptorSetLayout;
+    DescriptorSetLayoutState() = default;
     VkDevice device_ = VK_NULL_HANDLE;
-    /// Owned Vulkan descriptor-set-layout handle.
-    VkDescriptorSetLayout layout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout handle_ = VK_NULL_HANDLE;
+    std::vector<uint32_t> key_;
+    std::vector<VkDescriptorSetLayoutBinding> bindings_;
 };
 
+/// Owner facade; reference() keeps an immutable version alive across reset/move.
+/// The VkDevice must outlive the facade and every outstanding reference.
+class DescriptorSetLayout final
+{
+  public:
+    DescriptorSetLayout() = default;
+    DescriptorSetLayout(VkDevice device, const std::vector<VkDescriptorSetLayoutBinding> &bindings,
+                        VkDescriptorSetLayoutCreateFlags flags = 0);
+    ~DescriptorSetLayout();
+    DescriptorSetLayout(const DescriptorSetLayout &) = delete;
+    DescriptorSetLayout &operator=(const DescriptorSetLayout &) = delete;
+    DescriptorSetLayout(DescriptorSetLayout &&other) noexcept;
+    DescriptorSetLayout &operator=(DescriptorSetLayout &&other) noexcept;
+    void create(VkDevice device, const std::vector<VkDescriptorSetLayoutBinding> &bindings,
+                VkDescriptorSetLayoutCreateFlags flags = 0);
+    void reset() noexcept;
+    VkDescriptorSetLayout get() const noexcept
+    {
+        return state_ ? state_->get() : VK_NULL_HANDLE;
+    }
+    std::shared_ptr<const DescriptorSetLayoutState> reference() const noexcept
+    {
+        return state_;
+    }
+    explicit operator bool() const noexcept
+    {
+        return bool(state_);
+    }
+
+  private:
+    std::shared_ptr<const DescriptorSetLayoutState> state_;
+};
 } // namespace rubia::rhi::vulkan

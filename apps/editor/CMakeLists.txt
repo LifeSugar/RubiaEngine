@@ -1,11 +1,14 @@
 add_library(rubia_editor STATIC
     App.cpp
+    AppContentLoading.cpp
     App.hpp
     ApplicationGui.hpp
     AppResize.cpp
     AppTextureReimport.cpp
     EditorLayer.cpp
     EditorLayer.hpp
+    EditorTheme.cpp
+    EditorTheme.hpp
     EditorFwd.hpp
     EditorSelection.cpp
     EditorSelection.hpp
@@ -13,6 +16,10 @@ add_library(rubia_editor STATIC
     ImGuiLayer.hpp
     RuntimeGui.cpp
     RuntimeGui.hpp
+    content/EditorAssetController.cpp
+    content/EditorAssetController.hpp
+    panels/MaterialAuthoringPanel.cpp
+    panels/MaterialAuthoringPanel.hpp
     content/DemoContent.cpp
     content/DemoContent.hpp
     inspectors/InspectorWidgets.cpp
@@ -29,8 +36,11 @@ add_library(rubia_editor STATIC
     panels/AssetBrowserPanel.hpp
     panels/ConsolePanel.cpp
     panels/ConsolePanel.hpp
+    content/ContentLoadStatus.hpp
     panels/InspectorPanel.cpp
     panels/InspectorPanel.hpp
+    panels/PreferencesPanel.cpp
+    panels/PreferencesPanel.hpp
     panels/SceneHierarchyPanel.cpp
     panels/SceneHierarchyPanel.hpp
     panels/TransformPanel.cpp

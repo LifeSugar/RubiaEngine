@@ -20,18 +20,22 @@ bool App::isSwapChainRecreationDue() const
             kSwapChainResizeDebounceSeconds;
 }
 
-void App::recreateSwapChain(ApplicationGui& gui)
+void App::recreateSwapChain(ApplicationGui&)
 {
     VkExtent2D extent = window.framebufferExtent();
     while (extent.width == 0 || extent.height == 0)
     {
+        if (window.shouldClose())
+        {
+            return;
+        }
         window.waitEvents();
         extent = window.framebufferExtent();
     }
 
     const bool recreateImGui = static_cast<bool>(imguiLayer);
     renderer.waitIdle();
-    gui.detach();
+    // Renderer recreation preserves editor commands, CPU workers and preparation tickets.
     guiRenderBridge.detach();
     renderer.resize(extent);
 
@@ -42,13 +46,6 @@ void App::recreateSwapChain(ApplicationGui& gui)
     }
 
     guiRenderBridge.attach(renderer, renderAssets);
-
-    ApplicationGuiContext guiContext{
-        assetManager,
-        scene,
-        guiRenderBridge,
-        &textureImports};
-    gui.attach(guiContext);
 
     const VkExtent2D renderExtent = renderer.extent();
     camera.setAspect(

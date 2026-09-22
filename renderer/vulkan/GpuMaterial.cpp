@@ -4,7 +4,6 @@
 #include "vulkan/Device.hpp"
 #include "vulkan/GpuTexture.hpp"
 
-#include <cstring>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -16,11 +15,6 @@ namespace
 
 void validateTextures(const std::vector<const GpuTexture*>& textures)
 {
-    if (textures.empty())
-    {
-        throw std::invalid_argument(
-            "GpuMaterial requires at least one texture");
-    }
     for (const GpuTexture* texture : textures)
     {
         if (texture == nullptr || !*texture)
@@ -29,6 +23,22 @@ void validateTextures(const std::vector<const GpuTexture*>& textures)
                 "GpuMaterial references an invalid GpuTexture");
         }
     }
+}
+
+void writeParameterDescriptor(VkDevice device, VkDescriptorSet set,
+                              const asset::MaterialTemplateAsset& materialTemplate,
+                              const Buffer& buffer)
+{
+    VkDescriptorBufferInfo info{};
+    info.buffer = buffer.get();
+    info.range = buffer.size();
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = set;
+    write.dstBinding = materialTemplate.parameterBlock().descriptor.binding;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    write.descriptorCount = 1;
+    write.pBufferInfo = &info;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 void writeTextureDescriptors(
@@ -98,54 +108,27 @@ void GpuMaterial::create(
     const asset::MaterialAsset& asset,
     const asset::MaterialTemplateAsset& materialTemplate,
     const std::vector<const GpuTexture*>& textures,
-    VkDescriptorSet descriptorSet)
+    VkDescriptorSet descriptorSet,
+    std::shared_ptr<const Buffer> parameterBuffer)
 {
     if (!device || !asset || asset.parameterData().empty() ||
-        descriptorSet == VK_NULL_HANDLE)
+        descriptorSet == VK_NULL_HANDLE || !parameterBuffer || !*parameterBuffer ||
+        parameterBuffer->ownerDevice() != device.get() ||
+        parameterBuffer->size() != asset.parameterData().size() ||
+        !(parameterBuffer->usage() & VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT))
     {
         throw std::invalid_argument(
             "cannot create GpuMaterial from incomplete inputs");
     }
     validateTextures(textures);
 
-    Buffer parameterBuffer(
-        device,
-        asset.parameterData().size(),
-        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    void* destination = parameterBuffer.map();
-    std::memcpy(
-        destination,
-        asset.parameterData().data(),
-        asset.parameterData().size());
-    parameterBuffer.unmap();
-
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = parameterBuffer.get();
-    bufferInfo.range = asset.parameterData().size();
-
-    VkWriteDescriptorSet parameterWrite{};
-
-    parameterWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    parameterWrite.dstSet = descriptorSet;
-    parameterWrite.dstBinding =
-        materialTemplate.parameterBlock().descriptor.binding;
-    parameterWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    parameterWrite.descriptorCount = 1;
-    parameterWrite.pBufferInfo = &bufferInfo;
-
-    vkUpdateDescriptorSets(
-        device.get(),
-        1,
-        &parameterWrite,
-        0,
-        nullptr);
     writeTextureDescriptors(
         device.get(),
         descriptorSet,
         materialTemplate,
         textures);
+
+    writeParameterDescriptor(device.get(), descriptorSet, materialTemplate, *parameterBuffer);
 
     reset();
     parameterBuffer_ = std::move(parameterBuffer);
@@ -154,21 +137,42 @@ void GpuMaterial::create(
     descriptorSet_ = descriptorSet;
 }
 
-void GpuMaterial::updateTextures(
+GpuMaterial GpuMaterial::withTextures(
     const Device& device,
     const asset::MaterialTemplateAsset& materialTemplate,
-    const std::vector<const GpuTexture*>& textures)
+    const std::vector<const GpuTexture*>& textures,
+    VkDescriptorSet descriptorSet) const
 {
-    if (!device || !*this)
+    if (!device || !*this || descriptorSet == VK_NULL_HANDLE || descriptorSet == descriptorSet_)
     {
         throw std::invalid_argument(
-            "cannot update textures on an incompatible GpuMaterial");
+            "texture rebinding requires a valid material and a new descriptor set");
     }
-    writeTextureDescriptors(
-        device.get(),
-        descriptorSet_,
-        materialTemplate,
-        textures);
+    writeTextureDescriptors(device.get(), descriptorSet, materialTemplate, textures);
+    writeParameterDescriptor(device.get(), descriptorSet, materialTemplate, *parameterBuffer_);
+    GpuMaterial result;
+    result.parameterBuffer_ = parameterBuffer_;
+    result.materialTemplate_ = materialTemplate_;
+    result.renderState_ = renderState_;
+    result.descriptorSet_ = descriptorSet;
+    return result;
+}
+
+GpuMaterial GpuMaterial::fromParameters(const Device& device,
+    const asset::MaterialTemplateAsset& layout, const std::vector<const GpuTexture*>& textures,
+    VkDescriptorSet set, const ParameterSnapshot& source)
+{
+    if (!device || !set || !source.buffer || !*source.buffer || !source.materialTemplate ||
+        source.buffer->ownerDevice() != device.get())
+        throw std::invalid_argument("invalid material parameter snapshot");
+    writeTextureDescriptors(device.get(), set, layout, textures);
+    writeParameterDescriptor(device.get(), set, layout, *source.buffer);
+    GpuMaterial result;
+    result.parameterBuffer_ = source.buffer;
+    result.materialTemplate_ = source.materialTemplate;
+    result.renderState_ = source.renderState;
+    result.descriptorSet_ = set;
+    return result;
 }
 
 void GpuMaterial::reset() noexcept

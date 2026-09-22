@@ -12,10 +12,6 @@ namespace rubia::asset
 
 class AssetManager;
 
-[[nodiscard]] uint64_t calculateShaderInterfaceSignature(
-    const std::vector<ShaderAssetHandle>& shaders,
-    const AssetManager& assets);
-
 [[nodiscard]] ValidationReport validateMaterialTemplateCreateInfo(
     const MaterialTemplateAsset::CreateInfo& createInfo,
     const AssetManager& assets);

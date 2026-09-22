@@ -105,7 +105,7 @@ std::vector<RenderCandidate> SceneRenderExtractor::extract(
                     RenderCandidate candidate{};
                     candidate.mesh = meshHandle;
                     candidate.submeshIndex = submeshIndex;
-                    candidate.material = submesh.material;
+                    candidate.material = sceneNode.materialOverride ? sceneNode.materialOverride : submesh.material;
                     candidate.layerMask = sceneNode.layerMask;
                     candidate.boundsCullingMode =
                         sceneNode.boundsCullingMode;

@@ -44,6 +44,10 @@ namespace rubia::render
         glm::mat4 normalMatrix{1.0f};
     };
 
+    // Reserved fragment specialization ID. Shaders using it opt into the scene
+    // alpha-clip ABI: bool enable plus float threshold at push-constant offset 8.
+    inline constexpr uint32_t AlphaClipSpecializationId = 1000;
+
     // Small, frequently changing indices used to select the camera and object
     // records while recording a draw.
     struct DrawPushConstants
@@ -52,6 +56,8 @@ namespace rubia::render
         uint32_t cameraIndex = 0;
         /// Object-data slot selected by the draw.
         uint32_t objectIndex = 0;
+        /// Material data: changing this value does not create a pipeline variant.
+        float alphaClipThreshold = 0.5f;
     };
 
     /// Parameters consumed by the final scene-color presentation shader.
@@ -72,7 +78,8 @@ namespace rubia::render
     static_assert(sizeof(ObjectGpuData) == 128);
     static_assert(alignof(ObjectGpuData) == 16);
     static_assert(offsetof(ObjectGpuData, normalMatrix) == 64);
-    static_assert(sizeof(DrawPushConstants) == 8);
+    static_assert(sizeof(DrawPushConstants) == 12);
+    static_assert(offsetof(DrawPushConstants, alphaClipThreshold) == 8);
     static_assert(sizeof(PresentPushConstants) == 16);
     static_assert(alignof(PresentPushConstants) == 16);
 

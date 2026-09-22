@@ -12,6 +12,20 @@
 namespace rubia::rhi::vulkan
 {
 
+struct VulkanApplicationGuiRenderBridge::PreviewDescriptor
+{
+    explicit PreviewDescriptor(VkImageView view)
+        : set(ImGui_ImplVulkan_AddTexture(view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+    {
+        if (set == VK_NULL_HANDLE)
+            throw std::runtime_error("failed to register texture preview with ImGui");
+    }
+    ~PreviewDescriptor() { ImGui_ImplVulkan_RemoveTexture(set); }
+    PreviewDescriptor(const PreviewDescriptor&) = delete;
+    PreviewDescriptor& operator=(const PreviewDescriptor&) = delete;
+    VkDescriptorSet set;
+};
+
 VulkanApplicationGuiRenderBridge::~VulkanApplicationGuiRenderBridge()
 {
     detach();
@@ -25,7 +39,8 @@ void VulkanApplicationGuiRenderBridge::attach(
     renderer_ = &renderer;
     renderAssets_ = &renderAssets;
 
-    if (renderer.outputMode() == VulkanRenderer::OutputMode::Editor)
+    if (renderer.sceneReady() &&
+        renderer.outputMode() == VulkanRenderer::OutputMode::Editor)
     {
         registerViewportTextures();
     }
@@ -33,6 +48,9 @@ void VulkanApplicationGuiRenderBridge::attach(
 
 void VulkanApplicationGuiRenderBridge::detach() noexcept
 {
+    // Deferred RemoveTexture callbacks must run before ImGui destroys its pool.
+    if (renderer_ != nullptr)
+        renderer_->drainRetiredResources();
     releasePreviewTextures();
     releaseViewportTextures();
     renderAssets_ = nullptr;
@@ -43,7 +61,7 @@ void VulkanApplicationGuiRenderBridge::resizeSceneViewport(
     uint32_t width,
     uint32_t height)
 {
-    if (renderer_ == nullptr ||
+    if (renderer_ == nullptr || !renderer_->sceneReady() ||
         renderer_->outputMode() != VulkanRenderer::OutputMode::Editor ||
         width == 0 || height == 0)
     {
@@ -85,6 +103,14 @@ VulkanApplicationGuiRenderBridge::currentFrame()
     {
         return {};
     }
+    if (!renderer_->sceneReady())
+    {
+        const VkExtent2D extent = renderer_->extent();
+        render::ApplicationGuiRenderFrame frame{};
+        frame.width = extent.width;
+        frame.height = extent.height;
+        return frame;
+    }
 
     render::ApplicationGuiRenderFrame frame{};
 
@@ -118,42 +144,48 @@ render::ApplicationGuiTexture VulkanApplicationGuiRenderBridge::preview(
         return {};
     }
 
-    const auto existing = std::find_if(
-        previewTextures_.begin(),
-        previewTextures_.end(),
-        [texture](const TextureEntry& entry)
-        {
-            return entry.texture == texture;
-        });
-    if (existing != previewTextures_.end())
-    {
-        return {
-            reinterpret_cast<std::uintptr_t>(existing->descriptor)
-        };
-    }
-
     const GpuTexture* gpuTexture = renderAssets_->tryTexture(texture);
-    if (gpuTexture == nullptr)
+    const auto publication = renderAssets_->texturePublication(texture);
+    const auto existing =
+        std::find_if(previewTextures_.begin(), previewTextures_.end(),
+                     [texture](const TextureEntry& entry) { return entry.texture == texture; });
+    if (existing != previewTextures_.end() && gpuTexture &&
+        existing->publication == publication)
     {
+        return {reinterpret_cast<std::uintptr_t>(existing->descriptor->set)};
+    }
+    if (!gpuTexture)
+    {
+        if (existing != previewTextures_.end())
+        {
+            renderer_->retireExternalResource(existing->descriptor);
+            previewTextures_.erase(existing);
+        }
         return {};
     }
 
-    const VkDescriptorSet descriptor = ImGui_ImplVulkan_AddTexture(
-        gpuTexture->view(),
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    if (descriptor == VK_NULL_HANDLE)
+    // Allocate the new registration first. Failure leaves the old entry intact;
+    // after retirement admission, publishing the new owner cannot throw.
+    auto descriptor = std::make_shared<PreviewDescriptor>(gpuTexture->view());
+    const auto token = reinterpret_cast<std::uintptr_t>(descriptor->set);
+    if (existing != previewTextures_.end())
     {
-        throw std::runtime_error(
-            "failed to register texture preview with ImGui");
+        renderer_->retireExternalResource(existing->descriptor);
+        existing->descriptor = std::move(descriptor);
+        existing->publication = publication;
     }
-
-    previewTextures_.push_back({texture, descriptor});
-    return {reinterpret_cast<std::uintptr_t>(descriptor)};
+    else
+    {
+        previewTextures_.push_back({texture, std::move(descriptor), publication});
+    }
+    return {token};
 }
 
 void VulkanApplicationGuiRenderBridge::invalidatePreview(
     asset::TextureAssetHandle texture) noexcept
 {
+    // Explicit legacy invalidation is called only after GPU idle. Automatic
+    // version refresh in preview() uses deferred ownership instead.
     const auto firstRemoved = std::remove_if(
         previewTextures_.begin(),
         previewTextures_.end(),
@@ -163,10 +195,6 @@ void VulkanApplicationGuiRenderBridge::invalidatePreview(
             {
                 return false;
             }
-            if (entry.descriptor != VK_NULL_HANDLE)
-            {
-                ImGui_ImplVulkan_RemoveTexture(entry.descriptor);
-            }
             return true;
         });
     previewTextures_.erase(firstRemoved, previewTextures_.end());
@@ -174,7 +202,7 @@ void VulkanApplicationGuiRenderBridge::invalidatePreview(
 
 void VulkanApplicationGuiRenderBridge::registerViewportTextures()
 {
-    if (renderer_ == nullptr ||
+    if (renderer_ == nullptr || !renderer_->sceneReady() ||
         renderer_->outputMode() != VulkanRenderer::OutputMode::Editor ||
         renderer_->frameCount() == 0)
     {
@@ -212,7 +240,7 @@ void VulkanApplicationGuiRenderBridge::registerViewportTextures()
 
 void VulkanApplicationGuiRenderBridge::refreshViewportTexturesIfNeeded()
 {
-    if (renderer_ == nullptr || renderer_->frameCount() == 0)
+    if (renderer_ == nullptr || !renderer_->sceneReady() || renderer_->frameCount() == 0)
     {
         return;
     }
@@ -241,13 +269,6 @@ void VulkanApplicationGuiRenderBridge::releaseViewportTextures() noexcept
 
 void VulkanApplicationGuiRenderBridge::releasePreviewTextures() noexcept
 {
-    for (const TextureEntry& entry : previewTextures_)
-    {
-        if (entry.descriptor != VK_NULL_HANDLE)
-        {
-            ImGui_ImplVulkan_RemoveTexture(entry.descriptor);
-        }
-    }
     previewTextures_.clear();
 }
 

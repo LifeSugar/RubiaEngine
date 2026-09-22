@@ -26,6 +26,7 @@ struct DrawPushConstants
 {
     uint cameraIndex;
     uint objectIndex;
+    float alphaClipThreshold;
 };
 
 // set 0 / binding 0 is reserved for future per-frame constants.

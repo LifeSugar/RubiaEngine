@@ -284,7 +284,7 @@ asset::TextureAsset::CreateInfo KtxTextureImporter::importFile(
     CreateInfo resolvedInfo = createInfo;
     if (resolvedInfo.name.empty())
     {
-        resolvedInfo.name = path.filename().string();
+        resolvedInfo.name = path.filename().u8string();
     }
     return buildTextureAsset(*texture, resolvedInfo);
 }

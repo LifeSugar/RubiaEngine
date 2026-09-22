@@ -304,7 +304,7 @@ MaterialInspectorOutput MaterialInspector::drawMaterialAsset(
                 0.32f);
             ImGui::TableHeadersRow();
 
-            for (asset::ShaderAssetHandle shaderHandle : materialTemplate->shaders())
+            for (asset::ShaderAssetHandle shaderHandle : assets.shaderProgram(materialTemplate->program()).shaders())
             {
                 ImGui::PushID(static_cast<int>(shaderHandle.index));
                 ImGui::TableNextRow();
@@ -561,7 +561,7 @@ std::optional<InspectorTarget> MaterialInspector::drawMaterialTemplate(
         static_cast<uint32_t>(materialTemplate.textureSlots().size()));
     drawProperty(
         "Shaders",
-        static_cast<uint32_t>(materialTemplate.shaders().size()));
+        static_cast<uint32_t>(assets.shaderProgram(materialTemplate.program()).shaders().size()));
     return std::nullopt;
 }
 

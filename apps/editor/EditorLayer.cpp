@@ -1,4 +1,5 @@
 #include "EditorLayer.hpp"
+#include "panels/PreferencesPanel.hpp"
 
 #include "render/ApplicationGuiRenderBridge.hpp"
 #include "scene/Scene.hpp"
@@ -14,11 +15,17 @@
 namespace rubia::editor
 {
 
+void EditorLayer::update(const ApplicationGuiContext& context)
+{
+    if (!browsed_) { assetController_.browse(std::filesystem::path(PROJECT_SOURCE_DIR) / "assets"); browsed_ = true; }
+    assetController_.update(context, selection_);
+}
+
 ApplicationGuiFrameOutput EditorLayer::draw(
     const ApplicationGuiContext& context)
 {
-    drawDockSpace();
     ApplicationGuiFrameOutput output{};
+    drawDockSpace();
     sceneViewportWidth_ = 0;
     sceneViewportHeight_ = 0;
 
@@ -28,7 +35,7 @@ ApplicationGuiFrameOutput EditorLayer::draw(
             context.scene,
             context.assets,
             selection_,
-            &showSceneHierarchy_);
+            &showSceneHierarchy_, &assetController_);
     }
     if (showInspector_)
     {
@@ -38,24 +45,16 @@ ApplicationGuiFrameOutput EditorLayer::draw(
             context.render,
             context.textureImports,
             selection_,
-            &showInspector_);
+            &showInspector_, &assetController_);
     }
     if (showAssets_)
     {
-        const ImGuiWindow* inspectorWindow =
-            ImGui::FindWindowByName("Inspector");
-        if (inspectorWindow != nullptr && inspectorWindow->DockId != 0)
-        {
-            ImGui::SetNextWindowDockID(
-                inspectorWindow->DockId,
-                ImGuiCond_FirstUseEver);
-        }
         std::vector<importer::texture::TextureReimportRequest> assetReimports =
             assetBrowserPanel_.draw(
                 context.assets,
                 context.textureImports,
                 selection_,
-                &showAssets_);
+                &showAssets_, &assetController_);
         output.textureReimports.insert(
             output.textureReimports.end(),
             std::make_move_iterator(assetReimports.begin()),
@@ -71,16 +70,13 @@ ApplicationGuiFrameOutput EditorLayer::draw(
     }
     if (showConsole_)
     {
-        const ImGuiWindow* statsWindow =
-            ImGui::FindWindowByName("Renderer Stats");
-        if (statsWindow != nullptr && statsWindow->DockId != 0)
-        {
-            ImGui::SetNextWindowDockID(
-                statsWindow->DockId,
-                ImGuiCond_FirstUseEver);
-        }
         consolePanel_.draw(&showConsole_);
     }
+    if (showPreferences_)
+    {
+        drawPreferencesPanel(&showPreferences_);
+    }
+    output.sceneFocus = assetController_.takeFocus();
     return output;
 }
 
@@ -110,11 +106,19 @@ void EditorLayer::drawDockSpace()
     ImGui::Begin("EditorDockSpaceHost", nullptr, windowFlags);
     ImGui::PopStyleVar(3);
 
+    bool resetLayout = false;
     if (ImGui::BeginMenuBar())
     {
-        if (ImGui::BeginMenu("File"))
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
+        const bool rubiaMenuOpen = ImGui::BeginMenu("RUBIA");
+        ImGui::PopStyleColor();
+        if (rubiaMenuOpen)
         {
-            ImGui::TextDisabled("Scene persistence is not connected yet");
+            if (ImGui::MenuItem("Preference"))
+            {
+                showPreferences_ = true;
+                ImGui::SetWindowFocus("Preference");
+            }
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("View"))
@@ -128,44 +132,64 @@ void EditorLayer::drawDockSpace()
             ImGui::MenuItem("Scene Viewport", nullptr, &showSceneViewport_);
             ImGui::MenuItem("Renderer Stats", nullptr, &showRendererStats_);
             ImGui::MenuItem("Console", nullptr, &showConsole_);
+            ImGui::Separator();
+            resetLayout = ImGui::MenuItem("Reset Layout");
             ImGui::EndMenu();
+        }
+        const ImGuiIO& io = ImGui::GetIO();
+        char performance[64];
+        ImFormatString(performance, sizeof(performance), "%.0f FPS  /  %.2f ms",
+            io.Framerate, io.Framerate > 0.0f ? 1000.0f / io.Framerate : 0.0f);
+        const float statusX = ImGui::GetWindowWidth() -
+            ImGui::CalcTextSize(performance).x - ImGui::GetStyle().FramePadding.x * 2.0f;
+        if (statusX > ImGui::GetCursorPosX())
+        {
+            ImGui::SetCursorPosX(statusX);
+            ImGui::TextDisabled("%s", performance);
         }
         ImGui::EndMenuBar();
     }
 
-    const ImGuiID dockspaceId = ImGui::GetID("EditorMainDockSpace");
+    // Version the default layout once; subsequent custom docking is persisted.
+    const ImGuiID dockspaceId = ImGui::GetID("EditorMainDockSpaceV2");
+    if (resetLayout)
+    {
+        ImGui::DockBuilderRemoveNode(dockspaceId);
+        showSceneHierarchy_ = showInspector_ = showAssets_ = true;
+        showSceneViewport_ = showRendererStats_ = showConsole_ = true;
+    }
     if (ImGui::DockBuilderGetNode(dockspaceId) == nullptr)
     {
         ImGui::DockBuilderAddNode(
             dockspaceId,
             dockspaceFlags | ImGuiDockNodeFlags_DockSpace);
-        ImGui::DockBuilderSetNodeSize(dockspaceId, viewport->WorkSize);
+        ImGui::DockBuilderSetNodeSize(dockspaceId, ImGui::GetContentRegionAvail());
 
         ImGuiID center = dockspaceId;
-        const ImGuiID left = ImGui::DockBuilderSplitNode(
-            center,
-            ImGuiDir_Left,
-            0.20f,
-            nullptr,
-            &center);
         const ImGuiID right = ImGui::DockBuilderSplitNode(
             center,
             ImGuiDir_Right,
-            0.25f,
+            0.26f,
             nullptr,
             &center);
         const ImGuiID bottom = ImGui::DockBuilderSplitNode(
             center,
             ImGuiDir_Down,
-            0.22f,
+            0.28f,
+            nullptr,
+            &center);
+        const ImGuiID left = ImGui::DockBuilderSplitNode(
+            center,
+            ImGuiDir_Left,
+            0.24f,
             nullptr,
             &center);
 
         ImGui::DockBuilderDockWindow("Scene Hierarchy", left);
         ImGui::DockBuilderDockWindow("Inspector", right);
-        ImGui::DockBuilderDockWindow("Assets", right);
-        ImGui::DockBuilderDockWindow("Renderer Stats", bottom);
+        ImGui::DockBuilderDockWindow("Assets", bottom);
         ImGui::DockBuilderDockWindow("Console", bottom);
+        ImGui::DockBuilderDockWindow("Renderer Stats", bottom);
         ImGui::DockBuilderDockWindow("Scene Viewport", center);
         ImGui::DockBuilderFinish(dockspaceId);
     }
@@ -178,13 +202,21 @@ std::optional<float> EditorLayer::drawSceneViewport(
 {
     const bool visible = ImGui::Begin(
         "Scene Viewport",
-        &showSceneViewport_);
+        &showSceneViewport_,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     if (!visible)
     {
         ImGui::End();
         return std::nullopt;
     }
 
+    if (ImGui::Button("Frame Scene")) assetController_.frameScene();
+    ImGui::SameLine();
+    ImGui::TextDisabled("SCENE");
+    ImGui::SameLine();
+    ImGui::TextUnformatted(context.scene.name().empty()
+        ? "Untitled Scene" : context.scene.name().c_str());
+    ImGui::Separator();
     const ImVec2 available = ImGui::GetContentRegionAvail();
     uint32_t renderWidth = 0;
     uint32_t renderHeight = 0;
@@ -212,6 +244,20 @@ std::optional<float> EditorLayer::drawSceneViewport(
         const ImTextureID textureId = static_cast<ImTextureID>(
             renderFrame.sceneViewport.textureId);
         ImGui::Image(ImTextureRef(textureId), available);
+    }
+    else if (available.x > 0.0f && available.y > 0.0f)
+    {
+        const ImVec2 start = ImGui::GetCursorScreenPos();
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        drawList->AddRectFilled(start,
+            ImVec2(start.x + available.x, start.y + available.y),
+            ImGui::GetColorU32(ImGuiCol_ChildBg), ImGui::GetStyle().ChildRounding);
+        const char* message = "Scene preview unavailable";
+        const ImVec2 textSize = ImGui::CalcTextSize(message);
+        drawList->AddText(ImVec2(start.x + std::max(0.0f, (available.x - textSize.x) * 0.5f),
+            start.y + std::max(0.0f, (available.y - textSize.y) * 0.5f)),
+            ImGui::GetColorU32(ImGuiCol_TextDisabled), message);
+        ImGui::Dummy(available);
     }
     ImGui::End();
     if (available.x <= 0.0f || available.y <= 0.0f)

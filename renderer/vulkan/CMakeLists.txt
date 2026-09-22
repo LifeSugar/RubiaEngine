@@ -1,4 +1,5 @@
 add_library(rubia_rhi_vulkan STATIC
+    VulkanViewportCapture.cpp
     Buffer.cpp
     Buffer.hpp
     CommandPool.cpp
@@ -19,12 +20,20 @@ add_library(rubia_rhi_vulkan STATIC
     FrameContext.hpp
     FrameDataResources.cpp
     FrameDataResources.hpp
+    GpuPreparedAssets.cpp
+    GpuPreparedAssets.hpp
     GpuMaterial.cpp
     GpuMaterial.hpp
     GpuTexture.cpp
     GpuTexture.hpp
     GraphicsPipeline.cpp
     GraphicsPipeline.hpp
+    GraphicsPipelineState.hpp
+    PipelineKeyData.hpp
+    GraphicsPipelineKey.cpp
+    GraphicsPipelineKey.hpp
+    GraphicsPipelineCache.cpp
+    GraphicsPipelineCache.hpp
     Image.cpp
     Image.hpp
     ImageView.cpp
@@ -35,6 +44,7 @@ add_library(rubia_rhi_vulkan STATIC
     PerFrameBuffer.hpp
     RenderAssetCache.cpp
     RenderAssetCache.hpp
+    RetiredResources.hpp
     RenderPass.cpp
     RenderPass.hpp
     RenderTarget.cpp
@@ -49,19 +59,39 @@ add_library(rubia_rhi_vulkan STATIC
     SwapchainResources.hpp
     TextureVkFormat.cpp
     TextureVkFormat.hpp
+    TextureUploadBuilder.cpp
+    TextureUploadBuilder.hpp
+    UploadValidation.cpp
+    UploadValidation.hpp
     UploadContext.cpp
     UploadContext.hpp
+    VulkanUploadTypes.hpp
+    VulkanUploadService.hpp
+    VulkanUploadService.cpp
     VmaImplementation.cpp
     VulkanApplicationGuiRenderBridge.cpp
     VulkanApplicationGuiRenderBridge.hpp
     VulkanContext.cpp
     VulkanContext.hpp
+    VulkanDrawListRecorder.hpp
+    VulkanDrawListRecorder.cpp
+    VulkanPipelinePreparation.hpp
+    VulkanPipelinePreparation.cpp
     VulkanDrawList.hpp
     VulkanDrawListCompiler.cpp
     VulkanDrawListCompiler.hpp
     VulkanMemoryConfig.hpp
     VulkanRenderer.cpp
     VulkanRenderer.hpp
+    IResourcePreparation.hpp
+    ResourcePreparationTypes.hpp
+    ResourcePreparations.cpp
+    VulkanResourcePreparation.cpp
+    VulkanResourcePreparation.hpp
+    VulkanResourcePreparationBridge.cpp
+    VulkanResourcePreparationBridge.hpp
+    VulkanScenePreparation.cpp
+    VulkanScenePreparation.hpp
     Window.cpp
     Window.hpp
 )

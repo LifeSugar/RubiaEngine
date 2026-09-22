@@ -11,15 +11,31 @@ int main(int argc, char** argv)
 {
     try
     {
-        if (argc == 2 && std::string_view(argv[1]) == "--asset-test")
+        if (argc == 2 && (std::string_view(argv[1]) == "--preparation-gallery" ||
+                          std::string_view(argv[1]) == "--preparation-gallery-test"))
+        {
+            rubia::test::AppSmokeTests::runPreparationGallery(
+                std::string_view(argv[1]) == "--preparation-gallery");
+        }
+        else if (argc == 2 && std::string_view(argv[1]) == "--asset-test")
         {
             rubia::test::AppSmokeTests::runAssetImportTest();
             std::cout << "[OK] Asset import test passed\n";
+        }
+        else if (argc == 2 && std::string_view(argv[1]) == "--startup-test")
+        {
+            rubia::test::AppSmokeTests::runStartupTest();
+            std::cout << "[OK] Startup test passed\n";
         }
         else if (argc == 2 && std::string_view(argv[1]) == "--render-test")
         {
             rubia::test::AppSmokeTests::runRenderTest();
             std::cout << "[OK] Render test passed\n";
+        }
+        else if (argc == 2 && std::string_view(argv[1]) == "--editor-assets-test")
+        {
+            rubia::test::AppSmokeTests::runEditorAssetTest();
+            std::cout << "[OK] Editor asset workflow test passed\n";
         }
         else if (argc == 2 && std::string_view(argv[1]) == "--editor-test")
         {
@@ -27,7 +43,9 @@ int main(int argc, char** argv)
             editor.runRenderTest();
             std::cout << "[OK] Editor render test passed\n";
         }
-        else if (argc == 2 && std::string_view(argv[1]) == "--editor")
+        // --empty remains a compatibility alias; every normal launch starts empty.
+        else if ((argc == 2 || (argc == 3 && std::string_view(argv[2]) == "--empty")) &&
+                 std::string_view(argv[1]) == "--editor")
         {
             rubia::editor::EditorApp editor;
             editor.run();

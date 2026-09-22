@@ -1,6 +1,7 @@
 #include "asset/AssetManager.hpp"
 
 #include "asset/MaterialValidation.hpp"
+#include "asset/MaterialTemplateBuilder.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -127,17 +128,39 @@ TextureAsset AssetManager::replaceTexture(
     return textures_.replace(handle, std::move(replacement));
 }
 
+AssetManager::StagedTextureReplacement AssetManager::stageTextureReplacement(
+    TextureAssetHandle handle, TextureAsset candidate)
+{
+    if (!candidate) throw std::invalid_argument("cannot stage an incomplete texture");
+    StagedTextureReplacement result;
+    result.expected_ = version(handle);
+    result.candidate_ = std::move(candidate);
+    auto data = std::make_shared<const TextureAsset>(result.candidate_);
+    result.snapshot_ = {domain(), textures_.reserveVersion(handle), std::move(data)};
+    return result;
+}
+void AssetManager::validateStagedTexture(const StagedTextureReplacement& staged) const
+{
+    if (staged.committed_ || staged.snapshot_.domain != domain() ||
+        !isCurrent(staged.expected_))
+        throw std::runtime_error("texture changed during reimport; retry with current content");
+}
+void AssetManager::commitStagedTexture(StagedTextureReplacement& staged) noexcept
+{
+    textures_.commitReserved(staged.expected_, staged.snapshot_.version, staged.candidate_);
+    staged.committed_ = true;
+}
+
 MaterialTemplateAssetHandle AssetManager::createMaterialTemplate(
     MaterialTemplateAsset::CreateInfo createInfo)
 {
-    ValidationReport report = validateMaterialTemplate(createInfo);
+    ValidationReport report;
+    auto compiled = MaterialTemplateBuilder::build(createInfo, *this, report);
     if (!report.valid())
     {
         throw AssetValidationError(std::move(report));
     }
-    createInfo.shaderInterfaceSignature =
-        calculateShaderInterfaceSignature(createInfo.shaders, *this);
-    return materialTemplates_.emplace(std::move(createInfo));
+    return materialTemplates_.emplace(std::move(compiled));
 }
 
 MaterialAssetHandle AssetManager::createMaterial(
@@ -296,10 +319,42 @@ MeshAssetHandle AssetManager::createMesh(MeshAsset::CreateInfo createInfo)
     return meshes_.emplace(std::move(createInfo));
 }
 
+MeshAsset AssetManager::replaceMesh(MeshAssetHandle handle, MeshAsset replacement)
+{
+    if (!replacement)
+    {
+        throw std::invalid_argument("cannot replace mesh with an incomplete asset");
+    }
+    for (const auto& submesh : replacement.submeshes())
+    {
+        if (submesh.material && !materials_.contains(submesh.material))
+        {
+            throw std::invalid_argument("mesh references a material outside this AssetManager");
+        }
+    }
+    return meshes_.replace(handle, std::move(replacement));
+}
+
 ShaderAssetHandle AssetManager::createShader(
     ShaderAsset::CreateInfo createInfo)
 {
     return shaders_.emplace(std::move(createInfo));
+}
+
+ShaderProgramAssetHandle AssetManager::createShaderProgram(
+    ShaderProgramAsset::CreateInfo createInfo)
+{
+    return shaderPrograms_.insert(ShaderProgramBuilder::build(std::move(createInfo), *this));
+}
+
+const ShaderProgramAsset& AssetManager::shaderProgram(ShaderProgramAssetHandle handle) const
+{
+    return shaderPrograms_.get(handle);
+}
+
+bool AssetManager::contains(ShaderProgramAssetHandle handle) const noexcept
+{
+    return shaderPrograms_.contains(handle);
 }
 
 ModelAssetHandle AssetManager::createModel(ModelAsset::CreateInfo createInfo)
@@ -379,6 +434,41 @@ bool AssetManager::contains(ModelAssetHandle handle) const noexcept
     return models_.contains(handle);
 }
 
+AssetContentRevision AssetManager::contentRevision(TextureAssetHandle handle) const
+{
+    return textures_.contentRevision(handle);
+}
+
+AssetContentRevision AssetManager::contentRevision(MaterialTemplateAssetHandle handle) const
+{
+    return materialTemplates_.contentRevision(handle);
+}
+
+AssetContentRevision AssetManager::contentRevision(MaterialAssetHandle handle) const
+{
+    return materials_.contentRevision(handle);
+}
+
+AssetContentRevision AssetManager::contentRevision(MeshAssetHandle handle) const
+{
+    return meshes_.contentRevision(handle);
+}
+
+AssetContentRevision AssetManager::contentRevision(ShaderAssetHandle handle) const
+{
+    return shaders_.contentRevision(handle);
+}
+
+AssetContentRevision AssetManager::contentRevision(ShaderProgramAssetHandle handle) const
+{
+    return shaderPrograms_.contentRevision(handle);
+}
+
+AssetContentRevision AssetManager::contentRevision(ModelAssetHandle handle) const
+{
+    return models_.contentRevision(handle);
+}
+
 bool AssetManager::isMaterialTemplateCurrent(
     MaterialTemplateAssetHandle handle) const noexcept
 {
@@ -388,9 +478,9 @@ bool AssetManager::isMaterialTemplateCurrent(
     }
     const MaterialTemplateAsset& materialTemplate =
         materialTemplates_.get(handle);
-    return calculateShaderInterfaceSignature(
-        materialTemplate.shaders(),
-        *this) == materialTemplate.shaderInterfaceSignature();
+    return contains(materialTemplate.program()) &&
+        shaderProgram(materialTemplate.program()).interfaceSignature() ==
+            materialTemplate.programInterfaceSignature();
 }
 
 std::vector<TextureAssetHandle> AssetManager::textureHandles() const
@@ -408,12 +498,18 @@ std::vector<ModelAssetHandle> AssetManager::modelHandles() const
     return models_.handles();
 }
 
+std::vector<ShaderAssetHandle> AssetManager::shaderHandles() const
+{
+    return shaders_.handles();
+}
+
 void AssetManager::reset() noexcept
 {
     models_.reset();
     meshes_.reset();
     materials_.reset();
     materialTemplates_.reset();
+    shaderPrograms_.reset();
     shaders_.reset();
     textures_.reset();
 }

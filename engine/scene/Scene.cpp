@@ -55,6 +55,22 @@ void Scene::create(CreateInfo createInfo)
     nodes_ = std::move(createInfo.nodes);
 }
 
+uint32_t Scene::addNode(SceneNode node)
+{
+    if (node.parent != kInvalidSceneNodeIndex && node.parent >= nodes_.size())
+        throw std::invalid_argument("scene node parent is invalid");
+    if (nodes_.size() >= kInvalidSceneNodeIndex)
+        throw std::overflow_error("scene node capacity exceeded");
+    const auto index = static_cast<uint32_t>(nodes_.size());
+    nodes_.push_back(std::move(node));
+    return index;
+}
+
+void Scene::setMaterialOverride(uint32_t nodeIndex, asset::MaterialAssetHandle material)
+{
+    nodes_.at(nodeIndex).materialOverride = material;
+}
+
 void Scene::reset() noexcept
 {
     name_.clear();

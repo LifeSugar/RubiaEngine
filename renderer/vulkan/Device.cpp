@@ -47,6 +47,7 @@ Device::~Device()
 Device::Device(Device&& other) noexcept
     : physicalDevice_(std::exchange(other.physicalDevice_, VK_NULL_HANDLE)),
       device_(std::exchange(other.device_, VK_NULL_HANDLE)),
+      enabledFeatures_(std::exchange(other.enabledFeatures_, VkPhysicalDeviceFeatures{})),
 #if VK_RENDERER_USE_VMA
       allocator_(std::exchange(other.allocator_, VK_NULL_HANDLE)),
 #endif
@@ -64,6 +65,7 @@ Device& Device::operator=(Device&& other) noexcept
         reset();
         physicalDevice_ = std::exchange(other.physicalDevice_, VK_NULL_HANDLE);
         device_ = std::exchange(other.device_, VK_NULL_HANDLE);
+        enabledFeatures_ = std::exchange(other.enabledFeatures_, VkPhysicalDeviceFeatures{});
 #if VK_RENDERER_USE_VMA
         allocator_ = std::exchange(other.allocator_, VK_NULL_HANDLE);
 #endif
@@ -215,6 +217,7 @@ void Device::create(
     reset();
     physicalDevice_ = selectedPhysicalDevice;
     device_ = newDevice;
+    enabledFeatures_ = features;
 #if VK_RENDERER_USE_VMA
     allocator_ = newAllocator;
 #endif
@@ -239,6 +242,7 @@ void Device::reset() noexcept
 
     physicalDevice_ = VK_NULL_HANDLE;
     device_ = VK_NULL_HANDLE;
+    enabledFeatures_ = {};
 #if VK_RENDERER_USE_VMA
     allocator_ = VK_NULL_HANDLE;
 #endif

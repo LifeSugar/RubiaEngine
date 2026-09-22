@@ -1,22 +1,23 @@
 #include "AppSmokeTests.hpp"
+#include "vulkan/TextureUploadBuilder.hpp"
 
 #include "ApplicationGui.hpp"
-#include "render/ApplicationGuiRenderBridge.hpp"
+#include "RuntimeGui.hpp"
 #include "asset/AssetId.hpp"
 #include "content/DemoContent.hpp"
-#include "texture/KtxTextureImporter.hpp"
-#include "texture/KtxTextureCooker.hpp"
+#include "render/ApplicationGuiRenderBridge.hpp"
 #include "render/CullingSystem.hpp"
 #include "render/MaterialKey.hpp"
 #include "render/PipelineVariantKey.hpp"
 #include "render/RenderFrameBuilder.hpp"
 #include "render/RenderItemComparator.hpp"
 #include "render/SceneRenderExtractor.hpp"
-#include "RuntimeGui.hpp"
+#include "texture/KtxTextureCooker.hpp"
+#include "texture/KtxTextureImporter.hpp"
 #include "vulkan/CommandPool.hpp"
 #include "vulkan/GpuTexture.hpp"
-#include "vulkan/UploadContext.hpp"
 #include "vulkan/VulkanDrawListCompiler.hpp"
+#include "vulkan/VulkanUploadService.hpp"
 
 #include <imgui.h>
 #include <ktx.h>
@@ -29,6 +30,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -505,11 +507,22 @@ void validateOfflineMaterialAssets(
         assets.materialTemplate(content.materialTemplate);
     asset::MaterialTemplateAsset::CreateInfo templateInfo{};
     templateInfo.name = materialTemplate.name();
-    templateInfo.shaders = materialTemplate.shaders();
-    templateInfo.parameterBlock = materialTemplate.parameterBlock();
-    templateInfo.parameterDataSize = materialTemplate.parameterDataSize();
-    templateInfo.parameters = materialTemplate.parameters();
-    templateInfo.textureSlots = materialTemplate.textureSlots();
+    templateInfo.program = materialTemplate.program();
+    templateInfo.textureSlots = {
+        {"baseColorTexture", "baseColorTexture", "baseColorSampler"},
+        {"metallicRoughnessTexture", "metallicRoughnessTexture", "metallicRoughnessSampler"},
+        {"normalTexture", "normalTexture", "normalSampler"},
+        {"occlusionTexture", "occlusionTexture", "occlusionSampler"},
+        {"emissiveTexture", "emissiveTexture", "emissiveSampler"}
+    };
+    for (const auto& member : materialBlock->members)
+    {
+        const auto parameter = std::find_if(materialTemplate.parameters().begin(), materialTemplate.parameters().end(),
+            [&](const auto& value) { return value.name == member.name; });
+        if (parameter == materialTemplate.parameters().end() || parameter->byteOffset != member.offset ||
+            asset::MaterialTemplateAsset::valueSize(parameter->type) != member.size)
+            throw std::runtime_error("generated material layout does not match SPIR-V");
+    }
 
     const asset::ValidationReport currentTemplateReport =
         assets.validateMaterialTemplate(templateInfo);
@@ -525,13 +538,13 @@ void validateOfflineMaterialAssets(
     }
 
     asset::MaterialTemplateAsset::CreateInfo invalidTemplate = templateInfo;
-    invalidTemplate.parameters.back().byteOffset = 36;
+    invalidTemplate.parameters.push_back({"missingParameter", true});
     const asset::ValidationReport invalidTemplateReport =
         assets.validateMaterialTemplate(invalidTemplate);
     if (invalidTemplateReport.valid() ||
         !hasValidationIssue(
             invalidTemplateReport,
-            "Template.ParameterOffsetMismatch",
+            "Template.InvalidParameterMetadata",
             asset::ValidationSeverity::Error))
     {
         throw std::runtime_error(
@@ -618,9 +631,10 @@ void validateRenderFrame(const render::RenderFrame& renderFrame)
 
 void validateVulkanDrawListCompilation(
     const render::RenderFrame& renderFrame,
-    const rhi::vulkan::RenderAssetCache& renderAssets)
+    const rhi::vulkan::RenderAssetCache& renderAssets,
+    rhi::vulkan::VulkanRenderer& renderer)
 {
-    const rhi::vulkan::VulkanDrawList resolved = rhi::vulkan::VulkanDrawListCompiler{}.compile(
+    const rhi::vulkan::VulkanDrawList resolved = renderer.compileDrawList(
         renderFrame.renderList,
         renderAssets);
     if (resolved.size() != renderFrame.renderList.size())
@@ -638,7 +652,7 @@ void validateVulkanDrawListCompilation(
     bool staleHandleRejected = false;
     try
     {
-        static_cast<void>(rhi::vulkan::VulkanDrawListCompiler{}.compile(
+        static_cast<void>(renderer.compileDrawList(
             staleList,
             renderAssets));
     }
@@ -877,18 +891,26 @@ void validateKtxTextureImportAndUpload(const rhi::vulkan::Device& device)
             "Basis-to-BC7 KTX2 transcode produced invalid asset metadata");
     }
 
-    rhi::vulkan::CommandPool commandPool(
-        device,
-        device.graphicsQueueFamily(),
-        VK_COMMAND_POOL_CREATE_TRANSIENT_BIT);
-    rhi::vulkan::UploadContext uploadContext(device, commandPool);
-
-    const asset::TextureAsset texture(std::move(textureInfo));
-    rhi::vulkan::GpuTexture::CreateInfo gpuTextureInfo{};
-    gpuTextureInfo.asset = &texture;
+    rhi::vulkan::VulkanUploadService uploads(device);
+    auto texture = std::make_shared<const asset::TextureAsset>(std::move(textureInfo));
+    auto gpuTextureInfo = rhi::vulkan::makeTextureCreateInfo(*texture);
     gpuTextureInfo.viewRange.baseMipLevel = 1;
     gpuTextureInfo.viewRange.levelCount = 2;
-    const rhi::vulkan::GpuTexture gpuTexture(device, uploadContext, gpuTextureInfo);
+    auto target = std::make_shared<rhi::vulkan::GpuTexture>();
+    target->allocate(device, gpuTextureInfo);
+    auto request = rhi::vulkan::makeTextureUploadRequest(target, texture);
+    const auto result = uploads.tryEnqueue(request);
+    if (!result.accepted())
+    {
+        throw std::runtime_error("BC7 upload request rejected: " + result.error);
+    }
+    uploads.drain();
+    if (uploads.query(result.ticket).state != rhi::vulkan::UploadState::Completed)
+    {
+        throw std::runtime_error("BC7 upload failed");
+    }
+    uploads.releaseTicket(result.ticket);
+    const auto& gpuTexture = *target;
     if (!gpuTexture || gpuTexture.format() != VK_FORMAT_BC7_UNORM_BLOCK)
     {
         throw std::runtime_error(
@@ -945,48 +967,28 @@ void validateStableTextureAssetReplacement()
     }
 }
 
-void validateGpuTextureReplacement(
-    const rhi::vulkan::Device& device,
-    asset::AssetManager& assets,
-    rhi::vulkan::RenderAssetCache& renderAssets,
-    asset::TextureAssetHandle handle)
+void validateGpuTextureReplacement(rhi::vulkan::VulkanRenderer& renderer,
+                                   asset::AssetManager& assets,
+                                   rhi::vulkan::RenderAssetCache& renderAssets,
+                                   asset::TextureAssetHandle handle)
 {
-    const rhi::vulkan::GpuTexture* originalGpu = renderAssets.tryTexture(handle);
-    if (originalGpu == nullptr)
+    const auto originalView = renderAssets.texture(handle).view();
+    static_cast<void>(assets.replaceTexture(handle,
+        asset::TextureAsset(cloneTextureCreateInfo(assets.texture(handle), "GPU replacement texture"))));
+    const auto result = renderer.prepareTexture(renderAssets, assets.snapshot(handle));
+    if (!result.accepted() || renderAssets.texture(handle).view() != originalView)
+        throw std::runtime_error("texture replacement failed admission or published early");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (!render::resourcePreparationFinished(renderer.resourcePreparationStatus(result.ticket).state) &&
+           std::chrono::steady_clock::now() < deadline)
     {
-        throw std::runtime_error(
-            "GPU texture replacement test requires a cached texture");
+        renderer.advanceResourcePreparation();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    const VkImageView originalView = originalGpu->view();
-
-    asset::TextureAsset replacementAsset(cloneTextureCreateInfo(
-        assets.texture(handle),
-        "GPU replacement texture"));
-    rhi::vulkan::CommandPool commandPool(
-        device,
-        device.graphicsQueueFamily(),
-        VK_COMMAND_POOL_CREATE_TRANSIENT_BIT);
-    rhi::vulkan::UploadContext uploadContext(device, commandPool);
-    rhi::vulkan::GpuTexture staged = renderAssets.stageTextureReplacement(
-        device,
-        uploadContext,
-        replacementAsset);
-    rhi::vulkan::GpuTexture previousGpu = renderAssets.commitTextureReplacement(
-        device,
-        assets,
-        handle,
-        std::move(staged));
-    asset::TextureAsset previousAsset = assets.replaceTexture(
-        handle,
-        std::move(replacementAsset));
-
-    if (!previousGpu || !previousAsset || !assets.contains(handle) ||
-        renderAssets.tryTexture(handle) == nullptr ||
+    if (renderer.resourcePreparationStatus(result.ticket).state != render::ResourcePreparationState::Ready ||
         renderAssets.texture(handle).view() == originalView)
-    {
-        throw std::runtime_error(
-            "GPU texture replacement did not preserve the cache handle or replace its image view");
-    }
+        throw std::runtime_error("asynchronous texture replacement failed");
+    renderer.releaseResourcePreparation(result.ticket);
 }
 
 } // namespace
@@ -1066,7 +1068,9 @@ void AppSmokeTests::runRenderTest()
 {
     editor::App app;
     editor::RuntimeGui gui;
-    runRenderTest(app, editor::App::RunConfig{}, gui);
+    editor::App::RunConfig config;
+    config.resourcePreparation.material.parameterMemory = render::MaterialParameterMemory::HostVisible;
+    runRenderTest(app, config, gui);
 }
 
 void AppSmokeTests::runRenderTest(
@@ -1076,6 +1080,12 @@ void AppSmokeTests::runRenderTest(
 {
     app.initWindow(config, false);
     app.initVulkan(config);
+    app.setupCamera();
+    if (!app.renderer || app.renderer.sceneReady() ||
+        !app.assetManager.modelHandles().empty())
+    {
+        throw std::runtime_error("presentation startup unexpectedly depends on scene assets");
+    }
     validateKtxTextureImportAndUpload(app.vulkanContext.device());
     app.initImGui(config);
     app.guiRenderBridge.attach(app.renderer, app.renderAssets);
@@ -1085,6 +1095,278 @@ void AppSmokeTests::runRenderTest(
         app.guiRenderBridge
     };
     gui.attach(guiContext);
+    const auto drawLoadingFrame = [&]
+    {
+        app.window.pollEvents();
+        app.imguiLayer.beginFrame();
+        app.drawGui(gui);
+        ImDrawData* drawData = app.imguiLayer.endFrame();
+        const auto result = app.renderer.renderGui(drawData);
+        if (result == rhi::vulkan::VulkanRenderer::RenderResult::NeedsResize)
+        {
+            app.recreateSwapChain(gui);
+        }
+    };
+    drawLoadingFrame();
+    app.recreateSwapChain(gui);
+    drawLoadingFrame();
+
+    // A missing resource must leave presentation, resize and retry usable.
+    app.contentLoadConfig_ = config.demoContent;
+    app.contentLoadConfig_.pbrVertexShader = "__missing_startup_shader__.spv";
+    app.startContentLoading();
+    auto loadingDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (app.contentLoadStatus_.state == editor::ContentLoadState::Preparing &&
+        std::chrono::steady_clock::now() < loadingDeadline)
+    {
+        app.resourcePreparation().advance();
+        app.updateContentLoading();
+        drawLoadingFrame();
+    }
+    if (app.contentLoadStatus_.state != editor::ContentLoadState::Failed ||
+        !app.renderer || app.renderer.sceneReady() ||
+        !app.assetManager.textureHandles().empty())
+    {
+        throw std::runtime_error("failed content import did not preserve the empty GUI session");
+    }
+    app.recreateSwapChain(gui);
+    drawLoadingFrame();
+
+    app.contentLoadConfig_ = config.demoContent;
+    app.startContentLoading();
+    std::size_t uploadFrames = 0;
+    loadingDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+    while (app.contentLoadStatus_.state != editor::ContentLoadState::Ready &&
+        std::chrono::steady_clock::now() < loadingDeadline)
+    {
+        app.resourcePreparation().advance();
+        app.updateContentLoading();
+        if (app.contentLoadStatus_.state == editor::ContentLoadState::Failed)
+        {
+            throw std::runtime_error(app.contentLoadStatus_.message);
+        }
+        if (app.contentLoadStatus_.state == editor::ContentLoadState::Ready)
+        {
+            break;
+        }
+        if (!app.assetManager.textureHandles().empty() || !app.scene.nodes().empty())
+        {
+            throw std::runtime_error("partially loaded content leaked into the live GUI");
+        }
+        if (app.contentLoadStatus_.state == editor::ContentLoadState::Uploading)
+        {
+            ++uploadFrames;
+        }
+        drawLoadingFrame();
+    }
+    if (!app.renderer.sceneReady() || uploadFrames == 0)
+    {
+        throw std::runtime_error("asynchronous content loading failed to render GUI upload frames");
+    }
+    const auto pipelineStats = app.renderer.pipelineCacheStatistics();
+    if (pipelineStats.creations < 2)
+        throw std::runtime_error("scene/present creation bypassed the pipeline cache");
+    app.recreateSwapChain(gui);
+    const auto resizedPipelineStats = app.renderer.pipelineCacheStatistics();
+    if (resizedPipelineStats.creations != pipelineStats.creations ||
+        (config.outputMode == rhi::vulkan::VulkanRenderer::OutputMode::Runtime &&
+         resizedPipelineStats.hits <= pipelineStats.hits))
+        throw std::runtime_error("compatible resize did not reuse the cached present pipeline");
+    if (app.renderer.scenePreparationStatus().state != render::ScenePreparationState::Activated ||
+        app.preparedContent_)
+    {
+        throw std::runtime_error("scene activation did not complete the CPU/GPU handoff");
+    }
+    bool replacementRejected = false;
+    try { app.renderer.beginScenePreparation(app.renderAssets, {}); }
+    catch (const std::logic_error&) { replacementRejected = true; }
+    app.renderer.cancelScenePreparation();
+    if (!replacementRejected || !app.renderer.sceneReady() ||
+        !app.renderAssets.materialTemplate(app.demoContent.materialTemplate))
+    {
+        throw std::runtime_error("preparation request or cancellation destroyed the activated scene");
+    }
+    // Every render asset type is reachable through the backend-neutral frontend
+    // port. Models are expanded here, before crossing that boundary.
+    std::array<bool, 6> frontendTypes{};
+    std::function<void(const render::ResourceAssetSnapshot&)> verifyFrontend;
+    verifyFrontend = [&](const render::ResourceAssetSnapshot& snapshot)
+    {
+        frontendTypes[snapshot.index()] = true;
+        std::visit([&](const auto& source)
+        {
+            const auto loaded = app.resourcePreparation().prepare(app.assetManager, source.version.handle);
+            if (!loaded.accepted() || loaded.disposition != render::ResourcePreparationDisposition::CacheHit ||
+                app.resourcePreparation().status(loaded.ticket).state != render::ResourcePreparationState::Ready)
+                throw std::runtime_error("frontend resource did not reuse the scene cache");
+            app.resourcePreparation().release(loaded.ticket);
+            if (source.dependencies)
+                for (const auto& dependency : source.dependencies->direct)
+                    verifyFrontend(render::resourceSnapshot(dependency));
+        }, snapshot);
+    };
+    const auto sceneMeshes = render::collectModelMeshes(app.assetManager, {app.demoContent.model});
+    for (auto mesh : sceneMeshes)
+        verifyFrontend(app.assetManager.snapshot(mesh));
+    if (!std::all_of(frontendTypes.begin(), frontendTypes.end(), [](bool seen) { return seen; }))
+        throw std::runtime_error("frontend preparation did not cover all six render asset types");
+    if (!app.renderAssets.shaderProgram(app.demoContent.presentProgram))
+        throw std::runtime_error("default scene did not prepare its present program");
+    // Loading must warm every referenced material, including currently invisible ones.
+    const auto firstFrame = app.makeRenderFrame();
+    const auto readyPipelines = app.renderer.pipelineCacheStatistics().creations;
+    static_cast<void>(app.renderer.compileDrawList(firstFrame.renderList, app.renderAssets));
+    if (app.renderer.pipelineCacheStatistics().creations != readyPipelines ||
+        app.renderer.scenePreparationStatus().pipelinesTotal == 0 ||
+        app.renderer.scenePreparationStatus().pipelinesCompleted != app.renderer.scenePreparationStatus().pipelinesTotal)
+        throw std::runtime_error("scene became ready before material pipelines were warm");
+
+    // Incremental resource admission remains separate from pass-specific prewarming.
+    asset::MaterialAsset::CreateInfo pipelineMaterial;
+    pipelineMaterial.name = "Incremental AlphaClip pipeline";
+    pipelineMaterial.materialTemplate = app.demoContent.materialTemplate;
+    pipelineMaterial.renderState.alphaClipEnabled = true;
+    pipelineMaterial.renderState.doubleSided = true;
+    pipelineMaterial.parameters = {
+        {"baseColorFactor", glm::vec4(1.0f)}, {"emissiveFactor", glm::vec3(0.0f)},
+        {"metallicFactor", 0.0f}, {"roughnessFactor", 1.0f}};
+    pipelineMaterial.textures = {
+        {"baseColorTexture", app.demoContent.defaultTexture},
+        {"metallicRoughnessTexture", app.demoContent.defaultDataTexture},
+        {"normalTexture", app.demoContent.defaultNormalTexture},
+        {"occlusionTexture", app.demoContent.defaultDataTexture},
+        {"emissiveTexture", app.demoContent.defaultTexture}};
+    const auto incrementalMaterial = app.assetManager.createMaterial(pipelineMaterial);
+    if (app.resourcePreparation().prewarmPipelines({incrementalMaterial}).accepted())
+        throw std::runtime_error("prewarm accepted a nonresident material");
+    const auto materialRequest = app.resourcePreparation().prepare(app.assetManager, incrementalMaterial);
+    if (!materialRequest.accepted()) throw std::runtime_error(materialRequest.error);
+    const auto materialDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (!render::resourcePreparationFinished(app.resourcePreparation().status(materialRequest.ticket).state) &&
+           std::chrono::steady_clock::now() < materialDeadline)
+        app.resourcePreparation().advance();
+    if (app.resourcePreparation().status(materialRequest.ticket).state != render::ResourcePreparationState::Ready)
+        throw std::runtime_error("incremental material preparation failed");
+    app.resourcePreparation().release(materialRequest.ticket);
+    const auto beforePrewarm = app.renderer.pipelineCacheStatistics().creations;
+    const auto prewarm = app.resourcePreparation().prewarmPipelines({incrementalMaterial});
+    const auto sharedPrewarm = app.resourcePreparation().prewarmPipelines({incrementalMaterial});
+    if (!prewarm.accepted() || !sharedPrewarm.accepted() ||
+        app.renderer.pipelineCacheStatistics().creations != beforePrewarm)
+        throw std::runtime_error("incremental prewarm created pipelines during admission");
+    app.resourcePreparation().cancelPipelines(prewarm.ticket);
+    app.resourcePreparation().releasePipelines(prewarm.ticket);
+    const auto pipelineDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (!render::pipelinePreparationFinished(
+               app.resourcePreparation().pipelineStatus(sharedPrewarm.ticket).state) &&
+           std::chrono::steady_clock::now() < pipelineDeadline)
+    {
+        app.resourcePreparation().advance();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (app.resourcePreparation().pipelineStatus(sharedPrewarm.ticket).state != render::PipelinePreparationState::Ready ||
+        app.renderer.pipelineCacheStatistics().creations != beforePrewarm + 1)
+        throw std::runtime_error("incremental shared pipeline request failed");
+    app.resourcePreparation().releasePipelines(sharedPrewarm.ticket);
+    auto warmedFrame = firstFrame;
+    auto& draw = warmedFrame.renderList.opaque.front();
+    draw.material = incrementalMaterial;
+    draw.materialKey = render::makeMaterialKey(draw.material);
+    draw.pipelineKey = render::makePipelineVariantKey(pipelineMaterial.materialTemplate, pipelineMaterial.renderState);
+    draw.queue = render::renderQueueFor(pipelineMaterial.renderState);
+    const auto warmedCreations = app.renderer.pipelineCacheStatistics().creations;
+    static_cast<void>(app.renderer.compileDrawList(warmedFrame.renderList, app.renderAssets));
+    if (app.renderer.pipelineCacheStatistics().creations != warmedCreations)
+        throw std::runtime_error("incremental prewarm did not match draw compilation");
+    const auto warmedHit = app.resourcePreparation().prewarmPipelines({incrementalMaterial});
+    if (!warmedHit.accepted() || warmedHit.disposition != render::ResourcePreparationDisposition::CacheHit)
+        throw std::runtime_error("incremental prewarm did not reuse the completed cache entry");
+    app.resourcePreparation().releasePipelines(warmedHit.ticket);
+
+    // Verify App config reaches every material created via scene dependencies.
+    const bool mappedParameters = render::hasMemoryProperty(
+        config.resourcePreparation.material.parameterMemory, render::MaterialParameterMemory::HostVisible);
+    for (auto handle : app.assetManager.materialHandles())
+    {
+        const auto* gpu = app.renderAssets.tryMaterial(handle);
+        if (!gpu) continue;
+        const auto& buffer = *gpu->parameterBufferResource();
+        if (mappedParameters)
+        {
+            if (!(buffer.memoryProperties() & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ||
+                (buffer.usage() & VK_BUFFER_USAGE_TRANSFER_DST_BIT))
+                throw std::runtime_error("renderer ignored the mapped material policy");
+        }
+        else if (!(buffer.memoryProperties() & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ||
+                 !(buffer.usage() & VK_BUFFER_USAGE_TRANSFER_DST_BIT))
+            throw std::runtime_error("renderer ignored the staging material policy");
+    }
+    // Incremental texture preparation while the existing scene keeps drawing.
+    asset::TextureAsset::CreateInfo incrementalInfo;
+    incrementalInfo.name = "Incremental upload during scene rendering";
+    incrementalInfo.width = incrementalInfo.height = 1;
+    incrementalInfo.format = asset::TextureFormat::RGBA8UNorm;
+    incrementalInfo.payload.assign(4, std::byte{0xff});
+    const auto incrementalHandle = app.assetManager.createTexture(incrementalInfo);
+    auto incremental =
+        app.resourcePreparation().prepare(app.assetManager, incrementalHandle);
+    if (!incremental.accepted()) throw std::runtime_error(incremental.error);
+    const auto incrementalDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (std::chrono::steady_clock::now() < incrementalDeadline)
+    {
+        app.resourcePreparation().advance();
+        app.imguiLayer.beginFrame();
+        app.drawGui(gui);
+        const auto result = app.renderer.render(app.makeRenderFrame(), app.renderAssets, app.imguiLayer.endFrame());
+        if (result == rhi::vulkan::VulkanRenderer::RenderResult::NeedsResize) app.recreateSwapChain(gui);
+        if (app.resourcePreparation().status(incremental.ticket).state ==
+            render::ResourcePreparationState::Ready)
+        {
+            break;
+        }
+    }
+    if (!app.renderer.sceneReady() || !app.renderAssets.tryTexture(incrementalHandle))
+        throw std::runtime_error("incremental texture upload did not preserve the active scene");
+    app.resourcePreparation().release(incremental.ticket);
+    std::clog << "[Startup] GUI remained active for " << uploadFrames
+        << " upload frames; failure, resize and retry passed\n";
+    // Replace a live mesh via the same frontend port while retaining the scene
+    // setup. Keep draw ranges compatible while the CPU/GPU revisions overlap.
+    const auto meshHandle = sceneMeshes.front();
+    const auto& oldMesh = app.assetManager.mesh(meshHandle);
+    asset::MeshAsset::CreateInfo replacementMesh;
+    replacementMesh.name = "Frontend mesh revision";
+    replacementMesh.vertices = oldMesh.vertices();
+    replacementMesh.indices = oldMesh.indices();
+    replacementMesh.submeshes = oldMesh.submeshes();
+    replacementMesh.vertices.front().position.x += 0.001f;
+    const auto oldVertexBuffer = app.renderAssets.mesh(meshHandle).vertexBuffer();
+    static_cast<void>(app.assetManager.replaceMesh(meshHandle, asset::MeshAsset(std::move(replacementMesh))));
+    const auto meshUpdate = app.resourcePreparation().prepare(app.assetManager, meshHandle);
+    if (!meshUpdate.accepted()) throw std::runtime_error(meshUpdate.error);
+    const auto meshDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    bool meshReady = false;
+    while (std::chrono::steady_clock::now() < meshDeadline)
+    {
+        app.resourcePreparation().advance();
+        const auto status = app.resourcePreparation().status(meshUpdate.ticket);
+        if (status.state == render::ResourcePreparationState::Failed)
+            throw std::runtime_error(status.error);
+        app.imguiLayer.beginFrame();
+        app.drawGui(gui);
+        if (app.renderer.render(app.makeRenderFrame(), app.renderAssets, app.imguiLayer.endFrame()) ==
+            rhi::vulkan::VulkanRenderer::RenderResult::NeedsResize)
+            app.recreateSwapChain(gui);
+        if (status.state == render::ResourcePreparationState::Ready)
+        {
+            meshReady = true;
+            break;
+        }
+    }
+    if (!meshReady || !app.renderer.sceneReady() ||
+        app.renderAssets.mesh(meshHandle).vertexBuffer() == oldVertexBuffer)
+        throw std::runtime_error("frontend mesh revision did not replace the live GPU buffer");
+    app.resourcePreparation().release(meshUpdate.ticket);
     asset::TextureAssetHandle editorPreviewTexture{};
     const std::vector<render::RenderCandidate> previewCandidates =
         render::SceneRenderExtractor{}.extract(app.scene, app.assetManager);
@@ -1111,11 +1393,91 @@ void AppSmokeTests::runRenderTest(
         throw std::runtime_error(
             "render test found no uploaded source-backed texture");
     }
-    validateGpuTextureReplacement(
-        app.vulkanContext.device(),
-        app.assetManager,
-        app.renderAssets,
-        editorPreviewTexture);
+    // Scene publication records the same domain/version used by standalone requests,
+    // even after the prepared AssetManager has been moved into App.
+    auto cached = app.resourcePreparation().prepare(app.assetManager, editorPreviewTexture);
+    if (!cached.accepted() ||
+        cached.disposition != render::ResourcePreparationDisposition::CacheHit)
+    {
+        throw std::runtime_error("scene texture did not participate in versioned cache reuse");
+    }
+    app.resourcePreparation().release(cached.ticket);
+    const auto oldView = app.renderAssets.texture(editorPreviewTexture).view();
+    const auto oldPreview = app.guiRenderBridge.preview(editorPreviewTexture);
+    struct MaterialBindingBeforeUpdate
+    {
+        asset::MaterialAssetHandle handle;
+        VkBuffer parameters;
+        VkDescriptorSet descriptor;
+    };
+    std::vector<MaterialBindingBeforeUpdate> oldBindings;
+    for (const auto& candidate : previewCandidates)
+    {
+        const auto& textures = app.assetManager.material(candidate.material).textures();
+        if (std::find(textures.begin(), textures.end(), editorPreviewTexture) != textures.end())
+        {
+            const auto& gpu = app.renderAssets.material(candidate.material);
+            oldBindings.push_back({candidate.material, gpu.parameterBuffer(), gpu.descriptorSet()});
+        }
+    }
+    auto updateInfo = cloneTextureCreateInfo(app.assetManager.texture(editorPreviewTexture),
+                                             "Versioned scene texture replacement");
+    static_cast<void>(app.assetManager.replaceTexture(editorPreviewTexture,
+                                                      asset::TextureAsset(std::move(updateInfo))));
+    const auto update = app.resourcePreparation().prepare(app.assetManager, editorPreviewTexture);
+    if (!update.accepted())
+    {
+        throw std::runtime_error(update.error);
+    }
+    const auto updateDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    bool updateReady = false;
+    while (std::chrono::steady_clock::now() < updateDeadline)
+    {
+        app.resourcePreparation().advance();
+        // GUI refresh is automatic; this path deliberately does not call invalidatePreview.
+        const auto updatedPreview = app.guiRenderBridge.preview(editorPreviewTexture);
+        if (!updatedPreview)
+        {
+            throw std::runtime_error("updated texture preview disappeared");
+        }
+        app.imguiLayer.beginFrame();
+        app.drawGui(gui);
+        ImGui::Begin("Versioned texture update test");
+        ImGui::Image(ImTextureRef(static_cast<ImTextureID>(updatedPreview.textureId)),
+                     ImVec2(32, 32));
+        ImGui::End();
+        const auto drawResult =
+            app.renderer.render(app.makeRenderFrame(), app.renderAssets, app.imguiLayer.endFrame());
+        if (drawResult == rhi::vulkan::VulkanRenderer::RenderResult::NeedsResize)
+        {
+            app.recreateSwapChain(gui);
+        }
+        const auto state = app.resourcePreparation().status(update.ticket);
+        if (state.state == render::ResourcePreparationState::Failed)
+        {
+            throw std::runtime_error(state.error);
+        }
+        if (state.state == render::ResourcePreparationState::Ready)
+        {
+            updateReady = true;
+            break;
+        }
+    }
+    if (!updateReady || app.renderAssets.texture(editorPreviewTexture).view() == oldView)
+    {
+        throw std::runtime_error("versioned scene texture was not replaced");
+    }
+    for (const auto& before : oldBindings)
+    {
+        const auto& gpu = app.renderAssets.material(before.handle);
+        if (gpu.parameterBuffer() != before.parameters || gpu.descriptorSet() == before.descriptor)
+            throw std::runtime_error("live texture update copied parameters or reused a published set");
+    }
+    if (app.guiRenderBridge.preview(editorPreviewTexture).textureId == oldPreview.textureId)
+        throw std::runtime_error("live preview update reused its old descriptor");
+    app.resourcePreparation().release(update.ticket);
+    validateGpuTextureReplacement(app.renderer, app.assetManager,
+                                  app.renderAssets, editorPreviewTexture);
     if (config.outputMode == rhi::vulkan::VulkanRenderer::OutputMode::Editor)
     {
         const importer::texture::TextureImportRecord* before =
@@ -1149,6 +1511,7 @@ void AppSmokeTests::runRenderTest(
             std::chrono::steady_clock::now() + std::chrono::seconds(30);
         while (std::chrono::steady_clock::now() < deadline)
         {
+            app.resourcePreparation().advance();
             app.processPendingTextureReimport();
             const importer::texture::TextureImportRecord* current =
                 app.textureImports.find(editorPreviewTexture);
@@ -1168,6 +1531,109 @@ void AppSmokeTests::runRenderTest(
             throw std::runtime_error(
                 "Editor texture reimport did not commit KTX2, CPU asset, and GPU asset together");
         }
+        const auto committed = app.assetManager.snapshot(editorPreviewTexture);
+        if (app.renderAssets.inspectPreparation(rhi::vulkan::preparationTarget(app.renderAssets, committed)).resident != committed.version.contentRevision)
+            throw std::runtime_error("reimport CPU/GPU revisions diverged");
+
+        // Inject an already cooked candidate to control cancellation and final-file
+        // installation failures without relying on encoder or GPU timing.
+        const auto finalPath = after->cookedPath;
+        const auto originalVersion = app.assetManager.version(editorPreviewTexture);
+        const auto originalView = app.renderAssets.texture(editorPreviewTexture).view();
+        const auto importRevision = after->revision;
+        const auto readBytes = [](const std::filesystem::path& path) {
+            std::ifstream stream(path, std::ios::binary);
+            return std::vector<char>(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+        };
+        const auto originalFile = readBytes(finalPath);
+        const auto stagePath = finalPath.parent_path() / "rubia-reimport-failure-test.ktx2";
+        const auto blockerPath = finalPath.parent_path() / "rubia-reimport-parent-blocker.tmp";
+        const auto inject = [&](bool badDestination) {
+            editor::App::PreparedTextureReimport candidate;
+            candidate.request = {editorPreviewTexture, app.textureImports.find(editorPreviewTexture)->settings};
+            candidate.record = *app.textureImports.find(editorPreviewTexture);
+            candidate.baseVersion = app.assetManager.version(editorPreviewTexture);
+            candidate.domain = app.assetManager.domain();
+            candidate.replacementAsset = asset::TextureAsset(cloneTextureCreateInfo(app.assetManager.texture(editorPreviewTexture), "candidate only"));
+            candidate.stagedPath = stagePath;
+            { std::ofstream file(stagePath, std::ios::binary); file << "candidate"; }
+            if (badDestination)
+            {
+                { std::ofstream file(blockerPath); file << "parent is a file"; }
+                candidate.record.cookedPath = blockerPath / "cannot-install.ktx2";
+            }
+            app.activeTextureReimport_ = editorPreviewTexture;
+            app.activeTextureReimportStagedPath_ = stagePath;
+            app.textureImports.markStarted(editorPreviewTexture);
+            std::promise<editor::App::PreparedTextureReimport> promise;
+            app.textureReimportFuture_ = promise.get_future();
+            promise.set_value(std::move(candidate));
+            app.processPendingTextureReimport(); // Stage CPU candidate without changing registry.
+            app.processPendingTextureReimport(); // Admit and attach publication transaction.
+            if (!app.textureReimportTransaction_ || !app.assetManager.isCurrent(originalVersion) ||
+                app.renderAssets.texture(editorPreviewTexture).view() != originalView || readBytes(finalPath) != originalFile)
+                throw std::runtime_error("reimport exposed candidate content before publication");
+        };
+        inject(false);
+        app.discardTextureReimport();
+        app.resourcePreparation().advance();
+        if (std::filesystem::exists(stagePath) || !app.assetManager.isCurrent(originalVersion) ||
+            app.renderAssets.texture(editorPreviewTexture).view() != originalView || readBytes(finalPath) != originalFile)
+            throw std::runtime_error("cancelled reimport changed live CPU/GPU/file state");
+        inject(true);
+        const auto failureDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (app.textureReimportTransaction_ && std::chrono::steady_clock::now() < failureDeadline)
+        {
+            app.resourcePreparation().advance();
+            app.processPendingTextureReimport();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        auto failed = app.textureImports.find(editorPreviewTexture);
+        if (app.textureReimportTransaction_ || failed->reimporting || failed->lastError.empty() ||
+            failed->revision != importRevision || std::filesystem::exists(stagePath) ||
+            !app.assetManager.isCurrent(originalVersion) || app.renderAssets.texture(editorPreviewTexture).view() != originalView ||
+            readBytes(finalPath) != originalFile)
+            throw std::runtime_error("failed reimport file installation changed committed content");
+        std::filesystem::remove(blockerPath);
+
+        // Force failure AFTER file.install(): another texture changes a material
+        // binding captured by this candidate. Its failed GPU publication must restore disk.
+        inject(false);
+        app.resourcePreparation().advance(); // Capture/dispatch only; cannot publish this job yet.
+        asset::TextureAssetHandle sibling;
+        for (auto materialHandle : app.assetManager.materialHandles())
+        {
+            const auto& textures = app.assetManager.material(materialHandle).textures();
+            if (!app.renderAssets.tryMaterial(materialHandle) ||
+                std::find(textures.begin(), textures.end(), editorPreviewTexture) == textures.end()) continue;
+            for (auto textureHandle : textures)
+                if (textureHandle != editorPreviewTexture) { sibling = textureHandle; break; }
+            if (sibling) break;
+        }
+        if (!sibling) throw std::runtime_error("reimport rollback fixture has no shared material");
+        static_cast<void>(app.assetManager.replaceTexture(sibling,
+            asset::TextureAsset(cloneTextureCreateInfo(app.assetManager.texture(sibling), "concurrent binding update"))));
+        auto target = rhi::vulkan::preparationTarget(app.renderAssets, app.assetManager.snapshot(sibling));
+        auto siblingImage = app.renderAssets.texture(sibling).snapshot();
+        auto bindings = app.renderAssets.captureTextureRebind(sibling, target.revision);
+        rhi::vulkan::RenderAssetCache::buildTextureRebind(app.vulkanContext.device(), *bindings, siblingImage);
+        rhi::vulkan::RetiredResources retired;
+        app.renderAssets.acceptPreparation(target);
+        app.renderAssets.publishPreparedTexture(retired, target, std::move(siblingImage), std::move(bindings));
+        const auto rollbackDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (app.textureReimportTransaction_ && std::chrono::steady_clock::now() < rollbackDeadline)
+        {
+            app.resourcePreparation().advance();
+            app.processPendingTextureReimport();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        failed = app.textureImports.find(editorPreviewTexture);
+        if (app.textureReimportTransaction_ || failed->lastError.find("bindings changed") == std::string::npos ||
+            !app.assetManager.isCurrent(originalVersion) || app.renderAssets.texture(editorPreviewTexture).view() != originalView ||
+            readBytes(finalPath) != originalFile || std::filesystem::exists(stagePath))
+            throw std::runtime_error("GPU publication failure did not roll back installed KTX2");
+        app.renderer.waitIdle(); // Test owns the manually replaced sibling bindings.
+        retired.clear();
     }
     try
     {
@@ -1209,7 +1675,7 @@ void AppSmokeTests::runRenderTest(
             {
                 validateVulkanDrawListCompilation(
                     renderFrame,
-                    app.renderAssets);
+                    app.renderAssets, app.renderer);
                 std::clog
                     << "[Render] Visible submesh draws="
                     << renderFrame.renderList.size()

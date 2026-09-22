@@ -20,6 +20,11 @@ void drawProperty(const char* label, const char* value);
 void drawProperty(const char* label, uint32_t value);
 void drawProperty(const char* label, float value);
 
+// End a row only when beginPropertyRow returns true. Framed rows align labels
+// with input controls and make those controls fill the value column.
+[[nodiscard]] bool beginPropertyRow(const char* label, bool framed = false);
+void endPropertyRow();
+
 [[nodiscard]] bool drawReference(
     const char* label,
     const char* value,

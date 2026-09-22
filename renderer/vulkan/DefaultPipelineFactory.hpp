@@ -2,21 +2,14 @@
 
 #include "vulkan/GraphicsPipeline.hpp"
 
-namespace rubia::asset
-{
-class ShaderAsset;
-}
-
 namespace rubia::rhi::vulkan
 {
 
 [[nodiscard]] GraphicsPipeline::CreateInfo makeDefaultScenePipeline(
-    const asset::ShaderAsset& vertexShader,
-    const asset::ShaderAsset& fragmentShader,
-    VkDescriptorSetLayout materialDescriptorSetLayout);
+    std::shared_ptr<const GpuShaderProgram> program,
+    std::shared_ptr<const DescriptorSetLayoutState> materialDescriptorSetLayout);
 
 [[nodiscard]] GraphicsPipeline::CreateInfo makeDefaultPresentPipeline(
-    const asset::ShaderAsset& vertexShader,
-    const asset::ShaderAsset& fragmentShader);
+    std::shared_ptr<const GpuShaderProgram> program);
 
 } // namespace rubia::rhi::vulkan

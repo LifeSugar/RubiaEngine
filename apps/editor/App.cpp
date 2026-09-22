@@ -2,7 +2,6 @@
 
 #include "ApplicationGui.hpp"
 #include "content/DemoContent.hpp"
-#include "vulkan/DefaultPipelineFactory.hpp"
 #include "render/RenderFrameBuilder.hpp"
 #include "RuntimeGui.hpp"
 
@@ -15,6 +14,8 @@ namespace rubia::editor
 
 App::~App()
 {
+    resourcePreparation_.cancelAll();
+    discardContentLoading();
     discardTextureReimport();
     // Destruction after an exception must not release resources still in use by
     // the GPU. Member destruction then proceeds in reverse dependency order.
@@ -34,27 +35,31 @@ void App::run()
 
 void App::run(const RunConfig& config, ApplicationGui& gui)
 {
-    initWindow(config, true);
-    initVulkan(config);
-    initImGui(config);
-    guiRenderBridge.attach(renderer, renderAssets);
-    ApplicationGuiContext guiContext{
-        assetManager,
-        scene,
-        guiRenderBridge,
-        &textureImports};
-    gui.attach(guiContext);
+    bool guiAttached = false;
     try
     {
+        initWindow(config, true);
+        initVulkan(config);
+        if (config.initializeEmptyScene) startEmptyScene(config);
+        setupCamera();
+        initImGui(config);
+        guiRenderBridge.attach(renderer, renderAssets);
+        ApplicationGuiContext guiContext{
+            assetManager, scene, guiRenderBridge, &textureImports, &contentLoadStatus_,
+            &resourcePreparation_, demoContent.defaultMaterial};
+        gui.attach(guiContext);
+        guiAttached = true;
         mainLoop(gui);
     }
     catch (...)
     {
+        discardContentLoading();
         renderer.waitIdle();
-        gui.detach();
+        if (guiAttached) gui.detach();
         cleanup();
         throw;
     }
+    discardContentLoading();
     renderer.waitIdle();
     gui.detach();
     cleanup();
@@ -83,43 +88,21 @@ void App::initVulkan(const RunConfig& config)
     contextCreateInfo.preferIntegratedGpu = preferIntegratedGpu;
     vulkanContext.create(window, contextCreateInfo);
 
-    demoContent = DemoContentLoader::load(
-        assetManager,
-        scene,
-        config.demoContent,
-        &textureImports);
-
-    const rhi::vulkan::Device& device = vulkanContext.device();
-    rhi::vulkan::CommandPool uploadCommandPool(
-        device,
-        device.graphicsQueueFamily(),
-        VK_COMMAND_POOL_CREATE_TRANSIENT_BIT);
-    rhi::vulkan::UploadContext uploadContext(device, uploadCommandPool);
-    renderAssets.create(
-        device,
-        uploadContext,
-        assetManager,
-        {demoContent.model});
-
     rhi::vulkan::VulkanRenderer::CreateInfo rendererCreateInfo{};
     rendererCreateInfo.context = &vulkanContext;
     rendererCreateInfo.framebufferExtent = window.framebufferExtent();
     rendererCreateInfo.framesInFlight = kMaxFramesInFlight;
     rendererCreateInfo.outputMode = config.outputMode;
-    rendererCreateInfo.graphicsPipeline = rhi::vulkan::makeDefaultScenePipeline(
-        assetManager.shader(demoContent.pbrVertexShader),
-        assetManager.shader(demoContent.pbrFragmentShader),
-        renderAssets.materialDescriptorSetLayout());
-    rendererCreateInfo.presentPipeline = rhi::vulkan::makeDefaultPresentPipeline(
-        assetManager.shader(demoContent.presentVertexShader),
-        assetManager.shader(demoContent.presentFragmentShader));
-    renderer.create(rendererCreateInfo);
+    rendererCreateInfo.resourcePreparation = config.resourcePreparation;
+    renderer.createPresentation(rendererCreateInfo);
 
-    setupCamera();
 }
 
 void App::cleanup()
 {
+    resourcePreparation_.cancelAll();
+    discardContentLoading();
+    contentLoadStatus_ = {};
     discardTextureReimport();
     renderer.waitIdle();
     guiRenderBridge.detach();
@@ -181,14 +164,20 @@ void App::mainLoop(ApplicationGui& gui)
             recreateSwapChain(gui);
         }
 
+        resourcePreparation_.advance();
+        updateContentLoading();
         processPendingTextureReimport();
+        gui.update({assetManager, scene, guiRenderBridge, &textureImports,
+                    &contentLoadStatus_, &resourcePreparation_, demoContent.defaultMaterial});
 
         imguiLayer.beginFrame();
         drawGui(gui);
         ImDrawData* uiDrawData = imguiLayer.endFrame();
 
         const rhi::vulkan::VulkanRenderer::RenderResult renderResult =
-            renderer.render(makeRenderFrame(), renderAssets, uiDrawData);
+            renderer.sceneReady()
+                ? renderer.render(makeRenderFrame(), renderAssets, uiDrawData)
+                : renderer.renderGui(uiDrawData);
         if (renderResult == rhi::vulkan::VulkanRenderer::RenderResult::NeedsResize)
         {
             requestSwapChainRecreation();
@@ -202,7 +191,9 @@ void App::drawGui(ApplicationGui& gui)
         assetManager,
         scene,
         guiRenderBridge,
-        &textureImports};
+        &textureImports,
+        &contentLoadStatus_,
+        &resourcePreparation_, demoContent.defaultMaterial};
     const ApplicationGuiFrameOutput output = gui.draw(context);
     for (const importer::texture::TextureReimportRequest& request : output.textureReimports)
     {
@@ -227,6 +218,20 @@ void App::drawGui(ApplicationGui& gui)
                 "Application GUI returned an invalid scene aspect ratio");
         }
         camera.setAspect(aspect);
+    }
+    if (output.sceneFocus && output.sceneFocus->valid())
+    {
+        const auto& bounds = *output.sceneFocus;
+        const float radius = std::max(0.01f, glm::length(bounds.extents()));
+        auto config = camera.getConfig();
+        const float halfVertical = glm::radians(config.fov * 0.5f);
+        const float halfHorizontal = std::atan(std::tan(halfVertical) * config.aspectRatio);
+        const float distance = radius * 1.2f / std::sin(std::min(halfVertical, halfHorizontal));
+        config.nearPlane = std::max(0.001f, radius * 0.001f);
+        config.farPlane = std::max(100.0f, distance + radius * 4.0f);
+        camera.setConfig(config);
+        camera.setRotation(glm::vec3(-20.0f, 30.0f, 0.0f));
+        camera.setPosition(bounds.center() - camera.getForwardVector() * distance);
     }
 }
 

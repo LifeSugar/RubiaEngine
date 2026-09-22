@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <vector>
+#include <memory>
 
 namespace rubia::rhi::vulkan
 {
@@ -27,15 +28,20 @@ public:
 
     void resizeSceneViewport(uint32_t width, uint32_t height) override;
     [[nodiscard]] render::ApplicationGuiRenderFrame currentFrame() override;
+    /// Resolve each GUI frame; do not reuse tokens across texture publications.
     [[nodiscard]] render::ApplicationGuiTexture preview(
         asset::TextureAssetHandle texture) override;
+    /// Explicit synchronous invalidation; caller must have completed GPU users.
+    /// Ordinary publication changes are handled by preview() with retirement.
     void invalidatePreview(asset::TextureAssetHandle texture) noexcept override;
 
 private:
+    struct PreviewDescriptor;
     struct TextureEntry
     {
         asset::TextureAssetHandle texture;
-        VkDescriptorSet descriptor = VK_NULL_HANDLE;
+        std::shared_ptr<const PreviewDescriptor> descriptor;
+        uint64_t publication = 0;
     };
 
     void registerViewportTextures();

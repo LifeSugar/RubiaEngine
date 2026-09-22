@@ -7,6 +7,7 @@ target_sources(rubia_engine PRIVATE
     CullingSystem.hpp
     MaterialKey.hpp
     PipelineVariantKey.hpp
+    PipelinePreparationTypes.hpp
     RenderCandidate.hpp
     RenderData.hpp
     RenderFrame.hpp
@@ -23,4 +24,11 @@ target_sources(rubia_engine PRIVATE
     RenderView.hpp
     SceneRenderExtractor.cpp
     SceneRenderExtractor.hpp
+    SceneResourcePreparation.cpp
+    ResourcePreparationSource.hpp
+    ResourcePreparationTypes.hpp
+    ResourcePreparationOptions.hpp
+    ResourcePreparation.hpp
+    ResourcePreparation.cpp
+    SceneResourcePreparation.hpp
 )

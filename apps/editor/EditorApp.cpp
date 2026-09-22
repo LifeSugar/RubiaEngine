@@ -7,7 +7,8 @@ namespace rubia::editor
 
 void EditorApp::run()
 {
-    app_.run(makeRunConfig(), editorLayer_);
+    App::RunConfig config = makeRunConfig();
+    app_.run(config, editorLayer_);
 }
 
 void EditorApp::runRenderTest()
@@ -25,6 +26,7 @@ App::RunConfig EditorApp::makeRunConfig()
     config.windowHeight = 900;
     config.windowTitle = "Vulkan Editor";
     config.enableDocking = true;
+    config.initializeEmptyScene = true;
     config.imguiIniFilename = "editor_imgui.ini";
     config.outputMode = rhi::vulkan::VulkanRenderer::OutputMode::Editor;
     config.demoContent = DemoContentLoader::CreateInfo{
