@@ -215,14 +215,29 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
         requireGallery(pipelineFor(materials[7])==pipelineFor(materials[8]), "transparent tint/alpha split the PSO");
         requireGallery(pipelineFor(materials[2])!=pipelineFor(materials[3]), "different VS reused the wrong PSO");
         requireGallery(pipelineFor(materials[2])!=pipelineFor(materials[9]), "cull mode reused the wrong PSO");
-        std::set<const rhi::vulkan::GraphicsPipeline*> pipelines;
+        std::set<const rhi::PipelineResource*> pipelines;
         for(const auto& d:draw.opaque) pipelines.insert(d.pipeline.get());
         for(const auto& d:draw.transparent) pipelines.insert(d.pipeline.get());
         requireGallery(pipelines.size()==9,"draw compiler failed to share PSOs");
+        bool resizeBeforeNextFrame = false;
+        const auto renderGalleryFrame = [&](const RenderFrame& renderFrame) {
+            for (uint32_t attempt = 0; attempt < 32; ++attempt) {
+                app.window.pollEvents();
+                if (resizeBeforeNextFrame) {
+                    app.recreateSwapChain(gui);
+                    resizeBeforeNextFrame = false;
+                }
+                const auto slot = app.renderer.currentFrameIndex();
+                const auto result = app.renderer.render(renderFrame, app.renderAssets);
+                resizeBeforeNextFrame = rhi::vulkan::VulkanRenderer::needsResize(result);
+                if (rhi::vulkan::VulkanRenderer::wasSubmitted(result))
+                    return slot;
+            }
+            throw std::runtime_error("Preparation gallery: no frame submitted after swapchain retries");
+        };
         uint32_t captureSlot=0;
         for(int i=0;i<4;++i) {
-            captureSlot=app.renderer.currentFrameIndex();
-            requireGallery(app.renderer.render(frame,app.renderAssets)==rhi::vulkan::VulkanRenderer::RenderResult::Rendered,"render failed");
+            captureSlot=renderGalleryFrame(frame);
         }
         requireGallery(app.renderer.pipelineCacheStatistics().creations==beforeDraw.creations,"draw created a PSO after prewarm");
         const auto capture=app.renderer.captureEditorViewport(captureSlot);
@@ -240,9 +255,7 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
             withoutGlass.renderList.objectData.push_back(frame.renderList.objectData.at(item.objectIndex));
             item.objectIndex=static_cast<uint32_t>(withoutGlass.renderList.objectData.size()-1);
         }
-        const auto noGlassSlot=app.renderer.currentFrameIndex();
-        requireGallery(app.renderer.render(withoutGlass,app.renderAssets)==rhi::vulkan::VulkanRenderer::RenderResult::Rendered,
-                       "glass reference frame failed");
+        const auto noGlassSlot=renderGalleryFrame(withoutGlass);
         const auto backdrop=app.renderer.captureEditorViewport(noGlassSlot);
         saveCapture(artifacts/"gallery-without-glass.ppm",backdrop);
         size_t blendedPixels=0;
@@ -258,17 +271,15 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
         app.camera.setRotation(glm::vec3(-25,0,0));
         app.camera.setPosition(glm::vec3(2.35f,1.45f,3.8f)-app.camera.getForwardVector()*10.5f);
         const auto closeupFrame=app.makeRenderFrame();
-        const auto closeupSlot=app.renderer.currentFrameIndex();
-        requireGallery(app.renderer.render(closeupFrame,app.renderAssets)==rhi::vulkan::VulkanRenderer::RenderResult::Rendered,
-                       "glass closeup failed");
+        const auto closeupSlot=renderGalleryFrame(closeupFrame);
         saveCapture(artifacts/"gallery-glass-closeup.ppm",app.renderer.captureEditorViewport(closeupSlot));
         app.camera.setRotation(overviewRotation); app.camera.setPosition(overviewPosition);
         // Replace one shared texture while frames continue rendering. Every subscriber
         // must switch descriptors without changing material UBOs or pipelines.
         const auto texture=textures.at("checker");
         const auto original=assets.texture(texture);
-        std::array<VkDescriptorSet,8> oldSets;
-        std::array<VkBuffer,8> oldBuffers;
+        std::array<rhi::BindingSetRef,8> oldSets;
+        std::array<rhi::BufferRef,8> oldBuffers;
         for(size_t i=2;i<10;++i) {
             oldSets[i-2]=app.renderAssets.material(materials[i]).descriptorSet();
             oldBuffers[i-2]=app.renderAssets.material(materials[i]).parameterBuffer();
@@ -292,9 +303,7 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
                 app.window.pollEvents(); preparation.advance();
                 auto status=preparation.status(first.ticket);
                 requireGallery(status.state!=ResourcePreparationState::Failed,status.error);
-                captureSlot=app.renderer.currentFrameIndex();
-                requireGallery(app.renderer.render(frame,app.renderAssets)==rhi::vulkan::VulkanRenderer::RenderResult::Rendered,
-                               "incremental replacement frame failed");
+                captureSlot=renderGalleryFrame(frame);
                 return status.state==ResourcePreparationState::Ready;
             });
             requireGallery(preparation.status(duplicate.ticket).state==ResourcePreparationState::Ready,"shared revision did not finish");
@@ -331,7 +340,9 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
                   << " Started / " << shared << " Shared / " << cacheHits << " CacheHit; capture: " << artifacts << '\n';
         draw = {}; // Release retained pipeline owners before the device is destroyed.
         if(interactive) app.mainLoop(gui);
-        app.renderer.waitIdle(); gui.detach(); app.cleanup();
+        app.renderer.waitIdle();
+        oldSets = {}; oldBuffers = {};
+        gui.detach(); app.cleanup();
     }
     catch (...) {app.renderer.waitIdle(); gui.detach(); app.cleanup(); throw;}
 }

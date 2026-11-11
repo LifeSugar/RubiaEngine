@@ -6,6 +6,22 @@
 #include <fstream>
 #include <iterator>
 #include <stdexcept>
+#include <cstdlib>
+#include <cerrno>
+#include <cstring>
+#include <thread>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#ifdef __APPLE__
+#include <crt_externs.h>
+#else
+extern char **environ;
+#endif
+#endif
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -22,12 +38,12 @@ asset::ShaderAsset::CreateInfo HlslShaderCompiler::compile(const std::filesystem
                                                            asset::ShaderStage stage,
                                                            const std::string &entryPoint) const
 {
-#ifdef _WIN32
     if (entryPoint.empty() ||
         entryPoint.find_first_not_of(
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::string::npos)
         throw std::invalid_argument("Shader entry point must be an identifier");
     const auto absolute = std::filesystem::canonical(source);
+#ifdef _WIN32
     std::wstring compiler;
     wchar_t path[32768]{};
     const auto length = SearchPathW(nullptr, L"dxc.exe", nullptr, 32768, path, nullptr);
@@ -45,9 +61,20 @@ asset::ShaderAsset::CreateInfo HlslShaderCompiler::compile(const std::filesystem
     }
     if (compiler.empty())
         throw std::runtime_error("DXC not found. Install Vulkan SDK or add dxc.exe to PATH.");
+    const auto processId = GetCurrentProcessId();
+#else
+    std::string compiler = "dxc";
+    if (const auto *sdk = std::getenv("VULKAN_SDK"))
+    {
+        const auto candidate = std::filesystem::path(sdk) / "bin/dxc";
+        if (access(candidate.c_str(), X_OK) == 0)
+            compiler = candidate.string();
+    }
+    const auto processId = getpid();
+#endif
     static std::atomic<uint64_t> sequence{0};
     auto temporary = std::filesystem::temp_directory_path() /
-                     ("rubia-shader-" + std::to_string(GetCurrentProcessId()) + "-" +
+                     ("rubia-shader-" + std::to_string(processId) + "-" +
                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
                       "-" + std::to_string(++sequence));
     if (!std::filesystem::create_directory(temporary))
@@ -63,6 +90,7 @@ asset::ShaderAsset::CreateInfo HlslShaderCompiler::compile(const std::filesystem
     } cleanup{temporary};
     const auto output = temporary / "shader.spv";
     const auto log = temporary / "diagnostics.txt";
+#ifdef _WIN32
     struct Handle
     {
         HANDLE value = INVALID_HANDLE_VALUE;
@@ -105,6 +133,65 @@ asset::ShaderAsset::CreateInfo HlslShaderCompiler::compile(const std::filesystem
     }
     DWORD exitCode = 1;
     GetExitCodeProcess(processHandle.value, &exitCode);
+#else
+    struct FileActions
+    {
+        posix_spawn_file_actions_t value;
+        FileActions()
+        {
+            const auto error = posix_spawn_file_actions_init(&value);
+            if (error) throw std::runtime_error("Cannot initialize DXC process: " + std::string(std::strerror(error)));
+        }
+        ~FileActions() { posix_spawn_file_actions_destroy(&value); }
+    } actions;
+    auto checkAction = [](int error) {
+        if (error) throw std::runtime_error("Cannot redirect DXC streams: " + std::string(std::strerror(error)));
+    };
+    checkAction(posix_spawn_file_actions_addopen(&actions.value, STDIN_FILENO, "/dev/null", O_RDONLY, 0));
+    checkAction(posix_spawn_file_actions_addopen(&actions.value, STDOUT_FILENO, log.c_str(),
+                                                O_WRONLY | O_CREAT | O_TRUNC, 0600));
+    checkAction(posix_spawn_file_actions_adddup2(&actions.value, STDOUT_FILENO, STDERR_FILENO));
+    auto sourceArgument = absolute.string();
+#ifdef __APPLE__
+    // DXC on macOS fails to open absolute paths with non-ASCII directory names.
+    // Change only the child's directory; imports run on background threads.
+    checkAction(posix_spawn_file_actions_addchdir_np(&actions.value, absolute.parent_path().c_str()));
+    sourceArgument = absolute.filename().string();
+#endif
+    const std::string profile = stage == asset::ShaderStage::Vertex ? "vs_6_0"
+                                : stage == asset::ShaderStage::Fragment ? "ps_6_0" : "cs_6_0";
+    std::string arguments[] = {compiler, "-spirv", "-T", profile, "-E", entryPoint,
+                               "-Fo", output.string(), sourceArgument};
+    char *argv[10]{};
+    for (size_t i = 0; i < 9; ++i) argv[i] = arguments[i].data();
+    pid_t child = -1;
+#ifdef __APPLE__
+    auto environment = *_NSGetEnviron();
+#else
+    auto environment = environ;
+#endif
+    const auto error = posix_spawnp(&child, compiler.c_str(), &actions.value, nullptr, argv, environment);
+    if (error)
+        throw std::runtime_error("Cannot launch DXC (install Vulkan SDK or add dxc to PATH): " +
+                                 std::string(std::strerror(error)));
+    int status = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    for (;;)
+    {
+        const auto result = waitpid(child, &status, WNOHANG);
+        if (result == child) break;
+        if (result < 0 && errno != EINTR)
+            throw std::runtime_error("Cannot wait for DXC: " + std::string(std::strerror(errno)));
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            kill(child, SIGKILL);
+            while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+            throw std::runtime_error("DXC compilation timed out");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
     if (exitCode != 0)
     {
         std::ifstream stream(log, std::ios::binary);
@@ -121,11 +208,5 @@ asset::ShaderAsset::CreateInfo HlslShaderCompiler::compile(const std::filesystem
     const auto &shader = temporaryAssets.shader(handle);
     return {absolute.filename().u8string() + " (" + entryPoint + ")", stage, entryPoint,
             shader.spirv(), shader.interface()};
-#else
-    static_cast<void>(source);
-    static_cast<void>(stage);
-    static_cast<void>(entryPoint);
-    throw std::runtime_error("HLSL compiler process integration is currently Windows-only");
-#endif
 }
 } // namespace rubia::importer::shader

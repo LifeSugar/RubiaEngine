@@ -6,7 +6,6 @@
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
-#include <imgui_impl_vulkan.h>
 
 #include <filesystem>
 #include <iostream>
@@ -16,8 +15,6 @@ namespace rubia::editor
 {
 namespace
 {
-
-constexpr uint32_t kImGuiDescriptorCapacity = 64;
 
 void loadEditorFont(ImGuiIO& io)
 {
@@ -43,17 +40,6 @@ void loadEditorFont(ImGuiIO& io)
     std::cerr << "[ImGui] Could not load Fira Code; using the default font\n";
     fontConfig.SizePixels = fontSize;
     io.FontDefault = io.Fonts->AddFontDefault(&fontConfig);
-}
-
-void reportVulkanResult(VkResult result)
-{
-    if (result != VK_SUCCESS)
-    {
-        std::cerr
-            << "[ImGui][Vulkan] VkResult = "
-            << static_cast<int>(result)
-            << '\n';
-    }
 }
 
 } // namespace
@@ -160,12 +146,12 @@ void ImGuiLayer::beginFrame()
     }
 
     makeContextCurrent();
-    ImGui_ImplVulkan_NewFrame();
+    rendererBackend_.newFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 }
 
-ImDrawData* ImGuiLayer::endFrame()
+const render::GuiOverlay* ImGuiLayer::endFrame()
 {
     if (!*this)
     {
@@ -174,17 +160,14 @@ ImDrawData* ImGuiLayer::endFrame()
 
     makeContextCurrent();
     ImGui::Render();
-    return ImGui::GetDrawData();
+    rendererBackend_.prepare(ImGui::GetDrawData());
+    return &rendererBackend_;
 }
 
 void ImGuiLayer::shutdownRendererBackend() noexcept
 {
     makeContextCurrent();
-    if (rendererBackendInitialized_)
-    {
-        ImGui_ImplVulkan_Shutdown();
-        rendererBackendInitialized_ = false;
-    }
+    rendererBackend_.shutdown();
 }
 
 void ImGuiLayer::initializeRendererBackend(
@@ -192,7 +175,7 @@ void ImGuiLayer::initializeRendererBackend(
     uint32_t imageCount)
 {
     if (imguiContext_ == nullptr || context_ == nullptr || !*context_ ||
-        !platformBackendInitialized_ || rendererBackendInitialized_ ||
+        !platformBackendInitialized_ || rendererBackend_ ||
         renderPass == VK_NULL_HANDLE || imageCount < minImageCount_)
     {
         throw std::logic_error(
@@ -202,28 +185,17 @@ void ImGuiLayer::initializeRendererBackend(
     makeContextCurrent();
     const rhi::vulkan::Device& device = context_->device();
 
-    ImGui_ImplVulkan_InitInfo initInfo{};
-    initInfo.ApiVersion = VK_API_VERSION_1_3;
-    initInfo.Instance = context_->instance();
-    initInfo.PhysicalDevice = device.physical();
-    initInfo.Device = device.get();
-    initInfo.QueueFamily = device.graphicsQueueFamily();
-    initInfo.Queue = device.graphicsQueue();
-    initInfo.DescriptorPoolSize = kImGuiDescriptorCapacity;
-    initInfo.MinImageCount = minImageCount_;
-    initInfo.ImageCount = imageCount;
-    initInfo.PipelineInfoMain.RenderPass = renderPass;
-    initInfo.PipelineInfoMain.Subpass = 0;
-    initInfo.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-    initInfo.CheckVkResultFn = reportVulkanResult;
-    initInfo.MinAllocationSize = 1024 * 1024;
-
-    if (!ImGui_ImplVulkan_Init(&initInfo))
-    {
-        throw std::runtime_error(
-            "failed to initialize Dear ImGui Vulkan backend");
-    }
-    rendererBackendInitialized_ = true;
+    integration::imgui::VulkanGuiRenderer::CreateInfo createInfo{};
+    createInfo.imguiContext = imguiContext_;
+    createInfo.instance = context_->instance();
+    createInfo.physicalDevice = device.physical();
+    createInfo.device = device.get();
+    createInfo.graphicsQueueFamily = device.graphicsQueueFamily();
+    createInfo.graphicsQueue = device.graphicsQueue();
+    createInfo.minImageCount = minImageCount_;
+    createInfo.imageCount = imageCount;
+    createInfo.renderPass = renderPass;
+    rendererBackend_.initialize(createInfo);
 }
 
 void ImGuiLayer::recreateRendererPipeline(VkRenderPass renderPass)
@@ -235,17 +207,13 @@ void ImGuiLayer::recreateRendererPipeline(VkRenderPass renderPass)
     }
 
     makeContextCurrent();
-    ImGui_ImplVulkan_PipelineInfo pipelineInfo{};
-    pipelineInfo.RenderPass = renderPass;
-    pipelineInfo.Subpass = 0;
-    pipelineInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-    ImGui_ImplVulkan_CreateMainPipeline(&pipelineInfo);
+    rendererBackend_.recreatePipeline(renderPass);
 }
 
 ImGuiLayer::operator bool() const noexcept
 {
     return context_ != nullptr && imguiContext_ != nullptr &&
-        platformBackendInitialized_ && rendererBackendInitialized_;
+        platformBackendInitialized_ && static_cast<bool>(rendererBackend_);
 }
 
 void ImGuiLayer::makeContextCurrent() const noexcept

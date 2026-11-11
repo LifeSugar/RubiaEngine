@@ -43,6 +43,8 @@ public:
     [[nodiscard]] CullingFlags getCullingFlags() const noexcept;
 
     const glm::mat4 &getViewMatrix() const;
+    /// Logical Y-up, zero-to-one depth projection; backend correction is
+    /// applied only when Renderer uploads camera data to the GPU.
     const glm::mat4 &getProjectionMatrix() const;
     const glm::mat4 &getViewProjectionMatrix() const;
     [[nodiscard]] CameraGpuData getGpuData() const;

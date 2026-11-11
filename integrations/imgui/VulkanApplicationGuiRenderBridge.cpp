@@ -1,6 +1,6 @@
-#include "vulkan/VulkanApplicationGuiRenderBridge.hpp"
+#include "imgui/VulkanApplicationGuiRenderBridge.hpp"
 
-#include "vulkan/GpuTexture.hpp"
+#include "vulkan/VulkanResourceDevice.hpp"
 #include "vulkan/RenderAssetCache.hpp"
 #include "vulkan/VulkanRenderer.hpp"
 
@@ -144,7 +144,7 @@ render::ApplicationGuiTexture VulkanApplicationGuiRenderBridge::preview(
         return {};
     }
 
-    const GpuTexture* gpuTexture = renderAssets_->tryTexture(texture);
+    const auto* gpuTexture = renderAssets_->tryTexture(texture);
     const auto publication = renderAssets_->texturePublication(texture);
     const auto existing =
         std::find_if(previewTextures_.begin(), previewTextures_.end(),
@@ -166,7 +166,7 @@ render::ApplicationGuiTexture VulkanApplicationGuiRenderBridge::preview(
 
     // Allocate the new registration first. Failure leaves the old entry intact;
     // after retirement admission, publishing the new owner cannot throw.
-    auto descriptor = std::make_shared<PreviewDescriptor>(gpuTexture->view());
+    auto descriptor = std::make_shared<PreviewDescriptor>(nativeTextureView(gpuTexture->view()));
     const auto token = reinterpret_cast<std::uintptr_t>(descriptor->set);
     if (existing != previewTextures_.end())
     {
@@ -220,7 +220,7 @@ void VulkanApplicationGuiRenderBridge::registerViewportTextures()
             const VulkanRenderer::EditorViewportOutput output =
                 renderer_->editorViewportOutput(frameIndex);
             const VkDescriptorSet texture = ImGui_ImplVulkan_AddTexture(
-                output.imageView,
+                nativeTextureView(output.view),
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             if (texture == VK_NULL_HANDLE)
             {

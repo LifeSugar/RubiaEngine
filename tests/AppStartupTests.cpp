@@ -38,8 +38,8 @@ void AppSmokeTests::runStartupTest()
         app.window.pollEvents();
         app.imguiLayer.beginFrame();
         app.drawGui(gui);
-        if (app.renderer.renderGui(app.imguiLayer.endFrame()) ==
-            rhi::vulkan::VulkanRenderer::RenderResult::NeedsResize)
+        if (rhi::vulkan::VulkanRenderer::needsResize(
+                app.renderer.renderGui(app.imguiLayer.endFrame())))
         {
             app.recreateSwapChain(gui);
         }
@@ -133,7 +133,7 @@ void AppSmokeTests::runStartupTest()
             ImGui::Image(ImTextureRef(static_cast<ImTextureID>(preview.textureId)), ImVec2(32, 32));
             ImGui::End();
             const auto previewResult = app.renderer.renderGui(app.imguiLayer.endFrame());
-            if (previewResult == rhi::vulkan::VulkanRenderer::RenderResult::NeedsResize)
+            if (rhi::vulkan::VulkanRenderer::needsResize(previewResult))
                 app.recreateSwapChain(gui);
             app.resourcePreparation().release(a.ticket);
             app.resourcePreparation().release(b.ticket);
@@ -397,6 +397,40 @@ void AppSmokeTests::runStartupTest()
         if (!source.expired() || !meshSource.expired() ||
             app.renderer.scenePreparationStatus().state != ScenePreparationState::Cancelled)
             throw std::runtime_error("cancellation retained the CPU upload source");
+
+        // A callback failure happens after a real acquire and pass begin. It
+        // must retain pending owners and make another render fail before any
+        // wait on an unsubmitted fence or reuse of the acquire semaphore.
+        struct InjectedRecordingFailure {};
+        struct FailingOverlay final : render::GuiOverlay
+        {
+            void record(render::GuiCommandContext&) const override { throw InjectedRecordingFailure{}; }
+        } failingOverlay;
+        std::weak_ptr<int> pendingProbe;
+        bool injected = false;
+        for (uint32_t attempt = 0; attempt < 32 && !injected; ++attempt)
+        {
+            auto pendingOwner = std::make_shared<int>(7);
+            pendingProbe = pendingOwner;
+            app.renderer.retireExternalResource(std::move(pendingOwner));
+            try
+            {
+                const auto result = app.renderer.renderGui(&failingOverlay);
+                if (rhi::vulkan::VulkanRenderer::needsResize(result)) app.recreateSwapChain(gui);
+            }
+            catch (const InjectedRecordingFailure&) { injected = true; }
+        }
+        if (!injected || pendingProbe.expired())
+            throw std::runtime_error("recording failure did not preserve pending retirement");
+        bool failedSessionRejected = false;
+        try { static_cast<void>(app.renderer.renderGui(nullptr)); }
+        catch (const std::logic_error&) { failedSessionRejected = true; }
+        if (!failedSessionRejected)
+            throw std::runtime_error("failed acquired session was reused");
+        app.renderer.drainRetiredResources();
+        if (!pendingProbe.expired())
+            throw std::runtime_error("failed recording owners were not reclaimed after idle");
+
         app.renderer.waitIdle();
         gui.detach();
         app.cleanup();

@@ -1,10 +1,6 @@
-add_library(rubia_editor STATIC
-    App.cpp
-    AppContentLoading.cpp
-    App.hpp
+# Editor business code has no graphics-backend or native-window dependency.
+add_library(rubia_editor_core STATIC
     ApplicationGui.hpp
-    AppResize.cpp
-    AppTextureReimport.cpp
     EditorLayer.cpp
     EditorLayer.hpp
     EditorTheme.cpp
@@ -12,16 +8,12 @@ add_library(rubia_editor STATIC
     EditorFwd.hpp
     EditorSelection.cpp
     EditorSelection.hpp
-    ImGuiLayer.cpp
-    ImGuiLayer.hpp
     RuntimeGui.cpp
     RuntimeGui.hpp
     content/EditorAssetController.cpp
     content/EditorAssetController.hpp
     panels/MaterialAuthoringPanel.cpp
     panels/MaterialAuthoringPanel.hpp
-    content/DemoContent.cpp
-    content/DemoContent.hpp
     inspectors/InspectorWidgets.cpp
     inspectors/InspectorWidgets.hpp
     inspectors/MaterialInspector.cpp
@@ -46,22 +38,41 @@ add_library(rubia_editor STATIC
     panels/TransformPanel.cpp
     panels/TransformPanel.hpp
 )
-add_library(Rubia::Editor ALIAS rubia_editor)
+add_library(Rubia::EditorCore ALIAS rubia_editor_core)
+target_include_directories(rubia_editor_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(rubia_editor_core PRIVATE PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+target_link_libraries(rubia_editor_core PUBLIC
+    Rubia::Engine
+    Rubia::Importers
+    Rubia::ImGuiCore
+    rubia_project_options
+)
 
-target_include_directories(rubia_editor PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}"
+# The application host remains the composition root for concrete backends.
+# Keep the old target/alias while existing application tests migrate.
+add_library(rubia_editor STATIC
+    App.cpp
+    AppContentLoading.cpp
+    App.hpp
+    AppResize.cpp
+    AppTextureReimport.cpp
+    ImGuiLayer.cpp
+    ImGuiLayer.hpp
+    content/DemoContent.cpp
+    content/DemoContent.hpp
 )
-target_compile_definitions(rubia_editor PRIVATE
-    PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
-)
+add_library(Rubia::AppRuntime ALIAS rubia_editor)
+add_library(Rubia::Editor ALIAS rubia_editor)
+target_include_directories(rubia_editor PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(rubia_editor PRIVATE PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 target_link_libraries(rubia_editor
     PUBLIC
-        Rubia::Engine
-        Rubia::Importers
-        Rubia::RhiVulkan
+        Rubia::EditorCore
+        Rubia::RendererVulkan
+        Rubia::ImGuiVulkanAdapter
         rubia_project_options
     PRIVATE
-        imgui
+        Rubia::ImGuiGlfw
 )
 
 add_executable(VulkanApp
@@ -69,7 +80,7 @@ add_executable(VulkanApp
     EditorApp.hpp
     main.cpp
 )
-target_link_libraries(VulkanApp PRIVATE Rubia::Editor)
+target_link_libraries(VulkanApp PRIVATE Rubia::AppRuntime)
 
 # Runtime content is copied as one coherent tree, matching the source layout.
 add_custom_command(TARGET VulkanApp POST_BUILD

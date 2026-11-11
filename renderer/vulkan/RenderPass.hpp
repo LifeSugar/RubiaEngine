@@ -1,7 +1,9 @@
 #pragma once
 #include <memory>
+#include <optional>
 #include <vector>
 #include <vulkan/vulkan.h>
+#include "rhi/GraphicsPipeline.hpp"
 
 namespace rubia::rhi::vulkan
 {
@@ -32,6 +34,11 @@ class RenderPassState final
     {
         return colorCounts_.at(index);
     }
+    /// Present for the single-subpass attachment subset exposed by the RHI.
+    const std::optional<rhi::AttachmentSignature>& attachmentSignature() const noexcept
+    {
+        return signature_;
+    }
 
   private:
     friend class RenderPass;
@@ -40,6 +47,7 @@ class RenderPassState final
     VkRenderPass handle_ = VK_NULL_HANDLE;
     std::vector<uint32_t> key_;
     std::vector<uint32_t> colorCounts_;
+    std::optional<rhi::AttachmentSignature> signature_;
 };
 
 /// Owner facade; reference() keeps an immutable version alive across reset/move.

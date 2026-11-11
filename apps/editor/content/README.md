@@ -129,7 +129,10 @@ EditorApp 保证 App 的清理先于 EditorLayer 日志捕获器的销毁。
 
 ## 使用与验证
 
-`VulkanApp.exe` 和 `VulkanApp.exe --editor` 默认保持空场景，不自动加载 DemoContent。
+`VulkanApp.exe` 无参数启动时显示终端数字菜单：`1` 编辑器、`2` Runtime、
+`3` 资源准备展示，`4`–`9` 为已有测试入口；回车默认选择编辑器，`0` 退出。
+`--editor` / `--runtime` 可跳过菜单直接启动，两者保持空场景，不自动加载 DemoContent。
+`--help` 显示完整选项及对应命令行参数。
 `--editor --empty` 保留为兼容别名，与 `--editor` 行为一致；渲染测试仍显式加载 Demo。
 
 ```powershell

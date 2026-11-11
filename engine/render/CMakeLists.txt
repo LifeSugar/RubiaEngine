@@ -1,4 +1,5 @@
 target_sources(rubia_engine PRIVATE
+    GuiOverlay.hpp
     ApplicationGuiRenderBridge.hpp
     Camera.cpp
     Camera.hpp

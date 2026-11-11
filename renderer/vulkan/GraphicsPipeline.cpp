@@ -1,7 +1,7 @@
 #include "vulkan/GraphicsPipeline.hpp"
 
 #include "vulkan/Device.hpp"
-#include "vulkan/GpuPreparedAssets.hpp"
+#include "VulkanResourceDevice.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -35,7 +35,7 @@ bool sameBlend(const VkPipelineColorBlendAttachmentState& a,
         a.colorWriteMask == b.colorWriteMask;
 }
 
-void validateState(const Device& device, const Info& info)
+void validateFixedState(const Device& device, const Info& info)
 {
     // This wrapper exposes core VS/FS pipelines, not tessellation, geometry,
     // mesh shaders, or extension dynamic states. Never silently drop a request.
@@ -210,32 +210,49 @@ GraphicsPipeline& GraphicsPipeline::operator=(GraphicsPipeline&& other) noexcept
     return *this;
 }
 
-void GraphicsPipeline::validate(
-    const Device& device,
-    const CreateInfo& createInfo)
+void GraphicsPipeline::validateState(const Device& device, const CreateInfo& createInfo)
 {
-    if (!device || !createInfo.renderPass || createInfo.renderPass->device() != device.get() ||
-        (createInfo.program && createInfo.program->device() != device.get()) ||
-        (!createInfo.program &&
-         (createInfo.vertexShaderSpirv.empty() || createInfo.vertexEntryPoint.empty() ||
-          (!createInfo.fragmentShaderSpirv.empty() && createInfo.fragmentEntryPoint.empty()))))
-    {
+    if (!device || (createInfo.shaders.empty() &&
+        (createInfo.vertexShaderSpirv.empty() || createInfo.vertexEntryPoint.empty() ||
+         (!createInfo.fragmentShaderSpirv.empty() && createInfo.fragmentEntryPoint.empty()))))
         throw std::invalid_argument("graphics pipeline create info is incomplete");
+    VkShaderStageFlags stages = 0;
+    for (const auto& shader : createInfo.shaders)
+    {
+        if (!shader || nativeShaderDevice(shader) != device.get())
+            throw std::invalid_argument("pipeline shader is missing or belongs to another device");
+        const auto stage = toVulkanStages(rhi::shaderStageMask(shader->code().stage));
+        if ((stage != VK_SHADER_STAGE_VERTEX_BIT && stage != VK_SHADER_STAGE_FRAGMENT_BIT) ||
+            (stages & stage))
+            throw std::invalid_argument("graphics pipeline supports one vertex and optional fragment stage");
+        stages |= stage;
     }
+    if (createInfo.shaders.empty())
+    {
+        stages = VK_SHADER_STAGE_VERTEX_BIT;
+        if (!createInfo.fragmentShaderSpirv.empty()) stages |= VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    if (!(stages & VK_SHADER_STAGE_VERTEX_BIT))
+        throw std::invalid_argument("graphics pipeline requires a vertex shader");
+    for (const auto& layout : createInfo.descriptorSetLayouts)
+        if (!layout || layout->device() != device.get())
+            throw std::invalid_argument("pipeline descriptor layout is missing or belongs to another device");
+    validateFixedState(device, createInfo);
+    for (const auto& specialization : createInfo.specializations)
+        if (!(stages & specialization.stage))
+            throw std::invalid_argument("specialization targets an absent shader stage");
+}
+
+void GraphicsPipeline::validate(const Device& device, const CreateInfo& createInfo)
+{
+    if (!createInfo.renderPass || createInfo.renderPass->device() != device.get())
+        throw std::invalid_argument("graphics pipeline requires a render pass on its device");
     if (createInfo.subpass >= createInfo.renderPass->subpassCount())
         throw std::invalid_argument("pipeline subpass index is out of range");
     if (!createInfo.rasterization.rasterizerDiscardEnable &&
         createInfo.colorBlend.attachments.size() != createInfo.renderPass->colorAttachmentCount(createInfo.subpass))
         throw std::invalid_argument("pipeline color blend slots do not match the subpass");
-    for (const auto& layout : createInfo.descriptorSetLayouts)
-        if (!layout || layout->device() != device.get())
-            throw std::invalid_argument("pipeline descriptor layout is missing or belongs to another device");
     validateState(device, createInfo);
-    VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT;
-    if (createInfo.program || !createInfo.fragmentShaderSpirv.empty()) stages |= VK_SHADER_STAGE_FRAGMENT_BIT;
-    for (const auto& specialization : createInfo.specializations)
-        if (!(stages & specialization.stage))
-            throw std::invalid_argument("specialization targets an absent shader stage");
 }
 
 void GraphicsPipeline::create(const Device& device, const CreateInfo& createInfo)
@@ -246,11 +263,23 @@ void GraphicsPipeline::create(const Device& device, const CreateInfo& createInfo
 
     std::unique_ptr<ShaderModule> vertexModule;
     std::unique_ptr<ShaderModule> fragmentModule;
-    auto shaderStages = createInfo.program ? createInfo.program->stages()
-        : std::vector<VkPipelineShaderStageCreateInfo>(
-            createInfo.fragmentShaderSpirv.empty() ? 1 : 2);
-    if (!createInfo.program)
+    std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
+    if (!createInfo.shaders.empty())
     {
+        shaderStages.reserve(createInfo.shaders.size());
+        for (const auto& shader : createInfo.shaders)
+        {
+            VkPipelineShaderStageCreateInfo stage{};
+            stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            stage.stage = static_cast<VkShaderStageFlagBits>(toVulkanStages(rhi::shaderStageMask(shader->code().stage)));
+            stage.module = nativeShader(shader);
+            stage.pName = shader->code().entryPoint.c_str();
+            shaderStages.push_back(stage);
+        }
+    }
+    else
+    {
+        shaderStages.resize(createInfo.fragmentShaderSpirv.empty() ? 1 : 2);
         vertexModule = std::make_unique<ShaderModule>(device.get(), createInfo.vertexShaderSpirv);
         shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;

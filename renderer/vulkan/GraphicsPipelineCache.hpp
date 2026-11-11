@@ -35,8 +35,7 @@ class GraphicsPipelineCache final
     }
 
   private:
-    friend class VulkanPipelinePreparation;
-    // Only the scheduler can publish: key and result originate from the same snapshot.
+    // Legacy low-level cache. Production publication uses render::PipelineLibrary.
     std::shared_ptr<const GraphicsPipeline> publish(
         const GraphicsPipelineKey &key, std::shared_ptr<const GraphicsPipeline> pipeline);
     void checkThread() const;

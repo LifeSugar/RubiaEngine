@@ -1,195 +1,76 @@
 #include "vulkan/Window.hpp"
 
-#include <algorithm>
-#include <mutex>
-#include <stdexcept>
+#include "vulkan_glfw/Surface.hpp"
 
 namespace rubia::rhi::vulkan
 {
-namespace
-{
-
-std::mutex gGlfwRuntimeMutex;
-uint32_t gGlfwRuntimeUsers = 0;
-
-void acquireGlfwRuntime()
-{
-    std::lock_guard<std::mutex> lock(gGlfwRuntimeMutex);
-    if (gGlfwRuntimeUsers == 0 && glfwInit() != GLFW_TRUE)
-    {
-        throw std::runtime_error("failed to initialize GLFW");
-    }
-    ++gGlfwRuntimeUsers;
-}
-
-void releaseGlfwRuntime() noexcept
-{
-    std::lock_guard<std::mutex> lock(gGlfwRuntimeMutex);
-    if (gGlfwRuntimeUsers == 0)
-    {
-        return;
-    }
-
-    --gGlfwRuntimeUsers;
-    if (gGlfwRuntimeUsers == 0)
-    {
-        glfwTerminate();
-    }
-}
-
-} // namespace
 
 Window::Window(const CreateInfo& createInfo)
 {
     create(createInfo);
 }
 
-Window::~Window()
-{
-    reset();
-}
+Window::~Window() = default;
 
 void Window::create(const CreateInfo& createInfo)
 {
-    if (createInfo.width == 0 || createInfo.height == 0)
-    {
-        throw std::invalid_argument("window dimensions must be greater than zero");
-    }
-
-    acquireGlfwRuntime();
-
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfwWindowHint(
-        GLFW_VISIBLE,
-        createInfo.visible ? GLFW_TRUE : GLFW_FALSE);
-    GLFWwindow* newHandle = glfwCreateWindow(
-        static_cast<int>(createInfo.width),
-        static_cast<int>(createInfo.height),
-        createInfo.title.c_str(),
-        nullptr,
-        nullptr);
-    if (newHandle == nullptr)
-    {
-        releaseGlfwRuntime();
-        throw std::runtime_error("failed to create GLFW window");
-    }
-
-    // Acquire the replacement before releasing the old window so replacing the
-    // only window cannot terminate GLFW between the two operations.
-    reset();
-    handle_ = newHandle;
-    ownsGlfwRuntime_ = true;
-    framebufferResized_ = false;
-    glfwSetWindowUserPointer(handle_, this);
-    glfwSetFramebufferSizeCallback(handle_, framebufferResizeCallback);
+    window_.create({createInfo.width, createInfo.height, createInfo.title, createInfo.visible});
 }
 
 void Window::reset() noexcept
 {
-    if (handle_ != nullptr)
-    {
-        glfwDestroyWindow(handle_);
-        handle_ = nullptr;
-    }
-
-    if (ownsGlfwRuntime_)
-    {
-        releaseGlfwRuntime();
-        ownsGlfwRuntime_ = false;
-    }
-    framebufferResized_ = false;
+    window_.reset();
 }
 
 void Window::pollEvents() const
 {
-    glfwPollEvents();
+    window_.pollEvents();
 }
 
 void Window::waitEvents() const
 {
-    glfwWaitEvents();
+    window_.waitEvents();
 }
 
 void Window::waitEventsTimeout(double timeoutSeconds) const
 {
-    glfwWaitEventsTimeout(timeoutSeconds);
+    window_.waitEventsTimeout(timeoutSeconds);
 }
 
 bool Window::shouldClose() const
 {
-    if (handle_ == nullptr)
-    {
-        return true;
-    }
-    return glfwWindowShouldClose(handle_) == GLFW_TRUE;
+    return window_.shouldClose();
 }
 
 VkExtent2D Window::framebufferExtent() const
 {
-    if (handle_ == nullptr)
-    {
-        return {};
-    }
-
-    int width = 0;
-    int height = 0;
-    glfwGetFramebufferSize(handle_, &width, &height);
-    return {
-        static_cast<uint32_t>(std::max(width, 0)),
-        static_cast<uint32_t>(std::max(height, 0))
-    };
+    const auto extent = window_.framebufferExtent();
+    return {extent.width, extent.height};
 }
 
 bool Window::consumeFramebufferResize() noexcept
 {
-    const bool resized = framebufferResized_;
-    framebufferResized_ = false;
-    return resized;
+    return window_.consumeFramebufferResize();
 }
 
 VkSurfaceKHR Window::createVulkanSurface(VkInstance instance) const
 {
-    if (handle_ == nullptr)
-    {
-        throw std::logic_error("cannot create a Vulkan surface without a window");
-    }
-
-    VkSurfaceKHR surface = VK_NULL_HANDLE;
-    if (glfwCreateWindowSurface(instance, handle_, nullptr, &surface) != VK_SUCCESS)
-    {
-        throw std::runtime_error("failed to create window surface");
-    }
-    return surface;
+    return integration::vulkan_glfw::createSurface(window_, instance);
 }
 
 std::vector<const char*> Window::requiredVulkanInstanceExtensions()
 {
-    uint32_t extensionCount = 0;
-    const char** extensions = glfwGetRequiredInstanceExtensions(&extensionCount);
-    if (extensions == nullptr || extensionCount == 0)
-    {
-        throw std::runtime_error("GLFW did not provide Vulkan instance extensions");
-    }
-    return {extensions, extensions + extensionCount};
+    return integration::vulkan_glfw::requiredInstanceExtensions();
 }
 
 double Window::time() noexcept
 {
-    return glfwGetTime();
+    return platform::glfw::Window::time();
 }
 
 Window::operator bool() const noexcept
 {
-    return handle_ != nullptr;
-}
-
-void Window::framebufferResizeCallback(GLFWwindow* window, int, int)
-{
-    auto* self = static_cast<Window*>(glfwGetWindowUserPointer(window));
-    if (self != nullptr)
-    {
-        self->framebufferResized_ = true;
-    }
+    return static_cast<bool>(window_);
 }
 
 } // namespace rubia::rhi::vulkan

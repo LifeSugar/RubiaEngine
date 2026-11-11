@@ -1,4 +1,4 @@
-#include "vulkan/VulkanPipelinePreparation.hpp"
+#include "pipeline/PipelinePreparation.hpp"
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
@@ -6,17 +6,16 @@
 
 namespace rubia::test
 {
-void runPipelinePreparationTests(const rhi::vulkan::Device &device,
-                                 const rhi::vulkan::GraphicsPipeline::CreateInfo &description)
+void runPipelinePreparationTests(const rhi::PipelineDevice &device,
+                                 const rhi::GraphicsPipelineDesc &description)
 {
-    using namespace rhi::vulkan;
     using render::PipelinePreparationState;
     auto require = [](bool value, const char *message) {
         if (!value)
             throw std::runtime_error(message);
     };
-    GraphicsPipelineCache cache(device);
-    VulkanPipelinePreparation requests(device, cache, 3, 1);
+    render::PipelineLibrary cache(device);
+    render::PipelinePreparation requests(device, cache, 3, 1);
     const auto waitReady = [&](render::PipelinePreparationTicket ticket) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
         while (!render::pipelinePreparationFinished(requests.status(ticket).state) &&
@@ -30,9 +29,9 @@ void runPipelinePreparationTests(const rhi::vulkan::Device &device,
     };
     auto a = description;
     auto b = a;
-    b.rasterization.cullMode = VK_CULL_MODE_FRONT_BIT;
+    b.rasterization.cullMode = rhi::CullMode::Front;
     auto c = a;
-    c.rasterization.cullMode = VK_CULL_MODE_BACK_BIT;
+    c.rasterization.cullMode = rhi::CullMode::Back;
     auto first = requests.request({a, a, b});
     auto shared = requests.request({a});
     auto third = requests.request({c});
@@ -81,22 +80,22 @@ void runPipelinePreparationTests(const rhi::vulkan::Device &device,
             "cancelled pipeline request still executed");
     requests.release(allCancelled.ticket);
     auto invalid = a;
-    invalid.renderPass.reset();
+    invalid.shaders.clear();
     require(!requests.request({b, invalid}).accepted(), "invalid pipeline batch admitted");
     requests.advance();
     require(!cache.find(b), "failed admission left partial work queued");
     auto retry = requests.request({b});
-    b.rasterization.cullMode = VK_CULL_MODE_NONE;
+    b.rasterization.cullMode = rhi::CullMode::None;
     waitReady(retry.ticket);
     auto expected = a;
-    expected.rasterization.cullMode = VK_CULL_MODE_FRONT_BIT;
+    expected.rasterization.cullMode = rhi::CullMode::Front;
     require(requests.status(retry.ticket).state == PipelinePreparationState::Ready &&
                 cache.find(expected),
             "cancel/retry lost its immutable description snapshot");
     requests.release(retry.ticket);
     // If drawing fills a miss first, queued execution must reuse that same object.
     auto d = a;
-    d.colorBlend.attachments[0].colorWriteMask = VK_COLOR_COMPONENT_R_BIT;
+    d.colorBlend.attachments[0].writeMask = 1u;
     auto fallback = requests.request({d});
     const auto drawn = cache.getOrCreate(d);
     const auto creations = cache.statistics().creations;
@@ -108,13 +107,13 @@ void runPipelinePreparationTests(const rhi::vulkan::Device &device,
     // An in-flight cancellation must never populate the cache, even after its
     // ticket has been released. Waiting for a later job drains the old completion.
     auto abandonedInfo = a;
-    abandonedInfo.colorBlend.attachments[0].colorWriteMask = VK_COLOR_COMPONENT_A_BIT;
+    abandonedInfo.colorBlend.attachments[0].writeMask = 8u;
     auto abandoned = requests.request({abandonedInfo});
     requests.advance();
     requests.cancel(abandoned.ticket);
     requests.release(abandoned.ticket);
     auto drainInfo = a;
-    drainInfo.colorBlend.attachments[0].colorWriteMask = 0;
+    drainInfo.colorBlend.attachments[0].writeMask = 0;
     auto drain = requests.request({drainInfo});
     waitReady(drain.ticket);
     require(!cache.find(abandonedInfo), "cancelled in-flight result was published");
@@ -123,7 +122,7 @@ void runPipelinePreparationTests(const rhi::vulkan::Device &device,
     // Cancel after dispatch, then request the SAME key. Old completion must neither
     // publish to a cleared scene cache nor erase the new job's deduplication entry.
     auto e = a;
-    e.colorBlend.attachments[0].colorWriteMask = VK_COLOR_COMPONENT_G_BIT;
+    e.colorBlend.attachments[0].writeMask = 2u;
     auto obsolete = requests.request({e});
     requests.advance();
     require(requests.status(obsolete.ticket).state == PipelinePreparationState::Preparing,
@@ -145,7 +144,7 @@ void runPipelinePreparationTests(const rhi::vulkan::Device &device,
     // Drawing can win even after the worker has been dispatched. Publication must
     // retain the draw's object, regardless of the worker's native creation result.
     auto f = a;
-    f.colorBlend.attachments[0].colorWriteMask = VK_COLOR_COMPONENT_B_BIT;
+    f.colorBlend.attachments[0].writeMask = 4u;
     auto racing = requests.request({f});
     requests.advance();
     const auto winner = cache.getOrCreate(f);
@@ -158,14 +157,14 @@ void runPipelinePreparationTests(const rhi::vulkan::Device &device,
     // Destruction joins outstanding work while the device and immutable inputs live.
     const auto beforeShutdown = cache.statistics().creations;
     {
-        VulkanPipelinePreparation shutdown(device, cache);
+        render::PipelinePreparation shutdown(device, cache);
         auto pending = shutdown.request({a, c});
         require(pending.accepted(), "shutdown test admission failed");
         shutdown.advance();
     }
     require(cache.statistics().creations == beforeShutdown && !cache.find(a),
             "shutdown published an unfinished request");
-    std::clog << "[Vulkan] Pipeline preparation tests passed (worker, budget, sharing, "
+    std::clog << "[RHI] Pipeline preparation tests passed (worker, budget, sharing, "
                  "cancellation, cache, shutdown)\n";
 }
 } // namespace rubia::test

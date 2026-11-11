@@ -1,6 +1,7 @@
 #include "vulkan/VulkanContext.hpp"
 
 #include "vulkan/Window.hpp"
+#include "vulkan_glfw/Surface.hpp"
 
 #include <cstring>
 #include <iostream>
@@ -120,7 +121,7 @@ void VulkanContext::create(
     }
 
     replacement.surface_ =
-        window.createVulkanSurface(replacement.instance_);
+        integration::vulkan_glfw::createSurface(window.platformWindow(), replacement.instance_);
     replacement.device_.create(
         replacement.instance_,
         replacement.surface_,
@@ -209,7 +210,7 @@ std::vector<const char*> VulkanContext::requiredExtensions(
     bool enableValidationLayers)
 {
     std::vector<const char*> extensions =
-        Window::requiredVulkanInstanceExtensions();
+        integration::vulkan_glfw::requiredInstanceExtensions();
     if (enableValidationLayers)
     {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);

@@ -9,6 +9,17 @@ BlenderMCP / Blender 4.5.9 LTS 制作的材质展厅：40 个测试几何体、1
 
 ## 启动
 
+macOS（已有 `build/debug` 构建目录，且 Vulkan SDK 的 `dxc` 在 PATH 或 `$VULKAN_SDK/bin` 中）：
+
+```bash
+bash Assets/preparation_gallery/run.sh
+```
+
+脚本先编译最新代码，编译成功后打开交互展厅。自动回归可在
+`build/debug/apps/editor` 下执行 `./VulkanApp --preparation-gallery-test`。
+
+Windows：
+
 在仓库根目录：
 
 ```powershell

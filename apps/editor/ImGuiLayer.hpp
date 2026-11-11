@@ -2,13 +2,13 @@
 
 #include "EditorFwd.hpp"
 #include "EditorTheme.hpp"
+#include "imgui/VulkanGuiRenderer.hpp"
 
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
 #include <string>
 
-struct ImDrawData;
 struct ImGuiContext;
 
 namespace rubia::editor
@@ -43,8 +43,8 @@ public:
 
     /// Starts one Dear ImGui frame after window events have been processed.
     void beginFrame();
-    /// Finalizes the UI and returns draw data valid until the next frame.
-    [[nodiscard]] ImDrawData* endFrame();
+    /// Finalizes and prepares the UI; the borrowed overlay lasts until next frame.
+    [[nodiscard]] const render::GuiOverlay* endFrame();
 
     /// Releases objects tied to the current swapchain render pass.
     void shutdownRendererBackend() noexcept;
@@ -66,7 +66,7 @@ private:
     std::string iniFilename_;
     uint32_t minImageCount_ = 2;
     bool platformBackendInitialized_ = false;
-    bool rendererBackendInitialized_ = false;
+    integration::imgui::VulkanGuiRenderer rendererBackend_;
 };
 
 } // namespace rubia::editor

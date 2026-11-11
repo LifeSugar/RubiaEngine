@@ -1,81 +1,116 @@
-find_package(Vulkan REQUIRED)
-find_package(glfw3 CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
-find_package(assimp CONFIG REQUIRED)
-find_package(Stb REQUIRED)
-find_package(Ktx CONFIG REQUIRED)
 
-add_library(VulkanMemoryAllocator INTERFACE)
-target_include_directories(VulkanMemoryAllocator INTERFACE
-    "${PROJECT_SOURCE_DIR}/third_party/vma/include"
-)
-target_link_libraries(VulkanMemoryAllocator INTERFACE Vulkan::Vulkan)
+if(RUBIA_BUILD_VULKAN)
+    find_package(Vulkan REQUIRED)
 
-if(DEFINED ENV{VULKAN_SDK})
-    file(TO_CMAKE_PATH "$ENV{VULKAN_SDK}" VULKAN_SDK_CMAKE_ROOT)
-elseif(Vulkan_INCLUDE_DIRS)
-    list(GET Vulkan_INCLUDE_DIRS 0 VULKAN_INCLUDE_ROOT)
-    get_filename_component(VULKAN_SDK_CMAKE_ROOT
-        "${VULKAN_INCLUDE_ROOT}" DIRECTORY)
-else()
-    message(FATAL_ERROR "Unable to determine the Vulkan SDK root")
+    add_library(VulkanMemoryAllocator INTERFACE)
+    target_include_directories(VulkanMemoryAllocator INTERFACE
+        "${PROJECT_SOURCE_DIR}/third_party/vma/include"
+    )
+    target_link_libraries(VulkanMemoryAllocator INTERFACE Vulkan::Vulkan)
 endif()
 
-# Vulkan SDK package metadata is not consistently relocatable, so locate the
-# SPIRV-Cross library relative to the SDK while accepting both common casings.
-find_path(SPIRV_CROSS_INCLUDE_DIR spirv_cross.hpp
-    PATHS
-        "${VULKAN_SDK_CMAKE_ROOT}/Include/spirv_cross"
-        "${VULKAN_SDK_CMAKE_ROOT}/include/spirv_cross"
-    NO_DEFAULT_PATH
-)
-find_library(SPIRV_CROSS_CORE_RELEASE spirv-cross-core
-    PATHS
-        "${VULKAN_SDK_CMAKE_ROOT}/Lib"
-        "${VULKAN_SDK_CMAKE_ROOT}/lib"
-    NO_DEFAULT_PATH
-)
-if(MSVC)
-    find_library(SPIRV_CROSS_CORE_DEBUG spirv-cross-cored
-        PATHS
-            "${VULKAN_SDK_CMAKE_ROOT}/Lib"
-            "${VULKAN_SDK_CMAKE_ROOT}/lib"
-        NO_DEFAULT_PATH
-    )
+# The compatibility Vulkan renderer still owns presentation and GUI integration.
+# Keep GLFW optional for CPU-only builds until those callers finish migrating.
+if(RUBIA_BUILD_VULKAN OR RUBIA_BUILD_APPS)
+    find_package(glfw3 CONFIG REQUIRED)
 endif()
 
-if(NOT SPIRV_CROSS_INCLUDE_DIR OR NOT SPIRV_CROSS_CORE_RELEASE)
-    message(FATAL_ERROR "SPIRV-Cross core was not found in the Vulkan SDK")
-endif()
+if(RUBIA_BUILD_IMPORTERS)
+    find_package(assimp CONFIG REQUIRED)
+    find_package(Stb REQUIRED)
+    find_package(Ktx CONFIG REQUIRED)
 
-add_library(spirv-cross-core STATIC IMPORTED)
-set_target_properties(spirv-cross-core PROPERTIES
-    INTERFACE_INCLUDE_DIRECTORIES "${SPIRV_CROSS_INCLUDE_DIR}"
-    IMPORTED_LOCATION "${SPIRV_CROSS_CORE_RELEASE}"
-)
-if(MSVC AND SPIRV_CROSS_CORE_DEBUG)
-    set_target_properties(spirv-cross-core PROPERTIES
-        IMPORTED_LOCATION_DEBUG "${SPIRV_CROSS_CORE_DEBUG}"
-    )
-    set_property(TARGET spirv-cross-core APPEND PROPERTY
-        INTERFACE_LINK_OPTIONS "$<$<CONFIG:Debug>:/IGNORE:4099>"
-    )
+    # Prefer a standalone reflection dependency; importers do not need a Vulkan
+    # loader/device. Retain the SDK layout fallback for existing installations.
+    find_package(spirv_cross_core CONFIG QUIET)
+    if(NOT TARGET spirv-cross-core)
+        set(rubia_spirv_sdk_roots)
+        if(DEFINED ENV{VULKAN_SDK})
+            file(TO_CMAKE_PATH "$ENV{VULKAN_SDK}" rubia_spirv_sdk_root)
+            list(APPEND rubia_spirv_sdk_roots "${rubia_spirv_sdk_root}")
+        endif()
+        if(Vulkan_INCLUDE_DIRS)
+            list(GET Vulkan_INCLUDE_DIRS 0 rubia_vulkan_include_root)
+            get_filename_component(rubia_spirv_sdk_root
+                "${rubia_vulkan_include_root}" DIRECTORY)
+            list(APPEND rubia_spirv_sdk_roots "${rubia_spirv_sdk_root}")
+        endif()
+
+        find_path(SPIRV_CROSS_INCLUDE_DIR spirv_cross.hpp
+            HINTS ${rubia_spirv_sdk_roots}
+            PATH_SUFFIXES Include/spirv_cross include/spirv_cross spirv_cross
+        )
+        find_library(SPIRV_CROSS_CORE_RELEASE spirv-cross-core
+            HINTS ${rubia_spirv_sdk_roots}
+            PATH_SUFFIXES Lib lib
+        )
+        if(MSVC)
+            find_library(SPIRV_CROSS_CORE_DEBUG spirv-cross-cored
+                HINTS ${rubia_spirv_sdk_roots}
+                PATH_SUFFIXES Lib lib
+            )
+        endif()
+
+        if(NOT SPIRV_CROSS_INCLUDE_DIR OR NOT SPIRV_CROSS_CORE_RELEASE)
+            message(FATAL_ERROR
+                "Importers require SPIRV-Cross core; install its CMake package or set "
+                "SPIRV_CROSS_INCLUDE_DIR and SPIRV_CROSS_CORE_RELEASE")
+        endif()
+
+        add_library(spirv-cross-core STATIC IMPORTED)
+        set_target_properties(spirv-cross-core PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${SPIRV_CROSS_INCLUDE_DIR}"
+            IMPORTED_LOCATION "${SPIRV_CROSS_CORE_RELEASE}"
+        )
+        if(MSVC AND SPIRV_CROSS_CORE_DEBUG)
+            set_target_properties(spirv-cross-core PROPERTIES
+                IMPORTED_LOCATION_DEBUG "${SPIRV_CROSS_CORE_DEBUG}"
+            )
+            set_property(TARGET spirv-cross-core APPEND PROPERTY
+                INTERFACE_LINK_OPTIONS "$<$<CONFIG:Debug>:/IGNORE:4099>"
+            )
+        endif()
+    endif()
 endif()
 
 set(IMGUI_DIR "${PROJECT_SOURCE_DIR}/third_party/imgui")
-add_library(imgui STATIC
+add_library(rubia_imgui_core STATIC EXCLUDE_FROM_ALL
     "${IMGUI_DIR}/imgui.cpp"
     "${IMGUI_DIR}/imgui_draw.cpp"
     "${IMGUI_DIR}/imgui_tables.cpp"
     "${IMGUI_DIR}/imgui_widgets.cpp"
-    "${IMGUI_DIR}/backends/imgui_impl_glfw.cpp"
-    "${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp"
 )
-target_include_directories(imgui PUBLIC
-    "${IMGUI_DIR}"
-    "${IMGUI_DIR}/backends"
-)
-target_compile_options(imgui PRIVATE
+add_library(Rubia::ImGuiCore ALIAS rubia_imgui_core)
+target_include_directories(rubia_imgui_core PUBLIC "${IMGUI_DIR}")
+target_compile_options(rubia_imgui_core PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
 )
-target_link_libraries(imgui PUBLIC Vulkan::Vulkan glfw)
+
+# Preserve the old link name while callers select narrower targets over time.
+add_library(imgui INTERFACE)
+target_link_libraries(imgui INTERFACE Rubia::ImGuiCore)
+
+if(RUBIA_BUILD_VULKAN OR RUBIA_BUILD_APPS)
+    add_library(rubia_imgui_glfw STATIC
+        "${IMGUI_DIR}/backends/imgui_impl_glfw.cpp"
+    )
+    add_library(Rubia::ImGuiGlfw ALIAS rubia_imgui_glfw)
+    target_include_directories(rubia_imgui_glfw PUBLIC "${IMGUI_DIR}/backends")
+    target_compile_definitions(rubia_imgui_glfw PRIVATE GLFW_INCLUDE_NONE)
+    target_link_libraries(rubia_imgui_glfw PUBLIC Rubia::ImGuiCore PRIVATE glfw)
+    target_link_libraries(imgui INTERFACE Rubia::ImGuiGlfw)
+endif()
+
+if(RUBIA_BUILD_VULKAN)
+    add_library(rubia_imgui_vulkan STATIC
+        "${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp"
+    )
+    add_library(Rubia::ImGuiVulkan ALIAS rubia_imgui_vulkan)
+    target_include_directories(rubia_imgui_vulkan PUBLIC "${IMGUI_DIR}/backends")
+    # The backend's public API contains Vk types. Only this adapter exposes the SDK.
+    target_link_libraries(rubia_imgui_vulkan
+        PUBLIC Rubia::ImGuiCore Vulkan::Vulkan
+    )
+    target_link_libraries(imgui INTERFACE Rubia::ImGuiVulkan)
+endif()

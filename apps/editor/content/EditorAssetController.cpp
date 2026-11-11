@@ -44,8 +44,11 @@ std::string importKey(const std::filesystem::path &path,
         key += "|" + std::to_string(static_cast<int>(options.stage)) + "|" + options.entryPoint;
     else if (ext != ".glb" && ext != ".gltf")
         key += "|" + std::to_string(static_cast<int>(options.colorSpace));
-    return key + "|" +
-           std::to_string(std::filesystem::last_write_time(path).time_since_epoch().count()) + "|" +
+    const auto modified = std::filesystem::last_write_time(path).time_since_epoch();
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(modified);
+    const auto remainder = std::chrono::duration_cast<std::chrono::nanoseconds>(modified - seconds);
+    return key + "|" + std::to_string(seconds.count()) + ":" +
+           std::to_string(remainder.count()) + "|" +
            std::to_string(std::filesystem::file_size(path));
 }
 } // namespace

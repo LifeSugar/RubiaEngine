@@ -172,13 +172,13 @@ void App::mainLoop(ApplicationGui& gui)
 
         imguiLayer.beginFrame();
         drawGui(gui);
-        ImDrawData* uiDrawData = imguiLayer.endFrame();
+        const render::GuiOverlay* uiDrawData = imguiLayer.endFrame();
 
         const rhi::vulkan::VulkanRenderer::RenderResult renderResult =
             renderer.sceneReady()
                 ? renderer.render(makeRenderFrame(), renderAssets, uiDrawData)
                 : renderer.renderGui(uiDrawData);
-        if (renderResult == rhi::vulkan::VulkanRenderer::RenderResult::NeedsResize)
+        if (rhi::vulkan::VulkanRenderer::needsResize(renderResult))
         {
             requestSwapChainRecreation();
         }

@@ -7,6 +7,7 @@
 #include "vulkan/Image.hpp"
 #include "vulkan/ImageView.hpp"
 #include "vulkan/RenderPass.hpp"
+#include "VulkanPass.hpp"
 
 #include <array>
 #include <cmath>
@@ -66,6 +67,31 @@ void runGraphicsPipelineCacheTests(const rhi::vulkan::Device& device,
 void runGraphicsPipelineTests(const rhi::vulkan::Device &device)
 {
     using namespace rhi::vulkan;
+    // Invalid portable descriptions must be rejected before validation layers
+    // see a native pass with undefined final contents or an illegal resolve.
+    rhi::AttachmentDesc portableColor;
+    portableColor.format = rhi::Format::RGBA8UNorm;
+    portableColor.after = {rhi::AccessUsage::ColorWrite};
+    const rhi::RenderPassLayoutDesc portable{{portableColor}, {{0, -1}}, -1};
+    const auto rejectsPass = [&](const rhi::RenderPassLayoutDesc& invalid) {
+        try { (void)createRenderPass(device, invalid); }
+        catch (const std::invalid_argument&) { return; }
+        throw std::runtime_error("invalid portable render pass was accepted");
+    };
+    auto invalidPass = portable;
+    invalidPass.attachments[0].after = {};
+    rejectsPass(invalidPass);
+    invalidPass = portable;
+    invalidPass.attachments[0].load = rhi::LoadOp::Load;
+    rejectsPass(invalidPass);
+    invalidPass = portable;
+    invalidPass.attachments.push_back(portableColor);
+    invalidPass.colors[0].resolve = 1;
+    rejectsPass(invalidPass); // A single-sample color cannot be resolved.
+    invalidPass.attachments[0].samples = 4;
+    invalidPass.attachments[1].format = rhi::Format::BGRA8UNorm;
+    rejectsPass(invalidPass);
+
     // Two color targets in subpass 1: this fails if either the subpass index or
     // attachment count is still hard-coded. Subpass 0 intentionally does no work.
     VkAttachmentDescription color{};
@@ -275,6 +301,9 @@ void runGraphicsPipelineTests(const rhi::vulkan::Device &device)
     depthInfo.depthStencil.stencilTestEnable = VK_TRUE;
     depthInfo.depthStencil.front.passOp = VK_STENCIL_OP_REPLACE;
     depthInfo.depthStencil.front.reference = 7;
+    // This fixture tests a depth-only pipeline, not separateStencilMaskRef.
+    // Portability devices require matching references when neither face is culled.
+    depthInfo.depthStencil.back.reference = depthInfo.depthStencil.front.reference;
     depthInfo.rasterization.depthBiasEnable = VK_TRUE;
     depthInfo.rasterization.depthBiasConstantFactor = 1.0f;
     depthInfo.rasterization.depthBiasSlopeFactor = 1.0f;

@@ -1,5 +1,5 @@
 #include "vulkan/GraphicsPipelineKey.hpp"
-#include "vulkan/GpuPreparedAssets.hpp"
+#include "VulkanResourceDevice.hpp"
 #include "vulkan/PipelineKeyData.hpp"
 #include <algorithm>
 #include <stdexcept>
@@ -22,17 +22,18 @@ GraphicsPipelineKey GraphicsPipelineKey::from(const GraphicsPipeline::CreateInfo
         key.string(entry);
         key.append(code);
     };
-    if (info.program)
+    if (!info.shaders.empty())
     {
         // Use the immutable shader snapshots, not recyclable modules or an asset
         // handle. Dependency revisions changing code/entry points change this key.
-        auto shaders = info.program->shaders();
+        auto shaders = info.shaders;
         std::sort(shaders.begin(), shaders.end(), [](const auto &a, const auto &b) {
-            return a->stageInfo().stage < b->stageInfo().stage;
+            return a->code().stage < b->code().stage;
         });
         key.count(shaders.size());
         for (const auto &s : shaders)
-            shader(s->stageInfo().stage, s->source().entryPoint(), s->source().spirv());
+            shader(static_cast<VkShaderStageFlagBits>(toVulkanStages(rhi::shaderStageMask(s->code().stage))),
+                   s->code().entryPoint, s->code().spirv);
     }
     else
     {

@@ -1,6 +1,7 @@
 #include "vulkan/RenderTarget.hpp"
 
 #include "vulkan/Device.hpp"
+#include "VulkanResourceDevice.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -59,6 +60,7 @@ void RenderTarget::create(
     newAttachments.reserve(createInfo.attachments.size());
     newAttachmentViews.reserve(createInfo.attachments.size());
 
+    VulkanResourceDevice resourceDevice(device);
     for (const AttachmentInfo& info : createInfo.attachments)
     {
         if (info.format == VK_FORMAT_UNDEFINED ||
@@ -72,25 +74,39 @@ void RenderTarget::create(
 
         AttachmentResources resources;
         resources.info = info;
-        Image::CreateInfo imageInfo{};
-        imageInfo.extent = {
-            createInfo.extent.width,
-            createInfo.extent.height,
-            1};
-        imageInfo.format = info.format;
-        imageInfo.tiling = info.tiling;
-        imageInfo.usage = info.usage;
-        imageInfo.memoryProperties = info.memoryProperties;
-        imageInfo.samples = info.samples;
-        resources.image.create(device, imageInfo);
-
-        ImageView::CreateInfo viewInfo{};
-        viewInfo.image = resources.image.get();
-        viewInfo.format = info.format;
-        viewInfo.subresourceRange.aspectMask = info.aspectMask;
-        resources.view.create(device.get(), viewInfo);
-
-        newAttachmentViews.push_back(resources.view.get());
+        if (info.tiling != VK_IMAGE_TILING_OPTIMAL)
+            throw std::invalid_argument("render targets require optimal image tiling");
+        rhi::TextureDesc imageInfo;
+        imageInfo.extent = {createInfo.extent.width, createInfo.extent.height, 1};
+        imageInfo.format = fromVulkanFormat(info.format);
+        imageInfo.samples = static_cast<uint32_t>(info.samples);
+        constexpr VkImageUsageFlags allowedUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        if (info.usage & ~allowedUsage) throw std::invalid_argument("unsupported render target image usage");
+        if (info.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) imageInfo.usage |= flag(TextureUsage::ColorAttachment);
+        if (info.usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) imageInfo.usage |= flag(TextureUsage::DepthStencilAttachment);
+        if (info.usage & VK_IMAGE_USAGE_SAMPLED_BIT) imageInfo.usage |= flag(TextureUsage::Sampled);
+        if (info.usage & VK_IMAGE_USAGE_STORAGE_BIT) imageInfo.usage |= flag(TextureUsage::Storage);
+        if (info.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) imageInfo.usage |= flag(TextureUsage::TransferSource);
+        if (info.usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) imageInfo.usage |= flag(TextureUsage::TransferDestination);
+        constexpr VkMemoryPropertyFlags allowedMemory = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+        if (info.memoryProperties & ~allowedMemory) throw std::invalid_argument("unsupported render target memory properties");
+        imageInfo.requiredMemory = 0;
+        if (info.memoryProperties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) imageInfo.requiredMemory |= flag(MemoryProperty::DeviceLocal);
+        if (info.memoryProperties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) imageInfo.requiredMemory |= flag(MemoryProperty::HostVisible);
+        if (info.memoryProperties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) imageInfo.requiredMemory |= flag(MemoryProperty::HostCoherent);
+        if (info.memoryProperties & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) imageInfo.requiredMemory |= flag(MemoryProperty::HostCached);
+        resources.image = resourceDevice.createTexture(imageInfo);
+        rhi::TextureViewDesc viewInfo;
+        viewInfo.format = imageInfo.format;
+        viewInfo.range.aspects = 0;
+        if (info.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) viewInfo.range.aspects |= flag(TextureAspect::Color);
+        if (info.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) viewInfo.range.aspects |= flag(TextureAspect::Depth);
+        if (info.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT) viewInfo.range.aspects |= flag(TextureAspect::Stencil);
+        resources.view = resourceDevice.createTextureView(resources.image, viewInfo);
+        newAttachmentViews.push_back(nativeTextureView(resources.view));
         newAttachments.push_back(std::move(resources));
     }
 
@@ -116,14 +132,17 @@ void RenderTarget::reset() noexcept
     extent_ = {};
 }
 
+const rhi::TextureRef& RenderTarget::texture(std::size_t index) const { return attachment(index).image; }
+const rhi::TextureViewRef& RenderTarget::view(std::size_t index) const { return attachment(index).view; }
+
 VkImage RenderTarget::image(std::size_t attachmentIndex) const
 {
-    return attachment(attachmentIndex).image.get();
+    return nativeImage(attachment(attachmentIndex).image).get();
 }
 
 VkImageView RenderTarget::imageView(std::size_t attachmentIndex) const
 {
-    return attachment(attachmentIndex).view.get();
+    return nativeTextureView(attachment(attachmentIndex).view);
 }
 
 const RenderTarget::AttachmentInfo& RenderTarget::attachmentInfo(

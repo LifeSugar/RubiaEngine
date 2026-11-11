@@ -3,6 +3,7 @@
 #include "vulkan/GraphicsPipelineState.hpp"
 #include "vulkan/DescriptorSetLayout.hpp"
 #include "vulkan/RenderPass.hpp"
+#include "rhi/Resources.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -13,7 +14,6 @@ namespace rubia::rhi::vulkan
 {
 
 class Device;
-class GpuShaderProgram;
 
 /// Owns a graphics pipeline and its pipeline layout.
 class GraphicsPipeline final
@@ -26,7 +26,7 @@ public:
         std::shared_ptr<const RenderPassState> renderPass;
         uint32_t subpass = 0;
         /// Reuses prepared shader modules when supplied; SPIR-V fields are the fallback.
-        std::shared_ptr<const GpuShaderProgram> program;
+        std::vector<rhi::ShaderRef> shaders;
         /// CPU-owned SPIR-V imported by the Asset layer.
         std::vector<uint32_t> vertexShaderSpirv;
         std::string vertexEntryPoint = "main";
@@ -73,6 +73,8 @@ public:
     void create(const Device& device, const CreateInfo& createInfo);
     /// Also used before cache lookup so a hit cannot bypass request validation.
     static void validate(const Device& device, const CreateInfo& createInfo);
+    /// Validates device inputs and fixed-function state without creating a render pass.
+    static void validateState(const Device& device, const CreateInfo& createInfo);
     /// Destroys the pipeline and layout and clears their state.
     void reset() noexcept;
 

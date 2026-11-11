@@ -8,7 +8,9 @@
 #include "vulkan/Fence.hpp"
 #include "vulkan/FrameDataResources.hpp"
 #include "vulkan/Framebuffer.hpp"
-#include "vulkan/GraphicsPipelineCache.hpp"
+#include "pipeline/PipelineLibrary.hpp"
+#include "VulkanPipelineDevice.hpp"
+#include "vulkan/DefaultPipelineFactory.hpp"
 #include "vulkan/Image.hpp"
 #include "vulkan/ImageView.hpp"
 #include "vulkan/RenderAssetCache.hpp"
@@ -49,7 +51,7 @@ template <class F> void rejects(F &&action)
 }
 } // namespace
 
-void runPipelinePreparationTests(const rhi::vulkan::Device&, const rhi::vulkan::GraphicsPipeline::CreateInfo&);
+void runPipelinePreparationTests(const rhi::PipelineDevice&, const rhi::GraphicsPipelineDesc&);
 
 void runVulkanDrawListTests(const rhi::vulkan::Device &device)
 {
@@ -172,10 +174,15 @@ void runVulkanDrawListTests(const rhi::vulkan::Device &device)
     passInfo.pDependencies = &dependency;
     RenderPass pass(device.get(), passInfo);
     FrameDataResources frames(device, 1, 4);
-    GraphicsPipelineCache pipelines(device);
-    GraphicsPipeline::CreateInfo passPipeline;
-    passPipeline.renderPass = pass.reference();
-    passPipeline.descriptorSetLayouts = {frames.descriptorSetLayoutReference()};
+    VulkanResourceDevice resourceDevice(device);
+    VulkanPipelineDevice pipelineDevice(resourceDevice);
+    render::PipelineLibrary pipelines(pipelineDevice);
+    auto nativePassPipeline = makeDefaultScenePipeline(resources.shaderProgram(programA),
+        resources.materialTemplate(templateA)->layoutReference());
+    nativePassPipeline.renderPass = pass.reference();
+    nativePassPipeline.descriptorSetLayouts.insert(nativePassPipeline.descriptorSetLayouts.begin(),
+                                                   frames.descriptorSetLayoutReference());
+    auto passPipeline = describeGraphicsPipeline(nativePassPipeline, resourceDevice);
     render::RenderList list;
     list.objectData.resize(4);
     list.objectData[0].world[0][0] = list.objectData[1].world[0][0] = 0.5f;
@@ -200,7 +207,7 @@ void runVulkanDrawListTests(const rhi::vulkan::Device &device)
     auto compile = [&](const render::RenderList &input) {
         return VulkanDrawListCompiler{}.compile(input, resources, passPipeline, pipelines);
     };
-    runPipelinePreparationTests(device, VulkanDrawListCompiler::describeMaterialPipeline(
+    runPipelinePreparationTests(pipelineDevice, VulkanDrawListCompiler::describeMaterialPipeline(
         *resources.materialTemplateForMaterial(red), list.opaque[0].pipelineKey, passPipeline));
     auto compiled = compile(list);
     require(pipelines.statistics().creations == 4 && compiled.size() == 4,
@@ -232,11 +239,11 @@ void runVulkanDrawListTests(const rhi::vulkan::Device &device)
     invalid.opaque[0].materialKey = render::makeMaterialKey(invalid.opaque[0].material);
     rejects([&] { compile(invalid); });
     const auto originalPass = passPipeline;
-    passPipeline.dynamicStates.push_back(VK_DYNAMIC_STATE_LINE_WIDTH);
+    passPipeline.dynamicStates.push_back(rhi::DynamicState::LineWidth);
     rejects([&] { compile(list); });
     passPipeline = originalPass;
     DescriptorSetLayout emptyFrame(device.get(), {});
-    passPipeline.descriptorSetLayouts[0] = emptyFrame.reference();
+    passPipeline.bindingLayouts[0] = borrowBindingLayout(resourceDevice, emptyFrame.reference());
     rejects([&] { compile(list); });
     passPipeline = originalPass;
 
@@ -339,7 +346,7 @@ void runVulkanDrawListTests(const rhi::vulkan::Device &device)
     vkCmdBeginRenderPass(cb, &render, VK_SUBPASS_CONTENTS_INLINE);
     // Compiled pipeline owners survive eviction of the application cache.
     pipelines.clear();
-    recordVulkanDrawList(cb, frames.descriptorSet(0), {2, 2}, compiled);
+    recordVulkanDrawList(cb, frames.bindingSet(0), {2, 2}, compiled);
     vkCmdEndRenderPass(cb);
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -402,9 +409,10 @@ void runVulkanDrawListTests(const rhi::vulkan::Device &device)
     }
     clipList.opaque.push_back(item(background, 8));
     clipList.objectData[8].world[3][2] = 0.25f;
-    auto clipPipeline = originalPass;
-    clipPipeline.renderPass = clipPass.reference();
-    clipPipeline.descriptorSetLayouts = {clipFrames.descriptorSetLayoutReference()};
+    auto nativeClipPipeline = nativePassPipeline;
+    nativeClipPipeline.renderPass = clipPass.reference();
+    nativeClipPipeline.descriptorSetLayouts[0] = clipFrames.descriptorSetLayoutReference();
+    auto clipPipeline = describeGraphicsPipeline(nativeClipPipeline, resourceDevice);
     const auto clipDraws =
         VulkanDrawListCompiler{}.compile(clipList, resources, clipPipeline, pipelines);
     for (size_t i = 2; i < 7; ++i)
@@ -444,7 +452,7 @@ void runVulkanDrawListTests(const rhi::vulkan::Device &device)
     render.clearValueCount = 2;
     render.pClearValues = clipClear.data();
     vkCmdBeginRenderPass(cb, &render, VK_SUBPASS_CONTENTS_INLINE);
-    recordVulkanDrawList(cb, clipFrames.descriptorSet(0), {8, 1}, clipDraws);
+    recordVulkanDrawList(cb, clipFrames.bindingSet(0), {8, 1}, clipDraws);
     vkCmdEndRenderPass(cb);
     copy.imageExtent = {8, 1, 1};
     vkCmdCopyImageToBuffer(cb, clipImage.get(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,

@@ -1,16 +1,16 @@
 #include "vulkan/VulkanRenderer.hpp"
-#include "vulkan/VulkanResourcePreparation.hpp"
+#include "resources/ResourcePreparationService.hpp"
 
-#include "vulkan/GpuMaterial.hpp"
-#include "vulkan/Mesh.hpp"
-#include "vulkan/RenderAssetCache.hpp"
-#include "vulkan/VulkanDrawListCompiler.hpp"
-#include "vulkan/VulkanDrawListRecorder.hpp"
+#include "resources/RenderAssetStore.hpp"
+#include "core/DrawCompiler.hpp"
+#include "vulkan/DefaultPipelineFactory.hpp"
+#include "vulkan/VulkanCommandEncoder.hpp"
+#include "vulkan/VulkanPass.hpp"
+#include "core/DrawRecorder.hpp"
 #include "vulkan/VulkanContext.hpp"
-#include "vulkan/VulkanScenePreparation.hpp"
-#include "vulkan/GpuTexture.hpp"
+#include "resources/ScenePreparationSession.hpp"
 
-#include <imgui_impl_vulkan.h>
+#include "vulkan/VulkanGuiCommandContext.hpp"
 
 #include <array>
 #include <stdexcept>
@@ -22,10 +22,10 @@ namespace rubia::rhi::vulkan
 namespace
 {
 
-constexpr std::size_t kSceneColorAttachment = 0;
-constexpr std::size_t kSceneDepthAttachment = 1;
-constexpr std::size_t kSceneResolveAttachment = 2;
-constexpr VkSampleCountFlagBits kSceneSamples = VK_SAMPLE_COUNT_4_BIT;
+constexpr std::size_t kSceneColorAttachment = render::sceneColorAttachment;
+constexpr std::size_t kSceneDepthAttachment = render::sceneDepthAttachment;
+constexpr std::size_t kSceneResolveAttachment = render::sceneResolveAttachment;
+constexpr auto kSceneSamples = static_cast<VkSampleCountFlagBits>(render::sceneSamples);
 
 void validateSceneSampleCount(const Device& device, VkFormat colorFormat, VkFormat depthFormat)
 {
@@ -49,90 +49,9 @@ void validateSceneSampleCount(const Device& device, VkFormat colorFormat, VkForm
         throw std::runtime_error("scene attachment formats do not support 4x MSAA");
 }
 
-RenderPass makeSceneRenderPass(
-    const Device& device,
-    VkFormat colorFormat,
-    VkFormat depthFormat)
+RenderPass makeSceneRenderPass(const Device& device, VkFormat color, VkFormat depth)
 {
-    VkAttachmentDescription colorAttachment{};
-    colorAttachment.format = colorFormat;
-    colorAttachment.samples = kSceneSamples;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    // Only the single-sample resolve is consumed after this pass.
-    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentDescription depthAttachment{};
-    depthAttachment.format = depthFormat;
-    depthAttachment.samples = kSceneSamples;
-    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    depthAttachment.finalLayout =
-        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentDescription resolveAttachment = colorAttachment;
-    resolveAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    resolveAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    resolveAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-
-    VkAttachmentReference colorReference{};
-    colorReference.attachment =
-        static_cast<uint32_t>(kSceneColorAttachment);
-    colorReference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference depthReference{};
-    depthReference.attachment =
-        static_cast<uint32_t>(kSceneDepthAttachment);
-    depthReference.layout =
-        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference resolveReference{};
-    resolveReference.attachment = static_cast<uint32_t>(kSceneResolveAttachment);
-    resolveReference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &colorReference;
-    subpass.pResolveAttachments = &resolveReference;
-    subpass.pDepthStencilAttachment = &depthReference;
-
-    VkSubpassDependency dependency{};
-    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-    dependency.dstSubpass = 0;
-    dependency.srcStageMask =
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dependency.dstStageMask =
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dependency.dstAccessMask =
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-
-    const std::array<VkAttachmentDescription, 3> attachments = {
-        colorAttachment,
-        depthAttachment,
-        resolveAttachment
-    };
-
-    VkRenderPassCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    createInfo.attachmentCount =
-        static_cast<uint32_t>(attachments.size());
-    createInfo.pAttachments = attachments.data();
-    createInfo.subpassCount = 1;
-    createInfo.pSubpasses = &subpass;
-    createInfo.dependencyCount = 1;
-    createInfo.pDependencies = &dependency;
-
-    return RenderPass(device.get(), createInfo);
+    return createRenderPass(device, render::scenePassLayout(fromVulkanFormat(color), fromVulkanFormat(depth)));
 }
 
 std::vector<RenderTarget> makeSceneRenderTargets(
@@ -180,59 +99,9 @@ std::vector<RenderTarget> makeSceneRenderTargets(
     return targets;
 }
 
-RenderPass makeEditorViewportRenderPass(
-    const Device& device,
-    VkFormat colorFormat)
+RenderPass makeEditorViewportRenderPass(const Device& device, VkFormat color)
 {
-    VkAttachmentDescription colorAttachment{};
-    colorAttachment.format = colorFormat;
-    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    colorAttachment.finalLayout =
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-    VkAttachmentReference colorReference{};
-    colorReference.attachment = 0;
-    colorReference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &colorReference;
-
-    std::array<VkSubpassDependency, 2> dependencies{};
-    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
-    dependencies[0].dstSubpass = 0;
-    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependencies[0].dstStageMask =
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-
-    dependencies[1].srcSubpass = 0;
-    dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
-    dependencies[1].srcStageMask =
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-
-    VkRenderPassCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    createInfo.attachmentCount = 1;
-    createInfo.pAttachments = &colorAttachment;
-    createInfo.subpassCount = 1;
-    createInfo.pSubpasses = &subpass;
-    createInfo.dependencyCount =
-        static_cast<uint32_t>(dependencies.size());
-    createInfo.pDependencies = dependencies.data();
-    return RenderPass(device.get(), createInfo);
+    return createRenderPass(device, render::editorOutputPassLayout(fromVulkanFormat(color)));
 }
 
 std::vector<RenderTarget> makeEditorViewportTargets(
@@ -263,98 +132,13 @@ std::vector<RenderTarget> makeEditorViewportTargets(
     return targets;
 }
 
-bool isSrgbFormat(VkFormat format) noexcept
-{
-    switch (format)
-    {
-    case VK_FORMAT_R8G8B8_SRGB:
-    case VK_FORMAT_R8G8B8A8_SRGB:
-    case VK_FORMAT_B8G8R8_SRGB:
-    case VK_FORMAT_B8G8R8A8_SRGB:
-    case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
-        return true;
-    default:
-        return false;
-    }
-}
 
-uint32_t selectPresentOutputTransferFunction(
-    VkFormat format,
-    VkColorSpaceKHR colorSpace)
-{
-    if (isSrgbFormat(format))
-    {
-        // The color attachment performs linear-to-sRGB encoding.
-        return 0;
-    }
-    if (colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
-    {
-        // A UNORM attachment needs explicit encoding in the shader.
-        return 1;
-    }
-    throw std::runtime_error(
-        "present shader does not support the selected output color space");
-}
 
-VkSamplerCreateInfo makePresentSamplerCreateInfo()
-{
-    VkSamplerCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    createInfo.magFilter = VK_FILTER_LINEAR;
-    createInfo.minFilter = VK_FILTER_LINEAR;
-    createInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    createInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    createInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    createInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    createInfo.minLod = 0.0f;
-    createInfo.maxLod = 0.0f;
-    return createInfo;
-}
 
-void updatePresentDescriptorSets(
-    VkDevice device,
-    const std::vector<RenderTarget>& sceneRenderTargets,
-    VkSampler sampler,
-    const std::vector<VkDescriptorSet>& descriptorSets)
-{
-    if (sceneRenderTargets.size() != descriptorSets.size())
-    {
-        throw std::invalid_argument(
-            "present descriptor count must match scene render targets");
-    }
 
-    for (std::size_t i = 0; i < descriptorSets.size(); ++i)
-    {
-        VkDescriptorImageInfo imageInfo{};
-        imageInfo.imageView =
-            sceneRenderTargets[i].imageView(kSceneResolveAttachment);
-        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        VkDescriptorImageInfo samplerInfo{};
-        samplerInfo.sampler = sampler;
 
-        std::array<VkWriteDescriptorSet, 2> writes{};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = descriptorSets[i];
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-        writes[0].pImageInfo = &imageInfo;
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = descriptorSets[i];
-        writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-        writes[1].pImageInfo = &samplerInfo;
 
-        vkUpdateDescriptorSets(
-            device,
-            static_cast<uint32_t>(writes.size()),
-            writes.data(),
-            0,
-            nullptr);
-    }
-}
 
 } // namespace
 
@@ -418,6 +202,8 @@ void VulkanRenderer::createPresentation(const CreateInfo& createInfo)
     try
     {
         const Device& device = context_->device();
+        scheduler_ = std::make_unique<render::FrameScheduler>(createInfo.framesInFlight);
+        resourceDevice_ = std::make_unique<VulkanResourceDevice>(device);
         SwapchainResources::CreateInfo swapchainCreateInfo{};
         swapchainCreateInfo.surface = context_->surface();
         swapchainCreateInfo.framebufferExtent =
@@ -425,11 +211,13 @@ void VulkanRenderer::createPresentation(const CreateInfo& createInfo)
         swapchainResources_.create(device, swapchainCreateInfo);
 
         createFrameSlots(createInfo.framesInFlight);
-        pipelineCache_ = std::make_unique<GraphicsPipelineCache>(device);
-        pipelinePreparation_ = std::make_unique<VulkanPipelinePreparation>(device, *pipelineCache_);
+        pipelineDevice_ = std::make_unique<VulkanPipelineDevice>(*resourceDevice_);
+        pipelineCache_ = std::make_unique<render::PipelineLibrary>(*pipelineDevice_);
+        pipelinePreparation_ = std::make_unique<render::PipelinePreparation>(*pipelineDevice_, *pipelineCache_);
         uploads_ = std::make_unique<VulkanUploadService>(device);
-        resourcePreparation_ = std::make_unique<VulkanResourcePreparation>(
-            device, *uploads_, pendingRetired_, createInfo.resourcePreparation);
+        resourceUploads_ = std::make_unique<VulkanUploadAdapter>(*uploads_);
+        resourcePreparation_ = std::make_unique<render::ResourcePreparationService>(
+            *resourceDevice_, *resourceUploads_, scheduler_->pending(), createInfo.resourcePreparation);
     }
     catch (...)
     {
@@ -438,33 +226,33 @@ void VulkanRenderer::createPresentation(const CreateInfo& createInfo)
     }
 }
 
-std::shared_ptr<const GraphicsPipeline> VulkanRenderer::preparePipeline(const GraphicsPipeline::CreateInfo& info)
+rhi::PipelineRef VulkanRenderer::preparePipeline(const GraphicsPipeline::CreateInfo& info)
 {
     if (!pipelineCache_) throw std::logic_error("renderer pipeline cache is not initialized");
-    return pipelineCache_->getOrCreate(info);
+    return pipelineCache_->getOrCreate(describeGraphicsPipeline(info, *resourceDevice_));
 }
 
-GraphicsPipelineCache::Statistics VulkanRenderer::pipelineCacheStatistics() const
+render::PipelineLibrary::Statistics VulkanRenderer::pipelineCacheStatistics() const
 {
-    return pipelineCache_ ? pipelineCache_->statistics() : GraphicsPipelineCache::Statistics{};
+    return pipelineCache_ ? pipelineCache_->statistics() : render::PipelineLibrary::Statistics{};
 }
 
 render::PipelinePreparationResult VulkanRenderer::prewarmScenePipelines(
-    const RenderAssetCache& resources, const std::vector<asset::MaterialAssetHandle>& materials)
+    const render::RenderAssetStore& resources, const std::vector<asset::MaterialAssetHandle>& materials)
 {
     if (!pipelinePreparation_ || !hasSceneResources())
         return {ResourcePreparationCode::InvalidRequest, {}, "pipeline prewarming requires a scene pass"};
     try
     {
-        const auto pass = makePipelineCreateInfo();
-        std::vector<GraphicsPipeline::CreateInfo> descriptions;
+        const auto& pass = scenePipelineDescription_;
+        std::vector<rhi::GraphicsPipelineDesc> descriptions;
         descriptions.reserve(materials.size());
         for (auto handle : materials)
         {
             const auto& material = resources.material(handle);
             const auto prepared = resources.materialTemplateForMaterial(handle);
             if (!prepared) throw std::invalid_argument("material has no resident template");
-            descriptions.push_back(VulkanDrawListCompiler::describeMaterialPipeline(*prepared,
+            descriptions.push_back(render::DrawCompiler::describeMaterialPipeline(*prepared,
                 render::makePipelineVariantKey(material.materialTemplate(), material.renderState()), pass));
         }
         return pipelinePreparation_->request(std::move(descriptions));
@@ -491,7 +279,7 @@ void VulkanRenderer::releasePipelinePreparation(render::PipelinePreparationTicke
 }
 
 void VulkanRenderer::beginScenePreparation(
-    RenderAssetCache& renderAssets, render::SceneResourceRequest request)
+    render::RenderAssetStore& renderAssets, render::SceneResourceRequest request)
 {
     if (!*this || hasSceneResources() ||
         (scenePreparation_ && scenePreparation_->ownsResources()) || !renderAssets.empty() ||
@@ -499,13 +287,26 @@ void VulkanRenderer::beginScenePreparation(
     {
         throw std::logic_error("scene preparation requires presentation and an empty scene/cache");
     }
-    scenePreparation_ = std::make_unique<VulkanScenePreparation>(
+    scenePreparation_ = std::make_unique<render::ScenePreparationSession>(
         *this, renderAssets, *resourcePreparation_, std::move(request));
     scenePreparation_->begin();
 }
 
+bool VulkanRenderer::canPrepareResources() const noexcept
+{
+    return resourcePreparation_ && !failed_ && !recordingFrame_ &&
+        (!scenePreparation_ || !scenePreparation_->ownsResources());
+}
+
+render::ResourcePreparationService& VulkanRenderer::resourcePreparationService()
+{
+    if (!resourcePreparation_) throw std::out_of_range("resource preparation is not initialized");
+    return *resourcePreparation_;
+}
+
 void VulkanRenderer::advanceResourcePreparation()
 {
+    if (recordingFrame_) throw std::logic_error("cannot publish resources during frame recording");
     if (!uploads_)
     {
         return;
@@ -520,7 +321,7 @@ void VulkanRenderer::advanceResourcePreparation()
 }
 
 ResourcePreparationResult VulkanRenderer::prepareTexture(
-    RenderAssetCache& cache, asset::AssetSnapshot<asset::TextureAsset> source)
+    render::RenderAssetStore& cache, asset::AssetSnapshot<asset::TextureAsset> source)
 {
     if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
     {
@@ -531,7 +332,7 @@ ResourcePreparationResult VulkanRenderer::prepareTexture(
     return resourcePreparation_->prepareTexture(cache, std::move(source));
 }
 
-ResourcePreparationResult VulkanRenderer::prepareMesh(RenderAssetCache& cache,
+ResourcePreparationResult VulkanRenderer::prepareMesh(render::RenderAssetStore& cache,
                                                       asset::AssetSnapshot<asset::MeshAsset> source)
 {
     if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
@@ -544,7 +345,7 @@ ResourcePreparationResult VulkanRenderer::prepareMesh(RenderAssetCache& cache,
 }
 
 ResourcePreparationResult VulkanRenderer::prepareShader(
-    RenderAssetCache& cache, asset::AssetSnapshot<asset::ShaderAsset> source)
+    render::RenderAssetStore& cache, asset::AssetSnapshot<asset::ShaderAsset> source)
 {
     if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
     {
@@ -555,7 +356,7 @@ ResourcePreparationResult VulkanRenderer::prepareShader(
     return resourcePreparation_->prepareShader(cache, std::move(source));
 }
 ResourcePreparationResult VulkanRenderer::prepareShaderProgram(
-    RenderAssetCache& cache, asset::AssetSnapshot<asset::ShaderProgramAsset> source)
+    render::RenderAssetStore& cache, asset::AssetSnapshot<asset::ShaderProgramAsset> source)
 {
     if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
     {
@@ -566,7 +367,7 @@ ResourcePreparationResult VulkanRenderer::prepareShaderProgram(
     return resourcePreparation_->prepareShaderProgram(cache, std::move(source));
 }
 ResourcePreparationResult VulkanRenderer::prepareMaterialTemplate(
-    RenderAssetCache& cache, asset::AssetSnapshot<asset::MaterialTemplateAsset> source)
+    render::RenderAssetStore& cache, asset::AssetSnapshot<asset::MaterialTemplateAsset> source)
 {
     if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
     {
@@ -577,7 +378,7 @@ ResourcePreparationResult VulkanRenderer::prepareMaterialTemplate(
     return resourcePreparation_->prepareMaterialTemplate(cache, std::move(source));
 }
 ResourcePreparationResult VulkanRenderer::prepareMaterial(
-    RenderAssetCache& cache, asset::AssetSnapshot<asset::MaterialAsset> source)
+    render::RenderAssetStore& cache, asset::AssetSnapshot<asset::MaterialAsset> source)
 {
     if (!resourcePreparation_ || (scenePreparation_ && scenePreparation_->ownsResources()))
     {
@@ -659,14 +460,15 @@ void VulkanRenderer::createSceneResources(
     {
         const Device& device = context_->device();
         const uint32_t count = frameCount();
-        frameDataResources_.create(device, count, maxRenderObjects);
+        frameDataResources_.create(*resourceDevice_, count, maxRenderObjects);
         createSceneRenderTargets(extent(), count);
         if (outputMode_ == OutputMode::Editor)
         {
             createEditorViewportResources(extent(), count);
         }
         createPresentResources(count);
-        graphicsPipeline_ = preparePipeline(makePipelineCreateInfo());
+        scenePipelineDescription_ = describeGraphicsPipeline(makePipelineCreateInfo(), *resourceDevice_);
+        graphicsPipeline_ = pipelineCache_->getOrCreate(scenePipelineDescription_);
         presentPipeline_ = preparePipeline(makePresentPipelineCreateInfo());
     }
     catch (...)
@@ -674,6 +476,19 @@ void VulkanRenderer::createSceneResources(
         releaseSceneResources();
         throw;
     }
+}
+
+void VulkanRenderer::createPreparedSceneResources(
+    std::shared_ptr<const render::PreparedMaterialTemplate> material,
+    std::shared_ptr<const render::PreparedShaderProgram> present, uint32_t maxRenderObjects)
+{
+    createSceneResources(makeDefaultScenePipeline(material->program(), material->layoutReference()),
+        makeDefaultPresentPipeline(std::move(present)), maxRenderObjects);
+}
+
+void VulkanRenderer::releasePreparedSceneResources() noexcept
+{
+    releaseSceneResources();
 }
 
 void VulkanRenderer::resetSceneResources() noexcept
@@ -695,12 +510,10 @@ void VulkanRenderer::releaseSceneResources() noexcept
     }
     presentPipeline_.reset();
     graphicsPipeline_.reset();
+    scenePipelineDescription_ = {};
     if (pipelinePreparation_) pipelinePreparation_->cancelAll();
     if (pipelineCache_) pipelineCache_->clear();
-    presentDescriptorSets_.clear();
-    presentDescriptorPool_.reset();
-    presentDescriptorSetLayout_.reset();
-    presentSampler_.reset();
+    outputBindings_.reset();
     editorViewportTargets_.clear();
     editorViewportRenderPass_.reset();
     sceneRenderTargets_.clear();
@@ -722,12 +535,17 @@ void VulkanRenderer::reset() noexcept
     resetSceneResources();
     scenePreparation_.reset();
     resourcePreparation_.reset();
+    resourceUploads_.reset();
     if (uploads_) uploads_->shutdown();
     uploads_.reset();
     pipelinePreparation_.reset();
     pipelineCache_.reset();
-    pendingRetired_.clear();
+    pipelineDevice_.reset();
     frameSlots_.clear();
+    scheduler_.reset();
+    failed_ = false;
+    recordingFrame_ = false;
+    resourceDevice_.reset();
     swapchainResources_.reset();
     outputMode_ = OutputMode::Runtime;
     context_ = nullptr;
@@ -746,7 +564,7 @@ void VulkanRenderer::retireExternalResource(std::shared_ptr<const void> resource
 {
     if (!*this || !resource)
         throw std::invalid_argument("retirement requires a renderer and an owned resource");
-    pendingRetired_.retire(std::move(resource));
+    scheduler_->pending().retire(std::move(resource));
 }
 
 void VulkanRenderer::drainRetiredResources()
@@ -818,9 +636,8 @@ void VulkanRenderer::resize(VkExtent2D framebufferExtent)
     recreatePresentDescriptorSets(
         static_cast<uint32_t>(frameSlots_.size()));
     presentOutputTransferFunction_ =
-        selectPresentOutputTransferFunction(
-            swapchainResources_.format(),
-            swapchainResources_.colorSpace());
+        render::outputTransferFunction(fromVulkanFormat(swapchainResources_.format()),
+            swapchainResources_.colorSpace() == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
 
     if (outputMode_ == OutputMode::Runtime)
     {
@@ -876,42 +693,25 @@ void VulkanRenderer::resizeEditorViewport(VkExtent2D extent)
             extent,
             static_cast<uint32_t>(frameSlots_.size()),
             editorViewportFormat_);
-    const uint32_t frameCount =
-        static_cast<uint32_t>(frameSlots_.size());
-    const std::vector<VkDescriptorPoolSize> poolSizes = {
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, frameCount},
-        {VK_DESCRIPTOR_TYPE_SAMPLER, frameCount}
-    };
-    DescriptorPool newPresentDescriptorPool(
-        device.get(),
-        poolSizes,
-        frameCount);
-    std::vector<VkDescriptorSet> newPresentDescriptorSets =
-        newPresentDescriptorPool.allocate(
-            presentDescriptorSetLayout_.get(),
-            frameCount);
-    updatePresentDescriptorSets(
-        device.get(),
-        newSceneRenderTargets,
-        presentSampler_.get(),
-        newPresentDescriptorSets);
+    std::vector<rhi::TextureViewRef> resolveViews;
+    for (const auto& target : newSceneRenderTargets) resolveViews.push_back(target.view(kSceneResolveAttachment));
+    auto newOutputBindings = outputBindings_;
+    newOutputBindings.rebind(*resourceDevice_, resolveViews);
 
     // Recorded commands and presentation descriptors reference the previous
     // scene targets.
     collectRetiredResourcesAfterIdle();
     sceneRenderTargets_ = std::move(newSceneRenderTargets);
     editorViewportTargets_ = std::move(newEditorViewportTargets);
-    presentDescriptorSets_.clear();
-    presentDescriptorPool_ = std::move(newPresentDescriptorPool);
-    presentDescriptorSets_ = std::move(newPresentDescriptorSets);
+    outputBindings_ = std::move(newOutputBindings);
     ++editorViewportRevision_;
 }
 
 
 VulkanRenderer::RenderResult VulkanRenderer::render(
     const render::RenderFrame& frameData,
-    const RenderAssetCache& renderAssets,
-    ImDrawData* uiDrawData)
+    const render::RenderAssetStore& renderAssets,
+    const render::GuiOverlay* uiDrawData)
 {
     if (!sceneReady())
     {
@@ -920,21 +720,25 @@ VulkanRenderer::RenderResult VulkanRenderer::render(
     return renderFrame(&frameData, &renderAssets, uiDrawData);
 }
 
-VulkanRenderer::RenderResult VulkanRenderer::renderGui(ImDrawData* uiDrawData)
+VulkanRenderer::RenderResult VulkanRenderer::renderGui(const render::GuiOverlay* uiDrawData)
 {
     return renderFrame(nullptr, nullptr, uiDrawData);
 }
 
 VulkanRenderer::RenderResult VulkanRenderer::renderFrame(
     const render::RenderFrame* sceneFrame,
-    const RenderAssetCache* renderAssets,
-    ImDrawData* uiDrawData)
+    const render::RenderAssetStore* renderAssets,
+    const render::GuiOverlay* uiDrawData)
 {
     if (!*this)
     {
         throw std::logic_error("cannot render with an uninitialized VulkanRenderer");
     }
-    VulkanDrawList drawList;
+    if (failed_) throw std::logic_error("presentation session failed; recreate it before rendering");
+    if (recordingFrame_) throw std::logic_error("recursive frame recording");
+    recordingFrame_ = true;
+    struct RecordingScope { bool& active; ~RecordingScope() { active = false; } } recordingScope{recordingFrame_};
+    render::PreparedDrawList drawList;
     if (sceneFrame != nullptr)
     {
         const render::RenderFrame& frameData = *sceneFrame;
@@ -964,7 +768,7 @@ VulkanRenderer::RenderResult VulkanRenderer::renderFrame(
     FrameContext& frame = slot.context;
     frame.waitUntilReusable();
     frame.resetCommands();
-    slot.retired.clear();
+    scheduler_->beginReusableSlot(currentFrame_);
 
     uint32_t imageIndex = 0;
     const VkResult acquireResult = swapchainResources_.acquireNextImage(
@@ -980,6 +784,13 @@ VulkanRenderer::RenderResult VulkanRenderer::renderFrame(
     {
         throw std::runtime_error("failed to acquire swapchain image");
     }
+    // Any exception after acquisition terminates this presentation session.
+    // Its acquire semaphore/image and possibly reset fence cannot be retried.
+    bool frameFinished = false;
+    struct AcquiredScope {
+        bool& failed; bool& finished;
+        ~AcquiredScope() { if (!finished) failed = true; }
+    } acquiredScope{failed_, frameFinished};
     bool needsResize = acquireResult == VK_SUBOPTIMAL_KHR;
 
     swapchainResources_.waitUntilImageReusable(device, imageIndex);
@@ -995,11 +806,12 @@ VulkanRenderer::RenderResult VulkanRenderer::renderFrame(
         frame.commandBuffer(),
         currentFrame_,
         imageIndex,
-        sceneFrame != nullptr ? frameDataResources_.descriptorSet(currentFrame_) : VK_NULL_HANDLE,
+        sceneFrame != nullptr ? frameDataResources_.bindingSet(currentFrame_) : rhi::BindingSetRef{},
         drawList,
         uiDrawData,
         sceneFrame != nullptr);
 
+    const rhi::CompletionPoint submittedPoint = scheduler_->candidate();
     frame.resetFence();
 
     const VkSemaphore waitSemaphore = frame.imageAvailable();
@@ -1030,8 +842,8 @@ VulkanRenderer::RenderResult VulkanRenderer::renderFrame(
 
     // No allocation or destruction after submit: associate only with this NEW
     // submission, never the previous fence cycle we waited for above. Early
-    // acquire returns and exceptions before submit leave pendingRetired_ intact.
-    slot.retired.swap(pendingRetired_);
+    // acquire returns and exceptions before submit leave pending retirement intact.
+    scheduler_->commitSuccess(currentFrame_, submittedPoint);
 
     const VkResult presentResult =
         swapchainResources_.present(device.presentQueue(), imageIndex);
@@ -1045,10 +857,11 @@ VulkanRenderer::RenderResult VulkanRenderer::renderFrame(
         throw std::runtime_error("failed to present swapchain image");
     }
 
+    frameFinished = true;
     currentFrame_ =
         (currentFrame_ + 1) % static_cast<uint32_t>(frameSlots_.size());
     return needsResize
-        ? RenderResult::NeedsResize
+        ? RenderResult::RenderedNeedsResize
         : RenderResult::Rendered;
 }
 
@@ -1075,10 +888,8 @@ bool VulkanRenderer::hasSceneResources() const noexcept
         static_cast<bool>(swapchainResources_) &&
         static_cast<bool>(sceneRenderPass_) &&
         sceneRenderTargets_.size() == frameSlots_.size() &&
-        static_cast<bool>(presentSampler_) &&
-        static_cast<bool>(presentDescriptorSetLayout_) &&
-        static_cast<bool>(presentDescriptorPool_) &&
-        presentDescriptorSets_.size() == frameSlots_.size() &&
+        static_cast<bool>(outputBindings_.layout()) &&
+        outputBindings_.size() == frameSlots_.size() &&
         static_cast<bool>(graphicsPipeline_) &&
         static_cast<bool>(presentPipeline_) &&
         !frameSlots_.empty() &&
@@ -1097,8 +908,8 @@ VulkanRenderer::editorViewportOutput(uint32_t frameIndex) const
 
     const RenderTarget& target = editorViewportTargets_[frameIndex];
     return {
-        target.imageView(0),
-        target.extent(),
+        target.view(0),
+        {target.extent().width, target.extent().height},
         editorViewportRevision_
     };
 }
@@ -1108,9 +919,8 @@ void VulkanRenderer::collectRetiredResourcesAfterIdle()
     for (RenderFrameSlot& slot : frameSlots_)
     {
         slot.context.resetCommands();
-        slot.retired.clear();
     }
-    pendingRetired_.clear();
+    if (scheduler_) scheduler_->collectAfterIdle();
 }
 
 void VulkanRenderer::createFrameSlots(uint32_t frameCount)
@@ -1192,76 +1002,28 @@ void VulkanRenderer::createEditorViewportResources(
 
 void VulkanRenderer::createPresentResources(uint32_t frameCount)
 {
-    const Device& device = context_->device();
-
-    Sampler sampler(device.get(), makePresentSamplerCreateInfo());
-
-    std::vector<VkDescriptorSetLayoutBinding> bindings(2);
-    bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    bindings[1].binding = 1;
-    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    DescriptorSetLayout descriptorSetLayout(device.get(), bindings);
-
-    const std::vector<VkDescriptorPoolSize> poolSizes = {
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, frameCount},
-        {VK_DESCRIPTOR_TYPE_SAMPLER, frameCount}
-    };
-    DescriptorPool descriptorPool(device.get(), poolSizes, frameCount);
-    std::vector<VkDescriptorSet> descriptorSets =
-        descriptorPool.allocate(descriptorSetLayout.get(), frameCount);
-    updatePresentDescriptorSets(
-        device.get(),
-        sceneRenderTargets_,
-        sampler.get(),
-        descriptorSets);
-
-    presentDescriptorSets_.clear();
-    presentDescriptorPool_.reset();
-    presentDescriptorSetLayout_.reset();
-    presentSampler_.reset();
-    presentSampler_ = std::move(sampler);
-    presentDescriptorSetLayout_ = std::move(descriptorSetLayout);
-    presentDescriptorPool_ = std::move(descriptorPool);
-    presentDescriptorSets_ = std::move(descriptorSets);
-    presentOutputTransferFunction_ =
-        selectPresentOutputTransferFunction(
-            swapchainResources_.format(),
-            swapchainResources_.colorSpace());
+    if (frameCount != sceneRenderTargets_.size()) throw std::logic_error("output frame count mismatch");
+    std::vector<rhi::TextureViewRef> views;
+    for (const auto& target : sceneRenderTargets_) views.push_back(target.view(kSceneResolveAttachment));
+    outputBindings_.create(*resourceDevice_, views);
+    presentOutputTransferFunction_ = render::outputTransferFunction(fromVulkanFormat(swapchainResources_.format()),
+        swapchainResources_.colorSpace() == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
 }
 
 void VulkanRenderer::recreatePresentDescriptorSets(uint32_t frameCount)
 {
-    const Device& device = context_->device();
-    const std::vector<VkDescriptorPoolSize> poolSizes = {
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, frameCount},
-        {VK_DESCRIPTOR_TYPE_SAMPLER, frameCount}
-    };
-    DescriptorPool descriptorPool(device.get(), poolSizes, frameCount);
-    std::vector<VkDescriptorSet> descriptorSets = descriptorPool.allocate(
-        presentDescriptorSetLayout_.get(),
-        frameCount);
-    updatePresentDescriptorSets(
-        device.get(),
-        sceneRenderTargets_,
-        presentSampler_.get(),
-        descriptorSets);
-
-    presentDescriptorSets_.clear();
-    presentDescriptorPool_ = std::move(descriptorPool);
-    presentDescriptorSets_ = std::move(descriptorSets);
+    if (frameCount != sceneRenderTargets_.size()) throw std::logic_error("output frame count mismatch");
+    std::vector<rhi::TextureViewRef> views;
+    for (const auto& target : sceneRenderTargets_) views.push_back(target.view(kSceneResolveAttachment));
+    outputBindings_.rebind(*resourceDevice_, views);
 }
 
-VulkanDrawList VulkanRenderer::compileDrawList(const render::RenderList& source,
-                                              const RenderAssetCache& resources)
+render::PreparedDrawList VulkanRenderer::compileDrawList(const render::RenderList& source,
+                                              const render::RenderAssetStore& resources)
 {
-    if (!pipelineCache_ || !sceneRenderPass_ || !frameDataResources_.descriptorSetLayoutReference())
+    if (!pipelineCache_ || !sceneRenderPass_ || !frameDataResources_.bindingLayout())
         throw std::logic_error("draw compilation requires initialized scene resources");
-    return VulkanDrawListCompiler{}.compile(source, resources, makePipelineCreateInfo(), *pipelineCache_);
+    return render::DrawCompiler{}.compile(source, resources, scenePipelineDescription_, *pipelineCache_);
 }
 
 GraphicsPipeline::CreateInfo VulkanRenderer::makePipelineCreateInfo() const
@@ -1272,7 +1034,7 @@ GraphicsPipeline::CreateInfo VulkanRenderer::makePipelineCreateInfo() const
     createInfo.multisample.samples = kSceneSamples;
     createInfo.descriptorSetLayouts.insert(
         createInfo.descriptorSetLayouts.begin(),
-        frameDataResources_.descriptorSetLayoutReference());
+        nativeBindingLayout(frameDataResources_.bindingLayout()));
     return createInfo;
 }
 
@@ -1285,7 +1047,7 @@ VulkanRenderer::makePresentPipelineCreateInfo() const
         : swapchainResources_.renderPassReference();
     createInfo.descriptorSetLayouts.insert(
         createInfo.descriptorSetLayouts.begin(),
-        presentDescriptorSetLayout_.reference());
+        nativeBindingLayout(outputBindings_.layout()));
     return createInfo;
 }
 
@@ -1310,292 +1072,52 @@ void VulkanRenderer::updateFrameData(
     frameDataResources_.sync(frameIndex);
 }
 
-void VulkanRenderer::recordCommandBuffer(
-    VkCommandBuffer commandBuffer,
-    uint32_t frameIndex,
-    uint32_t imageIndex,
-    VkDescriptorSet descriptorSet,
-    const VulkanDrawList& drawList,
-    ImDrawData* uiDrawData,
-    bool drawScene)
+void VulkanRenderer::recordCommandBuffer(VkCommandBuffer commandBuffer,
+    uint32_t frameIndex, uint32_t imageIndex, const rhi::BindingSetRef& descriptorSet,
+    const render::PreparedDrawList& drawList, const render::GuiOverlay* uiDrawData, bool drawScene)
 {
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS)
-    {
         throw std::runtime_error("failed to begin recording command buffer");
-    }
 
-    if (!drawScene)
+    VulkanCommandEncoder commands(resourceDevice_->id(), commandBuffer);
+    VulkanGuiCommandContext guiContext{commandBuffer};
+    VulkanPassTarget presentation(resourceDevice_->id(), swapchainResources_.renderPassReference(),
+        swapchainResources_.framebuffer(imageIndex), swapchainResources_.extent());
+    std::optional<VulkanPassTarget> scene, viewport;
+    render::FramePasses passes;
+    passes.presentation = &presentation;
+    if (drawScene)
     {
-        recordEditorUiPass(commandBuffer, imageIndex, uiDrawData);
-    }
-    else
-    {
-        recordScenePass(
-            commandBuffer,
-            frameIndex,
-            descriptorSet,
-            drawList);
-        transitionSceneColorForSampling(commandBuffer, frameIndex);
+        const auto& target = sceneRenderTargets_.at(frameIndex);
+        scene.emplace(resourceDevice_->id(), sceneRenderPass_.reference(), target.framebuffer(), target.extent());
+        passes.scene = &*scene;
+        passes.sceneResolve = target.texture(kSceneResolveAttachment);
+        passes.frameBindings = descriptorSet;
+        passes.outputBindings = outputBindings_.set(frameIndex);
+        passes.outputPipeline = presentPipeline_;
+        passes.outputTransfer = presentOutputTransferFunction_;
         if (outputMode_ == OutputMode::Editor)
         {
-            recordEditorViewportPass(commandBuffer, frameIndex);
-            recordEditorUiPass(commandBuffer, imageIndex, uiDrawData);
-        }
-        else
-        {
-            recordPresentPass(
-                commandBuffer,
-                frameIndex,
-                imageIndex,
-                uiDrawData);
+            const auto& output = editorViewportTargets_.at(frameIndex);
+            viewport.emplace(resourceDevice_->id(), editorViewportRenderPass_.reference(), output.framebuffer(), output.extent());
+            passes.viewport = &*viewport;
         }
     }
-
+    render::recordFramePipeline(commands, outputMode_, passes, drawScene ? &drawList : nullptr, uiDrawData, guiContext);
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
-    {
         throw std::runtime_error("failed to record command buffer");
-    }
 }
 
-void VulkanRenderer::recordScenePass(
-    VkCommandBuffer commandBuffer,
-    uint32_t frameIndex,
-    VkDescriptorSet descriptorSet,
-    const VulkanDrawList& drawList)
-{
-    const RenderTarget& target = sceneRenderTargets_.at(frameIndex);
-    const VkExtent2D renderExtent = target.extent();
 
-    VkRenderPassBeginInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    renderPassInfo.renderPass = sceneRenderPass_.get();
-    renderPassInfo.framebuffer = target.framebuffer();
-    renderPassInfo.renderArea.extent = renderExtent;
 
-    std::array<VkClearValue, 2> clearValues{};
-    clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-    clearValues[1].depthStencil = {1.0f, 0};
-    renderPassInfo.clearValueCount =
-        static_cast<uint32_t>(clearValues.size());
-    renderPassInfo.pClearValues = clearValues.data();
 
-    vkCmdBeginRenderPass(
-        commandBuffer,
-        &renderPassInfo,
-        VK_SUBPASS_CONTENTS_INLINE);
-    recordVulkanDrawList(commandBuffer, descriptorSet, renderExtent, drawList);
 
-    vkCmdEndRenderPass(commandBuffer);
-}
 
-void VulkanRenderer::transitionSceneColorForSampling(
-    VkCommandBuffer commandBuffer,
-    uint32_t frameIndex)
-{
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image =
-        sceneRenderTargets_.at(frameIndex).image(kSceneResolveAttachment);
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
 
-    vkCmdPipelineBarrier(
-        commandBuffer,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        0,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        1,
-        &barrier);
-}
 
-void VulkanRenderer::recordPresentPass(
-    VkCommandBuffer commandBuffer,
-    uint32_t frameIndex,
-    uint32_t imageIndex,
-    ImDrawData* uiDrawData)
-{
-    const VkExtent2D presentExtent = swapchainResources_.extent();
 
-    // SwapchainResources still owns a temporary per-image depth attachment.
-    // It is cleared for render-pass compatibility but the present pipeline has
-    // depth testing and writes disabled. A later step removes this attachment.
-    std::array<VkClearValue, 2> clearValues{};
-    clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-    clearValues[1].depthStencil = {1.0f, 0};
 
-    VkRenderPassBeginInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    renderPassInfo.renderPass = swapchainResources_.renderPass();
-    renderPassInfo.framebuffer =
-        swapchainResources_.framebuffer(imageIndex);
-    renderPassInfo.renderArea.extent = presentExtent;
-    renderPassInfo.clearValueCount =
-        static_cast<uint32_t>(clearValues.size());
-    renderPassInfo.pClearValues = clearValues.data();
-
-    vkCmdBeginRenderPass(
-        commandBuffer,
-        &renderPassInfo,
-        VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(
-        commandBuffer,
-        VK_PIPELINE_BIND_POINT_GRAPHICS,
-        presentPipeline_->get());
-
-    VkViewport viewport{};
-    viewport.width = static_cast<float>(presentExtent.width);
-    viewport.height = static_cast<float>(presentExtent.height);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
-    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-
-    VkRect2D scissor{};
-    scissor.extent = presentExtent;
-    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-
-    const VkDescriptorSet descriptorSet =
-        presentDescriptorSets_.at(frameIndex);
-    vkCmdBindDescriptorSets(
-        commandBuffer,
-        VK_PIPELINE_BIND_POINT_GRAPHICS,
-        presentPipeline_->layout(),
-        0,
-        1,
-        &descriptorSet,
-        0,
-        nullptr);
-
-    render::PresentPushConstants pushConstants{};
-    pushConstants.outputTransferFunction =
-        presentOutputTransferFunction_;
-    vkCmdPushConstants(
-        commandBuffer,
-        presentPipeline_->layout(),
-        VK_SHADER_STAGE_FRAGMENT_BIT,
-        0,
-        sizeof(pushConstants),
-        &pushConstants);
-
-    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
-    if (uiDrawData != nullptr)
-    {
-        ImGui_ImplVulkan_RenderDrawData(uiDrawData, commandBuffer);
-    }
-    vkCmdEndRenderPass(commandBuffer);
-}
-
-void VulkanRenderer::recordEditorViewportPass(
-    VkCommandBuffer commandBuffer,
-    uint32_t frameIndex)
-{
-    const RenderTarget& target = editorViewportTargets_.at(frameIndex);
-    const VkExtent2D renderExtent = target.extent();
-
-    VkClearValue clearValue{};
-    clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-
-    VkRenderPassBeginInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    renderPassInfo.renderPass = editorViewportRenderPass_.get();
-    renderPassInfo.framebuffer = target.framebuffer();
-    renderPassInfo.renderArea.extent = renderExtent;
-    renderPassInfo.clearValueCount = 1;
-    renderPassInfo.pClearValues = &clearValue;
-
-    vkCmdBeginRenderPass(
-        commandBuffer,
-        &renderPassInfo,
-        VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(
-        commandBuffer,
-        VK_PIPELINE_BIND_POINT_GRAPHICS,
-        presentPipeline_->get());
-
-    VkViewport viewport{};
-    viewport.width = static_cast<float>(renderExtent.width);
-    viewport.height = static_cast<float>(renderExtent.height);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
-    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-
-    VkRect2D scissor{};
-    scissor.extent = renderExtent;
-    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-
-    const VkDescriptorSet descriptorSet =
-        presentDescriptorSets_.at(frameIndex);
-    vkCmdBindDescriptorSets(
-        commandBuffer,
-        VK_PIPELINE_BIND_POINT_GRAPHICS,
-        presentPipeline_->layout(),
-        0,
-        1,
-        &descriptorSet,
-        0,
-        nullptr);
-
-    render::PresentPushConstants pushConstants{};
-    // The Editor target is UNORM. Store display-encoded SDR so stock ImGui
-    // can sample and copy it without a custom tone-mapping shader.
-    pushConstants.outputTransferFunction = 1;
-    vkCmdPushConstants(
-        commandBuffer,
-        presentPipeline_->layout(),
-        VK_SHADER_STAGE_FRAGMENT_BIT,
-        0,
-        sizeof(pushConstants),
-        &pushConstants);
-
-    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
-    vkCmdEndRenderPass(commandBuffer);
-}
-
-void VulkanRenderer::recordEditorUiPass(
-    VkCommandBuffer commandBuffer,
-    uint32_t imageIndex,
-    ImDrawData* uiDrawData)
-{
-    const VkExtent2D presentExtent = swapchainResources_.extent();
-
-    std::array<VkClearValue, 2> clearValues{};
-    clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-    clearValues[1].depthStencil = {1.0f, 0};
-
-    VkRenderPassBeginInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    renderPassInfo.renderPass = swapchainResources_.renderPass();
-    renderPassInfo.framebuffer =
-        swapchainResources_.framebuffer(imageIndex);
-    renderPassInfo.renderArea.extent = presentExtent;
-    renderPassInfo.clearValueCount =
-        static_cast<uint32_t>(clearValues.size());
-    renderPassInfo.pClearValues = clearValues.data();
-
-    vkCmdBeginRenderPass(
-        commandBuffer,
-        &renderPassInfo,
-        VK_SUBPASS_CONTENTS_INLINE);
-    if (uiDrawData != nullptr)
-    {
-        ImGui_ImplVulkan_RenderDrawData(uiDrawData, commandBuffer);
-    }
-    vkCmdEndRenderPass(commandBuffer);
-}
 
 } // namespace rubia::rhi::vulkan

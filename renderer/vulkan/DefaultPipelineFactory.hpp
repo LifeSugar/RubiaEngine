@@ -1,13 +1,14 @@
 #pragma once
 
 #include "vulkan/GraphicsPipeline.hpp"
+#include "vulkan/GpuPreparedAssets.hpp"
 
 namespace rubia::rhi::vulkan
 {
 
 [[nodiscard]] GraphicsPipeline::CreateInfo makeDefaultScenePipeline(
     std::shared_ptr<const GpuShaderProgram> program,
-    std::shared_ptr<const DescriptorSetLayoutState> materialDescriptorSetLayout);
+    rhi::BindingLayoutRef materialDescriptorSetLayout);
 
 [[nodiscard]] GraphicsPipeline::CreateInfo makeDefaultPresentPipeline(
     std::shared_ptr<const GpuShaderProgram> program);

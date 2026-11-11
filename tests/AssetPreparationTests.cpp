@@ -8,6 +8,7 @@
 #include "vulkan/RenderPass.hpp"
 #include "vulkan/VulkanResourcePreparation.hpp"
 #include "vulkan/VulkanUploadService.hpp"
+#include "vulkan/VulkanResourceDevice.hpp"
 #include <array>
 #include <algorithm>
 #include <chrono>
@@ -95,7 +96,9 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
                               asset::ModelAssetHandle model,
                               asset::ShaderProgramAssetHandle present)
 {
+    VulkanResourceDevice resourceDevice(device);
     VulkanUploadService uploads(device);
+    VulkanUploadAdapter resourceUploads(uploads);
     RenderAssetCache cache;
     // Two external subscriptions must leave room for the internal dependency chain.
     RetiredResources preparationsRetired;
@@ -181,28 +184,28 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
         auto snapshot = assets.snapshot(material);
         auto probe = makeMaterialPreparation(cache, snapshot);
         probe->captureDependencies();
-        probe->createGpuResources(device);
+        probe->createGpuResources(resourceDevice);
         auto request = probe->buildUploadRequest();
         require(request.operations.size() == 1, "material must upload its parameter block");
-        const auto& op = std::get<BufferUpload>(request.operations.front());
+        const auto& op = std::get<rhi::BufferUpload>(request.operations.front());
         require(op.destination && op.source.owner &&
-                    op.destination->usage() == (VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT) &&
-                    op.destination->size() == snapshot.data->parameterData().size() &&
+                    op.destination->description().usage == (rhi::flag(rhi::BufferUsage::Uniform) | rhi::flag(rhi::BufferUsage::TransferDestination)) &&
+                    op.destination->description().size == snapshot.data->parameterData().size() &&
                     op.source.size == snapshot.data->parameterData().size() &&
                     std::equal(snapshot.data->parameterData().begin(), snapshot.data->parameterData().end(), op.source.data) &&
-                    op.finalAccess == VK_ACCESS_UNIFORM_READ_BIT && op.finalStages != 0,
+                    op.after.usage == rhi::AccessUsage::UniformRead && op.after.stages != 0,
                 "material staging request lost its bytes, destination, or uniform-read barrier");
-        std::weak_ptr<const Buffer> destination = op.destination;
+        std::weak_ptr<const rhi::BufferResource> destination = op.destination;
         probe.reset();
         require(!destination.expired(), "unpublished material owned the only upload destination reference");
-        const auto upload = uploads.tryEnqueue(request);
+        const auto upload = resourceUploads.tryEnqueue(request);
         require(upload.accepted(), "material parameter transfer was rejected");
         request.operations.clear();
         require(!destination.expired(), "queued material upload lost its destination");
         uploads.drain();
-        require(uploads.query(upload.ticket).state == UploadState::Completed,
+        require(resourceUploads.query(upload.ticket).state == rhi::UploadState::Completed,
                 "material parameter transfer did not complete");
-        uploads.releaseTicket(upload.ticket);
+        resourceUploads.releaseTicket(upload.ticket);
         require(destination.expired(), "completed material transfer leaked its destination");
     }
 
@@ -272,8 +275,11 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
                         directUploads.query(blocker.ticket).state == UploadState::Queued,
                     "direct material writes used upload capacity or did not publish");
             const auto& buffer = directCache.material(material).parameterBufferResource();
-            require((buffer->memoryProperties() & required) == required &&
-                        !(buffer->usage() & VK_BUFFER_USAGE_TRANSFER_DST_BIT),
+            const uint32_t requiredProperties = rhi::flag(rhi::MemoryProperty::HostVisible) |
+                (render::hasMemoryProperty(policy, render::MaterialParameterMemory::DeviceLocal)
+                    ? rhi::flag(rhi::MemoryProperty::DeviceLocal) : 0u);
+            require((buffer->memoryProperties() & requiredProperties) == requiredProperties &&
+                        !(buffer->description().usage & rhi::flag(rhi::BufferUsage::TransferDestination)),
                     "direct material allocation did not respect requested memory properties");
         }
         else
@@ -321,8 +327,8 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
     struct BindingSnapshot
     {
         asset::MaterialAssetHandle handle;
-        VkBuffer parameters;
-        VkDescriptorSet descriptor;
+        rhi::BufferRef parameters;
+        rhi::BindingSetRef descriptor;
     };
     std::vector<BindingSnapshot> bindings;
     for (const auto handle : assets.materialHandles())
@@ -333,19 +339,20 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
             bindings.push_back({handle, gpu->parameterBuffer(), gpu->descriptorSet()});
     }
     require(!bindings.empty(), "texture replacement fixture has no material users");
-    // Accidentally passing a published set must be rejected before any write.
+    // An incomplete texture table must be rejected without changing a published binding.
     bool rejectedInPlace = false;
     const auto& bound = cache.material(bindings.front().handle);
     try
     {
-        static_cast<void>(bound.withTextures(device,
-            cache.materialTemplate(bound.materialTemplate())->source(), {}, bound.descriptorSet()));
+        static_cast<void>(bound.withTextures(resourceDevice,
+            cache.materialTemplate(bound.materialTemplate())->source(), {},
+            cache.materialTemplate(bound.materialTemplate())->layoutReference()));
     }
     catch (const std::invalid_argument&)
     {
         rejectedInPlace = true;
     }
-    require(rejectedInPlace, "texture rebinding accepted an already published descriptor");
+    require(rejectedInPlace, "texture rebinding accepted an incomplete texture table");
     const auto& previous = assets.texture(texture);
     asset::TextureAsset::CreateInfo replacement{
         previous.name(),       previous.width(),   previous.height(),  previous.format(),
@@ -472,28 +479,28 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
         RenderPass pass(device.get(), passInfo);
         auto pipelineInfo = makeDefaultPresentPipeline(noUploadCache.shaderProgram(present));
         pipelineInfo.renderPass = pass.reference();
-        pipelineInfo.program = noUploadCache.shaderProgram(present);
-        pipelineInfo.descriptorSetLayouts = pipelineInfo.program->setLayoutReferences();
+        for (const auto& layout : noUploadCache.shaderProgram(present)->setLayoutReferences())
+            pipelineInfo.descriptorSetLayouts.push_back(nativeBindingLayout(layout));
         pipelineInfo.vertexShaderSpirv.clear();
         pipelineInfo.fragmentShaderSpirv.clear();
         GraphicsPipelineCache pipelines(device);
         const auto pipeline = pipelines.getOrCreate(pipelineInfo);
         require(bool(*pipeline), "prepared modules could not create a graphics pipeline");
         auto rawInfo = pipelineInfo;
-        for (const auto& shader : rawInfo.program->shaders())
+        for (const auto& shader : rawInfo.shaders)
         {
-            if (shader->source().stage() == asset::ShaderStage::Vertex)
+            if (shader->code().stage == rhi::ShaderStage::Vertex)
             {
-                rawInfo.vertexShaderSpirv = shader->source().spirv();
-                rawInfo.vertexEntryPoint = shader->source().entryPoint();
+                rawInfo.vertexShaderSpirv = shader->code().spirv;
+                rawInfo.vertexEntryPoint = shader->code().entryPoint;
             }
             else
             {
-                rawInfo.fragmentShaderSpirv = shader->source().spirv();
-                rawInfo.fragmentEntryPoint = shader->source().entryPoint();
+                rawInfo.fragmentShaderSpirv = shader->code().spirv;
+                rawInfo.fragmentEntryPoint = shader->code().entryPoint;
             }
         }
-        rawInfo.program.reset();
+        rawInfo.shaders.clear();
         require(pipelines.getOrCreate(rawInfo) == pipeline && pipelines.statistics().creations == 1,
                 "prepared program and equivalent SPIR-V did not share pipeline cache");
         fullUploads.cancel(blocker.ticket);
@@ -533,7 +540,7 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
                 cache.texture(texture).view() != pinnedView,
             "texture replacement mutated or destroyed a captured allocation");
     auto detachedCreation = std::async(std::launch::async, [&] {
-        pinnedMaterial->createGpuResources(device);
+        pinnedMaterial->createGpuResources(resourceDevice);
         return pinnedMaterial->buildUploadRequest();
     });
     auto detachedUpload = detachedCreation.get();
@@ -629,8 +636,8 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
         auto stale = cache.captureTextureRebind(texture, firstTarget.revision);
         auto newer = cache.captureTextureRebind(otherTexture, secondTarget.revision);
         auto creation = std::async(std::launch::async, [&] {
-            RenderAssetCache::buildTextureRebind(device, *stale, firstImage);
-            RenderAssetCache::buildTextureRebind(device, *newer, secondImage);
+            RenderAssetCache::buildTextureRebind(resourceDevice, *stale, firstImage);
+            RenderAssetCache::buildTextureRebind(resourceDevice, *newer, secondImage);
         });
         creation.get();
         cache.acceptPreparation(firstTarget);
@@ -648,7 +655,7 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
                 "stale texture bindings partially overwrote the newer cache state");
         auto retry = cache.captureTextureRebind(texture, firstTarget.revision);
         auto retryCreation = std::async(std::launch::async, [&] {
-            RenderAssetCache::buildTextureRebind(device, *retry, firstImage);
+            RenderAssetCache::buildTextureRebind(resourceDevice, *retry, firstImage);
         });
         retryCreation.get();
         cache.publishPreparedTexture(preparationsRetired, firstTarget, std::move(firstImage), std::move(retry));

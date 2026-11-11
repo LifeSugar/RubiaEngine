@@ -11,7 +11,7 @@
 #include "vulkan/VulkanContext.hpp"
 #include "vulkan/VulkanApplicationGuiRenderBridge.hpp"
 #include "vulkan/VulkanRenderer.hpp"
-#include "vulkan/VulkanResourcePreparationBridge.hpp"
+#include "resources/ResourcePreparationSession.hpp"
 #include "vulkan/Window.hpp"
 
 #include <cstdint>
@@ -108,7 +108,7 @@ private:
     scene::Scene scene;
     rhi::vulkan::RenderAssetCache renderAssets;
     rhi::vulkan::VulkanRenderer renderer;
-    rhi::vulkan::VulkanResourcePreparationBridge resourcePreparation_{renderer, renderAssets};
+    render::ResourcePreparationSession resourcePreparation_{renderer, renderAssets};
     // Must be destroyed before the renderer, device, and GLFW window.
     ImGuiLayer imguiLayer;
     // Must release ImGui descriptors before ImGuiLayer is destroyed.

@@ -234,12 +234,18 @@ void AppSmokeTests::runEditorAssetTest()
                                               app.demoContent.defaultMaterial};
         gui.attach(context);
         runEditorAssetImportTests(context, [&] {
-            app.imguiLayer.beginFrame();
-            app.drawGui(gui);
-            const auto result = app.renderer.render(app.makeRenderFrame(), app.renderAssets,
-                                                    app.imguiLayer.endFrame());
-            if (result != rhi::vulkan::VulkanRenderer::RenderResult::Rendered)
-                throw std::runtime_error("external asset frame did not render");
+            for (uint32_t attempt = 0; attempt < 32; ++attempt)
+            {
+                app.window.pollEvents();
+                app.imguiLayer.beginFrame();
+                app.drawGui(gui);
+                const auto result = app.renderer.render(app.makeRenderFrame(), app.renderAssets,
+                                                        app.imguiLayer.endFrame());
+                if (rhi::vulkan::VulkanRenderer::needsResize(result))
+                    app.recreateSwapChain(gui);
+                if (rhi::vulkan::VulkanRenderer::wasSubmitted(result)) return;
+            }
+            throw std::runtime_error("external asset frame did not submit after swapchain retries");
         });
         app.renderer.waitIdle();
         gui.detach();

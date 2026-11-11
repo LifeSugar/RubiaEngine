@@ -1,5 +1,6 @@
 #include "vulkan/RenderPass.hpp"
 #include "vulkan/PipelineKeyData.hpp"
+#include "VulkanResourceDevice.hpp"
 #include <stdexcept>
 #include <utility>
 
@@ -86,6 +87,53 @@ void RenderPass::create(VkDevice device, const VkRenderPassCreateInfo &info)
         key.add(d.dependencyFlags);
     }
     state->key_ = std::move(key.words);
+    // Keep legacy render passes available; only the expressible subset receives
+    // a portable signature. No opaque Vulkan compatibility words cross the RHI.
+    if (info.subpassCount == 1 && !info.pSubpasses[0].inputAttachmentCount &&
+        !info.pSubpasses[0].preserveAttachmentCount)
+    {
+        try
+        {
+            const auto& subpass = info.pSubpasses[0];
+            rhi::AttachmentSignature signature;
+            bool hasSamples = false;
+            const auto sampleCount = [&](uint32_t attachment) {
+                const auto count = static_cast<uint32_t>(info.pAttachments[attachment].samples);
+                if (hasSamples && signature.samples != count)
+                    throw rhi::ResourceError(rhi::ResourceErrorCode::Unsupported,
+                                             "mixed attachment samples are outside the RHI subset");
+                signature.samples = count;
+                hasSamples = true;
+            };
+            for (uint32_t i = 0; i < subpass.colorAttachmentCount; ++i)
+            {
+                const auto color = subpass.pColorAttachments[i].attachment;
+                if (color == VK_ATTACHMENT_UNUSED)
+                    throw rhi::ResourceError(rhi::ResourceErrorCode::Unsupported,
+                                             "unused color slots are outside the RHI subset");
+                sampleCount(color);
+                rhi::ColorAttachmentSignature target;
+                target.format = fromVulkanFormat(info.pAttachments[color].format);
+                if (subpass.pResolveAttachments &&
+                    subpass.pResolveAttachments[i].attachment != VK_ATTACHMENT_UNUSED)
+                    target.resolveFormat = fromVulkanFormat(
+                        info.pAttachments[subpass.pResolveAttachments[i].attachment].format);
+                signature.colors.push_back(target);
+            }
+            if (subpass.pDepthStencilAttachment &&
+                subpass.pDepthStencilAttachment->attachment != VK_ATTACHMENT_UNUSED)
+            {
+                const auto depth = subpass.pDepthStencilAttachment->attachment;
+                sampleCount(depth);
+                signature.depthStencilFormat = fromVulkanFormat(info.pAttachments[depth].format);
+            }
+            state->signature_ = std::move(signature);
+        }
+        catch (const rhi::ResourceError&)
+        {
+            // Native-only low-level tests can still use formats/subpasses outside RHI.
+        }
+    }
     if (vkCreateRenderPass(device, &info, nullptr, &state->handle_) != VK_SUCCESS)
         throw std::runtime_error("failed to create render pass");
     state_ = std::move(state);

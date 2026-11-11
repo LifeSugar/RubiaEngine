@@ -4,6 +4,7 @@
 #include "vulkan/RenderAssetCache.hpp"
 #include "vulkan/VulkanResourcePreparation.hpp"
 #include "vulkan/VulkanUploadService.hpp"
+#include "vulkan/VulkanResourceDevice.hpp"
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
@@ -325,6 +326,58 @@ void waitPreparation(VulkanResourcePreparation& preparation, ResourcePreparation
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
+void runRhiResourceAdapterTests(const Device& device)
+{
+    VulkanResourceDevice resources(device);
+    VulkanResourceDevice sameSession(device);
+    require(resources.id() == sameSession.id(), "resource adapters invented different native device sessions");
+    VulkanUploadService nativeUploads(device, {1024, 2048, 1});
+    VulkanUploadAdapter uploads(nativeUploads);
+    auto buffer = resources.createBuffer({16, rhi::flag(rhi::BufferUsage::TransferDestination) |
+                                              rhi::flag(rhi::BufferUsage::TransferSource),
+                                        rhi::flag(rhi::MemoryProperty::DeviceLocal)});
+    auto bytes = std::make_shared<std::vector<std::byte>>(16, std::byte{0x6A});
+    rhi::UploadRequest first{{rhi::BufferUpload{buffer, 0, {bytes, bytes->data(), bytes->size()},
+                                                          {rhi::AccessUsage::CopySource, 0}}}};
+    const auto accepted = uploads.tryEnqueue(first);
+    require(accepted.accepted() && first.operations.empty(), "RHI upload did not consume accepted request");
+    // A different destination keeps the request valid: overlapping pending writes
+    // are rejected before capacity is considered.
+    auto otherBuffer = resources.createBuffer(buffer->description());
+    rhi::UploadRequest rejected{{rhi::BufferUpload{otherBuffer, 0, {bytes, bytes->data(), bytes->size()},
+                                                             {rhi::AccessUsage::CopySource, 0}}}};
+    const auto full = uploads.tryEnqueue(rejected);
+    require(full.code == rhi::UploadEnqueueCode::QueueFull, "RHI upload capacity did not report queue full");
+    require(rejected.operations.size() == 1,
+            "RHI queue-full result consumed the caller's request");
+    uploads.drain();
+    require(uploads.query(accepted.ticket).state == rhi::UploadState::Completed &&
+                readBack(device, nativeBuffer(buffer), 0, 16) == *bytes,
+            "RHI buffer upload did not retain ownership or transfer the requested bytes");
+    uploads.releaseTicket(accepted.ticket);
+
+    auto parameters = resources.createBuffer({16, rhi::flag(rhi::BufferUsage::Uniform),
+                                               rhi::flag(rhi::MemoryProperty::HostVisible)});
+    resources.writeBuffer(parameters, bytes->data(), bytes->size());
+    auto layout = resources.createBindingLayout({{{0, rhi::BindingType::UniformBuffer, 1,
+                                                    rhi::shaderStageMask(rhi::ShaderStage::Fragment)}}});
+    std::weak_ptr<const rhi::BufferResource> retained = parameters;
+    rhi::BindingSetDesc description{layout, {{0, 0, rhi::BufferBinding{parameters, 0, 16}}}};
+    auto set = sameSession.createBindingSet(description);
+    description.writes.clear();
+    parameters.reset();
+    require(!retained.expired(), "immutable RHI binding did not retain its parameter allocation");
+    set.reset();
+    require(retained.expired(), "RHI binding leaked its parameter allocation after CPU release");
+
+    bool rejectedRange = false;
+    auto uniform = resources.createBuffer({16, rhi::flag(rhi::BufferUsage::Uniform),
+                                           rhi::flag(rhi::MemoryProperty::HostVisible)});
+    try { static_cast<void>(resources.createBindingSet({layout, {{0, 0, rhi::BufferBinding{uniform, 8, 16}}}})); }
+    catch (const rhi::ResourceError& error) { rejectedRange = error.code() == rhi::ResourceErrorCode::InvalidDescription; }
+    require(rejectedRange, "RHI binding accepted an out-of-range parameter buffer");
+}
+
 void runMeshPreparationTests(const Device& device)
 {
     VulkanUploadService uploads(device);
@@ -476,7 +529,7 @@ public:
         ++probe_.destroyed;
     }
     void captureDependencies() override { probe_.capturedThread = std::this_thread::get_id(); }
-    void createGpuResources(const Device&) override
+    void createGpuResources(const rhi::Device&) override
     {
         probe_.createdThread = std::this_thread::get_id();
         ++probe_.created;
@@ -486,7 +539,7 @@ public:
             throw std::runtime_error("probe create failed");
         }
     }
-    UploadRequest buildUploadRequest() override
+    rhi::UploadRequest buildUploadRequest() override
     {
         ++probe_.built;
         return {};
@@ -904,6 +957,7 @@ void runPreparationLifetimeTests(const Device& device)
 } // namespace
 void runVulkanUploadTests(const Device& device)
 {
+    runRhiResourceAdapterTests(device);
     runPreparationLifetimeTests(device);
     runMeshPreparationTests(device);
     runNoUploadPreparationTests(device);
