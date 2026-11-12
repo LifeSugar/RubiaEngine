@@ -17,6 +17,9 @@ if(RUBIA_BUILD_VULKAN OR RUBIA_BUILD_APPS)
 endif()
 
 if(RUBIA_BUILD_IMPORTERS)
+    # Host-side shader compiler only; no Slang library leaks into Engine or RHI.
+    find_package(SlangCompiler 2026.1 REQUIRED)
+
     find_package(assimp CONFIG REQUIRED)
     find_package(Stb REQUIRED)
     find_package(Ktx CONFIG REQUIRED)
