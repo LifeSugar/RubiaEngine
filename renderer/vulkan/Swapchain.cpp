@@ -1,4 +1,5 @@
 #include "vulkan/Swapchain.hpp"
+#include "vulkan/VulkanResourceDevice.hpp"
 
 #include <algorithm>
 #include <array>
@@ -15,7 +16,8 @@ Swapchain::Swapchain(
     uint32_t graphicsQueueFamily,
     uint32_t presentQueueFamily,
     VkExtent2D framebufferExtent,
-    VkSwapchainKHR oldSwapchain)
+    VkSwapchainKHR oldSwapchain,
+    const PresentationConfig& presentation)
 {
     create(
         physicalDevice,
@@ -24,7 +26,7 @@ Swapchain::Swapchain(
         graphicsQueueFamily,
         presentQueueFamily,
         framebufferExtent,
-        oldSwapchain);
+        oldSwapchain, presentation);
 }
 
 Swapchain::~Swapchain()
@@ -41,7 +43,8 @@ Swapchain::Swapchain(Swapchain&& other) noexcept
       colorSpace_(std::exchange(
           other.colorSpace_,
           VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)),
-      extent_(std::exchange(other.extent_, VkExtent2D{}))
+      extent_(std::exchange(other.extent_, VkExtent2D{})),
+      presentMode_(other.presentMode_)
 {
 }
 
@@ -59,6 +62,7 @@ Swapchain& Swapchain::operator=(Swapchain&& other) noexcept
             other.colorSpace_,
             VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
         extent_ = std::exchange(other.extent_, VkExtent2D{});
+        presentMode_ = other.presentMode_;
     }
     return *this;
 }
@@ -70,7 +74,8 @@ void Swapchain::create(
     uint32_t graphicsQueueFamily,
     uint32_t presentQueueFamily,
     VkExtent2D framebufferExtent,
-    VkSwapchainKHR oldSwapchain)
+    VkSwapchainKHR oldSwapchain,
+    const PresentationConfig& presentation)
 {
     if (physicalDevice == VK_NULL_HANDLE || device == VK_NULL_HANDLE || surface == VK_NULL_HANDLE)
     {
@@ -83,8 +88,8 @@ void Swapchain::create(
         throw std::runtime_error("swapchain support is no longer adequate!");
     }
 
-    const VkSurfaceFormatKHR surfaceFormat = chooseSurfaceFormat(support.formats);
-    const VkPresentModeKHR presentMode = choosePresentMode(support.presentModes);
+    const VkSurfaceFormatKHR surfaceFormat = chooseSurfaceFormat(support.formats, presentation.preferredFormat);
+    const VkPresentModeKHR presentMode = choosePresentMode(support.presentModes, presentation.preferredPresentMode);
     const VkExtent2D extent = chooseExtent(support.capabilities, framebufferExtent);
 
     uint32_t imageCount = support.capabilities.minImageCount + 1;
@@ -175,6 +180,8 @@ void Swapchain::create(
     format_ = surfaceFormat.format;
     colorSpace_ = surfaceFormat.colorSpace;
     extent_ = extent;
+    presentMode_ = presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? PresentMode::Mailbox
+        : presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR ? PresentMode::Immediate : PresentMode::Fifo;
 }
 
 void Swapchain::reset() noexcept
@@ -234,19 +241,17 @@ Swapchain::SupportDetails Swapchain::querySupport(
 }
 
 VkSurfaceFormatKHR Swapchain::chooseSurfaceFormat(
-    const std::vector<VkSurfaceFormatKHR>& availableFormats)
+    const std::vector<VkSurfaceFormatKHR>& availableFormats, Format preferred)
 {
     if (availableFormats.size() == 1 && availableFormats[0].format == VK_FORMAT_UNDEFINED)
     {
-        return {VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
+        return {toVulkan(preferred), VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
     }
 
     for (const VkSurfaceFormatKHR& availableFormat : availableFormats)
     {
-        // Dear ImGui vertex colors are display-encoded. Prefer a UNORM target
-        // so the stock backend does not apply the attachment's sRGB transfer a
-        // second time. The scene present shader explicitly encodes for UNORM.
-        if (availableFormat.format == VK_FORMAT_B8G8R8A8_UNORM &&
+        // The default preference is UNorm for display-encoded GUI colors.
+        if (availableFormat.format == toVulkan(preferred) &&
             availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
         {
             return availableFormat;
@@ -256,11 +261,13 @@ VkSurfaceFormatKHR Swapchain::chooseSurfaceFormat(
 }
 
 VkPresentModeKHR Swapchain::choosePresentMode(
-    const std::vector<VkPresentModeKHR>& availablePresentModes)
+    const std::vector<VkPresentModeKHR>& availablePresentModes, PresentMode preferred)
 {
+    const auto requested = preferred == PresentMode::Mailbox ? VK_PRESENT_MODE_MAILBOX_KHR
+        : preferred == PresentMode::Immediate ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
     for (VkPresentModeKHR availablePresentMode : availablePresentModes)
     {
-        if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR)
+        if (availablePresentMode == requested)
         {
             return availablePresentMode;
         }

@@ -471,13 +471,14 @@ GUI 持续显示 reimporting，直到准备 ticket 终态；成功后按缓存 p
 ### 使用
 
 1. 在 **Assets** 输入任意本地目录，点击 **Open Directory**；通过文件夹双击、Up、Refresh 浏览。
-   支持 GLB/glTF、HLSL/SPIR-V、PNG/JPG/JPEG/TGA/BMP/KTX2。目录扫描在后台执行。
+   支持 GLB/glTF、HLSL/Slang/SPIR-V、PNG/JPG/JPEG/TGA/BMP/KTX2。目录扫描在后台执行。
 2. 把 GLB/glTF 文件拖到 **Scene Hierarchy** 的场景根或空白处，导入并实例化。
    拖到已有 SceneNode 上会成为其子节点。也可先双击导入，再从 Models 列表拖入；
    相同路径、导入设置与文件时间/大小的重复请求复用已导入资产，创建独立场景实例。
-3. 双击 HLSL 前设置 **Shader stage** 和 **Entry point**。VS/PS 可以来自不同文件，
-   也可以是同一个文件的两个入口。HLSL 每次显式导入都会重新编译，以包含 include 的修改。
-   DXC 从 PATH 或 VULKAN_SDK/Bin 查找；后台直接启动进程，不使用 shell。
+3. 双击 HLSL 或 Slang 前设置 **Shader stage** 和 **Entry point**。VS/PS 可以来自不同文件，
+   也可以是同一个文件的两个入口。HLSL/Slang 每次显式导入都会重新编译，以包含 include/module 的修改。
+   HLSL 与 Slang 均使用 CMake 选定的 Slang 工具链；SPIR-V 二进制导入标记为 legacy。
+   代码生成在后台直接启动 slangc，布局反射使用 Slang SDK，不使用 shell；编译错误显示在 Assets 状态和控制台。
    编译输出位于临时目录，结束后清理，不覆盖源目录中的文件。
 4. 双击导入贴图；颜色贴图选择 sRGB，法线和数据贴图关闭 sRGB。
    KTX2 保留容器声明的色彩空间。
@@ -488,7 +489,7 @@ GUI 持续显示 reimporting，直到准备 ticket 终态；成功后按缓存 p
    覆盖只影响该实例，不修改共享 Model/Mesh 与原始 GLB 材质。选 **GLB materials** 恢复原材质。
    Inspector 的 Position 可移动实例。新模型加入后自动取景，Viewport 的 **Frame Scene** 可重新取景。
 
-最小示例：`assets/shaders/editor_unlit.hlsl` 与 `RenderData.hlsli` 放在同一目录。
+最小示例：`assets/shaders/editor_unlit.hlsl` 或 `editor_unlit.slang` 与 `RenderData.hlsli` 放在同一目录。
 分别以 Vertex / VSMain、Pixel / PSMain 导入前者；材质将生成一个 tint 参数和一个 colorTexture 槽，
 把 colorTexture 配对到 colorSampler，选择任意已导入的颜色纹理，然后创建并分配材质。
 
@@ -498,7 +499,7 @@ GUI 持续显示 reimporting，直到准备 ticket 终态；成功后按缓存 p
 Assets / Hierarchy / Inspector：只入队编辑器命令
   ↓ 下一次主循环，ApplicationGui::update / EditorLayer::update
 EditorAssetController
-  ├─ CPU 导入 worker：文件读取、GLB 解析、贴图解码、DXC 编译、SPIR-V 反射
+  ├─ CPU 导入 worker：文件读取、GLB 解析、贴图解码、Slang 编译与目标布局反射
   ├─ 主线程：注册 CPU 资产、展开模型的 Mesh 依赖
   └─ ResourcePreparation::prepare
        ↓ Resource worker 创建 → UploadService 提交与完成 → 主线程发布 GPU 资源
@@ -515,7 +516,7 @@ SceneNode 插入、材质覆盖都在资源与 Pipeline 完成后执行。失败
 
 ### 当前支持范围
 
-- 可选择任意路径和 HLSL 文件，但 shader 仍需符合现有绘制接口：set 0 为 Camera/Object，
+- 可选择任意路径和 HLSL/Slang 文件，但 shader 仍需符合现有绘制接口：set 0 为 Camera/Object，
   set 1 为一个材质 UBO 与独立 image/sampler，顶点输入兼容 asset::Vertex，PushConstants 遵守 Draw ABI。
   参数支持现有 scalar/vector/matrix 类型，纹理数组、多个材质 UBO 等继续由模板验证拒绝。
 - GLB 导入默认保留 glTF PBR 材质。自定义材质目前是整个 SceneNode 实例的覆盖；未增加逐 submesh 编辑。

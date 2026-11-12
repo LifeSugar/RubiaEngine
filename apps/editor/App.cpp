@@ -1,4 +1,8 @@
 #include "App.hpp"
+#include "imgui/GlfwGuiPlatform.hpp"
+#include "imgui/VulkanGuiRenderer.hpp"
+#include "EditorIconData.hpp"
+#include "texture/StbImageDecoder.hpp"
 
 #include "ApplicationGui.hpp"
 #include "content/DemoContent.hpp"
@@ -7,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <stdexcept>
 
 namespace rubia::editor
@@ -43,7 +48,7 @@ void App::run(const RunConfig& config, ApplicationGui& gui)
         if (config.initializeEmptyScene) startEmptyScene(config);
         setupCamera();
         initImGui(config);
-        guiRenderBridge.attach(renderer, renderAssets);
+        guiRenderBridge.attach(guiRenderHost, renderAssets, imguiLayer.rendererBackend());
         ApplicationGuiContext guiContext{
             assetManager, scene, guiRenderBridge, &textureImports, &contentLoadStatus_,
             &resourcePreparation_, demoContent.defaultMaterial};
@@ -79,6 +84,11 @@ void App::initWindow(const RunConfig& config, bool visible)
     createInfo.title = config.windowTitle;
     createInfo.visible = visible;
     window.create(createInfo);
+    auto icon = importer::texture::StbImageDecoder{}.decodeMemory(
+        {std::begin(kEditorIconPng), std::end(kEditorIconPng)}, "Rubia icon");
+    GLFWimage windowIcon{static_cast<int>(icon.width), static_cast<int>(icon.height),
+        reinterpret_cast<unsigned char*>(icon.payload.data())};
+    glfwSetWindowIcon(window.nativeHandle(), 1, &windowIcon);
 }
 
 void App::initVulkan(const RunConfig& config)
@@ -120,14 +130,12 @@ void App::cleanup()
 void App::initImGui(const RunConfig& config)
 {
     ImGuiLayer::CreateInfo createInfo{};
-    createInfo.window = &window;
-    createInfo.context = &vulkanContext;
-    createInfo.renderPass = renderer.presentRenderPass();
-    createInfo.minImageCount = 2;
-    createInfo.imageCount = renderer.swapchainImageCount();
+    createInfo.platform = integration::imgui::makeGlfwGuiPlatform(window.nativeHandle(),
+        integration::imgui::GlfwGuiClientApi::Vulkan);
+    createInfo.renderer = std::make_unique<integration::imgui::VulkanGuiRenderer>(vulkanContext, renderer);
     createInfo.enableDocking = config.enableDocking;
     createInfo.iniFilename = config.imguiIniFilename;
-    imguiLayer.create(createInfo);
+    imguiLayer.create(std::move(createInfo));
 }
 
 void App::setupCamera()

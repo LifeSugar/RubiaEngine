@@ -30,7 +30,7 @@ void AppSmokeTests::runStartupTest()
     app.initVulkan(config);
     app.setupCamera();
     app.initImGui(config);
-    app.guiRenderBridge.attach(app.renderer, app.renderAssets);
+    app.guiRenderBridge.attach(app.guiRenderHost, app.renderAssets, app.imguiLayer.rendererBackend());
     gui.attach({app.assetManager, app.scene, app.guiRenderBridge,
         &app.textureImports, &app.contentLoadStatus_});
     const auto draw = [&]

@@ -50,6 +50,12 @@ function(rubia_scan_render_boundaries)
     # and the application host are forbidden here.
     rubia_assert_source_includes(EditorCore "vulkan/|GLFW/|imgui_impl_|backends/imgui|vk_mem_alloc|App\\.hpp|ImGuiLayer\\.hpp" ${RUBIA_BOUNDARY_EDITOR_SOURCES})
     rubia_assert_source_includes(PlatformWindow "vulkan/|GLFW/" "${RUBIA_BOUNDARY_ROOT}/platform/glfw/Window.hpp")
+    rubia_assert_source_includes(GuiIntegration "vulkan/|GLFW/|imgui_impl_|backends/imgui|imgui/Vulkan|imgui/Glfw"
+        "${RUBIA_BOUNDARY_ROOT}/integrations/imgui/GuiBackend.hpp"
+        "${RUBIA_BOUNDARY_ROOT}/integrations/imgui/ApplicationGuiRenderBridge.hpp"
+        "${RUBIA_BOUNDARY_ROOT}/integrations/imgui/ApplicationGuiRenderBridge.cpp"
+        "${RUBIA_BOUNDARY_ROOT}/apps/editor/ImGuiLayer.hpp"
+        "${RUBIA_BOUNDARY_ROOT}/apps/editor/ImGuiLayer.cpp")
 endfunction()
 
 function(rubia_absolute_target_sources target output)
@@ -71,6 +77,8 @@ function(rubia_check_render_boundaries)
     rubia_assert_target_links(rubia_engine glm::glm rubia_project_options)
     rubia_assert_target_links(rubia_rhi rubia_project_options)
     rubia_assert_target_links(rubia_renderer Rubia::Engine Rubia::Rhi)
+    rubia_assert_target_links(rubia_gui_integration Rubia::Renderer)
+    rubia_assert_target_links(rubia_editor_gui Rubia::EditorCore Rubia::GuiIntegration Rubia::ImGuiCore)
     rubia_assert_target_links(rubia_rhi_vulkan Rubia::Rhi Vulkan::Vulkan VulkanMemoryAllocator rubia_project_options)
     rubia_assert_target_links(rubia_editor_core Rubia::Engine Rubia::Importers Rubia::ImGuiCore rubia_project_options)
     set(RUBIA_BOUNDARY_ROOT "${PROJECT_SOURCE_DIR}")

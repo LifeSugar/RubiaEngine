@@ -8,7 +8,7 @@
 #include "render/RenderFrame.hpp"
 #include "render/SceneResourcePreparation.hpp"
 #include "render/ResourcePreparationOptions.hpp"
-#include "vulkan/FrameContext.hpp"
+#include "vulkan/VulkanPresentation.hpp"
 #include "core/FrameBindings.hpp"
 #include "passes/FramePipeline.hpp"
 #include "passes/OutputBindings.hpp"
@@ -24,7 +24,6 @@
 #include "vulkan/RenderTarget.hpp"
 #include "vulkan/ResourcePreparationTypes.hpp"
 #include "vulkan/RetiredResources.hpp"
-#include "vulkan/SwapchainResources.hpp"
 #include "vulkan/VulkanUploadService.hpp"
 
 #include <cstdint>
@@ -77,6 +76,8 @@ public:
     {
         /// The frame was submitted successfully.
         Rendered,
+        /// No drawable is currently available; retry on a later frame.
+        Skipped,
         /// No commands were submitted; recreate the swapchain and retry.
         NeedsResize,
         /// The frame was submitted, but acquire/present requested recreation.
@@ -200,17 +201,18 @@ public:
     /// Returns the current swapchain extent.
     [[nodiscard]] VkExtent2D extent() const noexcept
     {
-        return swapchainResources_.extent();
+        const auto output = presentation_ ? presentation_->output() : rhi::OutputDescription{};
+        return {output.width, output.height};
     }
     /// Returns the render pass used to write the presentation image.
     [[nodiscard]] VkRenderPass presentRenderPass() const noexcept
     {
-        return swapchainResources_.renderPass();
+        return presentation_ ? presentation_->renderPass() : VK_NULL_HANDLE;
     }
     /// Returns the number of images in the current presentation swapchain.
     [[nodiscard]] uint32_t swapchainImageCount() const noexcept
     {
-        return static_cast<uint32_t>(swapchainResources_.imageCount());
+        return presentation_ ? presentation_->imageCount() : 0;
     }
     /// Returns the frame slot that will be used by the next render call.
     [[nodiscard]] uint32_t currentFrameIndex() const noexcept
@@ -219,7 +221,7 @@ public:
     }
     [[nodiscard]] uint32_t frameCount() const noexcept
     {
-        return static_cast<uint32_t>(frameSlots_.size());
+        return presentation_ ? presentation_->slotCount() : 0;
     }
     [[nodiscard]] OutputMode outputMode() const noexcept
     {
@@ -240,21 +242,12 @@ public:
     [[nodiscard]] explicit operator bool() const noexcept;
 
 private:
-    // FrameContext remains limited to command resources and synchronization.
-    // Only a successful renderFrame submission transfers pending owners here.
-    struct RenderFrameSlot
-    {
-        explicit RenderFrameSlot(const Device& device) : context(device) {}
-        FrameContext context;
-    };
     [[nodiscard]] bool hasSceneResources() const noexcept;
     void releaseSceneResources() noexcept;
     [[nodiscard]] RenderResult renderFrame(
         const render::RenderFrame* frame,
         const render::RenderAssetStore* renderAssets,
         const render::GuiOverlay* uiDrawData);
-    /// Creates one reusable command and synchronization context per frame slot.
-    void createFrameSlots(uint32_t frameCount);
     /// Requires device idle; resets recorded uses before releasing retired owners.
     void collectRetiredResourcesAfterIdle();
     /// Completes pipeline settings with renderer-owned layouts and render pass.
@@ -276,9 +269,9 @@ private:
     void updateFrameData(uint32_t frameIndex, const render::RenderFrame& frame);
     /// Records all draw commands for one acquired swapchain image.
     void recordCommandBuffer(
-        VkCommandBuffer commandBuffer,
+        rhi::AcquiredFrame& presentation,
+        rhi::CommandEncoder& commands,
         uint32_t frameIndex,
-        uint32_t imageIndex,
         const rhi::BindingSetRef& descriptorSet,
         const render::PreparedDrawList& drawList,
         const render::GuiOverlay* uiDrawData,
@@ -296,8 +289,8 @@ private:
     /// Per-frame descriptors and camera/object buffers.
     std::unique_ptr<VulkanResourceDevice> resourceDevice_;
     render::FrameBindings frameDataResources_;
-    /// Swapchain and all resources tied to its images.
-    SwapchainResources swapchainResources_;
+    /// Owns native presentation and submission behind backend-neutral interfaces.
+    std::unique_ptr<VulkanPresentation> presentation_;
     /// Render pass describing the offscreen linear-color and depth outputs.
     RenderPass sceneRenderPass_;
     /// One independently reusable offscreen framebuffer per frame slot.
@@ -323,11 +316,8 @@ private:
     std::unique_ptr<render::PipelinePreparation> pipelinePreparation_;
     /// Shader output transfer selected from swapchain format and color space.
     uint32_t presentOutputTransferFunction_ = 0;
-    /// Native command/synchronization slots; generic scheduler owns retirement.
-    std::vector<RenderFrameSlot> frameSlots_;
+    /// Generic scheduler owns retirement independently of presentation images.
     std::unique_ptr<render::FrameScheduler> scheduler_;
-    /// Failed acquired sessions cannot reuse their binary synchronization.
-    bool failed_ = false;
     bool recordingFrame_ = false;
     /// Frame slot selected for the next submission.
     uint32_t currentFrame_ = 0;

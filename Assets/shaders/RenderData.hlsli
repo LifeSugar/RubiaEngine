@@ -1,7 +1,10 @@
 #ifndef LEARN_VULKAN_RENDER_DATA_HLSLI
 #define LEARN_VULKAN_RENDER_DATA_HLSLI
 
+// Slang receives the same layout explicitly through its compiler options.
+#ifndef __SLANG__
 #pragma pack_matrix(column_major)
+#endif
 
 struct CameraGpuData
 {

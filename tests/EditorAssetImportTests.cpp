@@ -14,7 +14,7 @@
 namespace rubia::test
 {
 void runEditorAssetImportTests(const editor::ApplicationGuiContext &context,
-                               const std::function<void()> &renderFrame)
+                               const std::function<void()> &renderFrame, const char* shaderFile)
 {
     const auto require = [](bool value, const char *message) {
         if (!value)
@@ -48,7 +48,7 @@ void runEditorAssetImportTests(const editor::ApplicationGuiContext &context,
         }
     } cleanup{directory};
     const auto source = std::filesystem::path(PROJECT_SOURCE_DIR) / "assets";
-    for (const auto *file : {"editor_unlit.hlsl", "RenderData.hlsli"})
+    for (const auto *file : {shaderFile, "RenderData.hlsli"})
         std::filesystem::copy_file(source / "shaders" / file, directory / file);
     std::filesystem::copy_file(source / "Models/Suzanne.glb", directory / "model with spaces.glb");
     std::filesystem::copy_file(source / "DamagedHelmet_extracted/baseColor_1.jpg",
@@ -76,21 +76,21 @@ void runEditorAssetImportTests(const editor::ApplicationGuiContext &context,
     const auto shaderCount = context.assets.shaderHandles().size();
     editor::EditorAssetController::ImportOptions options;
     options.entryPoint = "VSMain";
-    controller.importFile(directory / "editor_unlit.hlsl", options);
+    controller.importFile(directory / shaderFile, options);
     options.stage = asset::ShaderStage::Fragment;
     options.entryPoint = "PSMain";
-    controller.importFile(directory / "editor_unlit.hlsl", options);
+    controller.importFile(directory / shaderFile, options);
     pump();
     const auto shaders = context.assets.shaderHandles();
-    require(shaders.size() == shaderCount + 2, "external HLSL import failed");
+    require(shaders.size() == shaderCount + 2, "external source shader import failed");
     const auto vertex = shaders[shaderCount], fragment = shaders[shaderCount + 1];
     require(context.assets.shader(vertex).stage() == asset::ShaderStage::Vertex &&
                 context.assets.shader(fragment).stage() == asset::ShaderStage::Fragment,
-            "HLSL stages were not retained");
+            "Shader stages were not retained");
     controller.buildProgram(vertex, fragment);
     pump();
     require(context.assets.contains(controller.draftProgram()),
-            "compiled HLSL program did not reflect");
+            "Compiled shader program did not reflect");
 
     controller.importFile(directory / "albedo.jpg", {});
     pump();
@@ -104,7 +104,7 @@ void runEditorAssetImportTests(const editor::ApplicationGuiContext &context,
             "identical texture imports were duplicated");
 
     asset::MaterialTemplateAsset::CreateInfo layout;
-    layout.name = "External HLSL Material";
+    layout.name = "External Shader Material";
     layout.program = controller.draftProgram();
     layout.textureSlots = {{"colorTexture", "colorTexture", "colorSampler"}};
     controller.buildTemplate(layout);
@@ -176,7 +176,18 @@ void runEditorAssetImportTests(const editor::ApplicationGuiContext &context,
     require(!context.scene.nodes()[firstNode].materialOverride,
             "pipeline failure replaced the working instance material");
 
-    const auto invalid = directory / "broken.hlsl";
+    const auto beforeIncludeFailure = context.assets.shaderHandles().size();
+    {
+        std::ofstream include(directory / "RenderData.hlsli", std::ios::app);
+        include << "\nthis is not valid shader syntax;\n";
+    }
+    controller.importFile(directory / shaderFile, options);
+    pump();
+    require(context.assets.shaderHandles().size() == beforeIncludeFailure &&
+                controller.message().find("compilation failed") != std::string::npos,
+            "Source shader reimport reused a stale include or hid diagnostics");
+
+    const auto invalid = directory / (std::string("broken") + std::filesystem::path(shaderFile).extension().string());
     {
         std::ofstream stream(invalid);
         stream << "this is not a shader;";
@@ -190,7 +201,7 @@ void runEditorAssetImportTests(const editor::ApplicationGuiContext &context,
             "shader failure changed live scene or hid diagnostics");
     controller.stop();
     std::clog
-        << "[Editor Assets] external browsing, HLSL compile/reflection, texture upload, material "
+        << "[Editor Assets] " << shaderFile << ": external browsing, compile/reflection, texture upload, material "
            "PSO, GLB reuse, instance override, cancellation and compiler failure passed\n";
 }
 } // namespace rubia::test
@@ -211,7 +222,7 @@ void AppSmokeTests::runEditorAssetTest()
         app.setupCamera();
         app.camera.setCullingFlags(render::CullingFlags::None);
         app.initImGui(config);
-        app.guiRenderBridge.attach(app.renderer, app.renderAssets);
+        app.guiRenderBridge.attach(app.guiRenderHost, app.renderAssets, app.imguiLayer.rendererBackend());
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
         while (!app.renderer.sceneReady() && std::chrono::steady_clock::now() < deadline)
         {
@@ -233,20 +244,23 @@ void AppSmokeTests::runEditorAssetTest()
                                               &app.resourcePreparation(),
                                               app.demoContent.defaultMaterial};
         gui.attach(context);
-        runEditorAssetImportTests(context, [&] {
-            for (uint32_t attempt = 0; attempt < 32; ++attempt)
-            {
-                app.window.pollEvents();
-                app.imguiLayer.beginFrame();
-                app.drawGui(gui);
-                const auto result = app.renderer.render(app.makeRenderFrame(), app.renderAssets,
-                                                        app.imguiLayer.endFrame());
-                if (rhi::vulkan::VulkanRenderer::needsResize(result))
-                    app.recreateSwapChain(gui);
-                if (rhi::vulkan::VulkanRenderer::wasSubmitted(result)) return;
-            }
-            throw std::runtime_error("external asset frame did not submit after swapchain retries");
-        });
+        for (const char* shaderFile : {"editor_unlit.hlsl", "editor_unlit.slang"})
+        {
+            runEditorAssetImportTests(context, [&] {
+                for (uint32_t attempt = 0; attempt < 32; ++attempt)
+                {
+                    app.window.pollEvents();
+                    app.imguiLayer.beginFrame();
+                    app.drawGui(gui);
+                    const auto result = app.renderer.render(app.makeRenderFrame(), app.renderAssets,
+                                                            app.imguiLayer.endFrame());
+                    if (rhi::vulkan::VulkanRenderer::needsResize(result))
+                        app.recreateSwapChain(gui);
+                    if (rhi::vulkan::VulkanRenderer::wasSubmitted(result)) return;
+                }
+                throw std::runtime_error("external asset frame did not submit after swapchain retries");
+            }, shaderFile);
+        }
         app.renderer.waitIdle();
         gui.detach();
         app.cleanup();

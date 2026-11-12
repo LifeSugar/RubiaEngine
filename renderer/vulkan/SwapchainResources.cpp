@@ -61,7 +61,7 @@ void SwapchainResources::create(
         createInfo.surface,
         device.graphicsQueueFamily(),
         device.presentQueueFamily(),
-        createInfo.framebufferExtent);
+        createInfo.framebufferExtent, VK_NULL_HANDLE, createInfo.presentation);
     replacement.depthFormat_ = findDepthFormat(device);
     replacement.renderPass_ = makeRenderPass(
         device,
@@ -101,7 +101,7 @@ bool SwapchainResources::recreate(
         device.graphicsQueueFamily(),
         device.presentQueueFamily(),
         createInfo.framebufferExtent,
-        swapchain_.get());
+        swapchain_.get(), createInfo.presentation);
     const VkFormat newDepthFormat = findDepthFormat(device);
     RenderPass newRenderPass = makeRenderPass(
         device,

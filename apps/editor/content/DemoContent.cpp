@@ -3,7 +3,7 @@
 #include "asset/AssetManager.hpp"
 #include "gltf/GLBLoader.hpp"
 #include "gltf/GLBModelImporter.hpp"
-#include "shader/SpirvShaderImporter.hpp"
+#include "shader/SlangShaderCompiler.hpp"
 #include "texture/StbImageDecoder.hpp"
 #include "texture/TextureImportRegistry.hpp"
 #include "scene/Scene.hpp"
@@ -211,36 +211,14 @@ DemoContent DemoContentLoader::loadBuiltins(
     content.defaultNormalTexture =
         assets.createTexture(std::move(normalTextureInfo));
 
-    importer::shader::SpirvShaderImporter shaderImporter;
-    importer::shader::SpirvShaderImporter::CreateInfo shaderInfo{};
-    shaderInfo.assets = &assets;
-    shaderInfo.path = resolveAssetPath(
-        createInfo.cookedAssetDirectory,
-        createInfo.pbrVertexShader);
-    shaderInfo.name = "PBR Vertex";
-    shaderInfo.stage = asset::ShaderStage::Vertex;
-    content.pbrVertexShader = shaderImporter.import(shaderInfo);
-
-    shaderInfo.path = resolveAssetPath(
-        createInfo.cookedAssetDirectory,
-        createInfo.pbrFragmentShader);
-    shaderInfo.name = "PBR Fragment";
-    shaderInfo.stage = asset::ShaderStage::Fragment;
-    content.pbrFragmentShader = shaderImporter.import(shaderInfo);
-
-    shaderInfo.path = resolveAssetPath(
-        createInfo.cookedAssetDirectory,
-        createInfo.presentVertexShader);
-    shaderInfo.name = "Present Vertex";
-    shaderInfo.stage = asset::ShaderStage::Vertex;
-    content.presentVertexShader = shaderImporter.import(shaderInfo);
-
-    shaderInfo.path = resolveAssetPath(
-        createInfo.cookedAssetDirectory,
-        createInfo.presentFragmentShader);
-    shaderInfo.name = "Present Fragment";
-    shaderInfo.stage = asset::ShaderStage::Fragment;
-    content.presentFragmentShader = shaderImporter.import(shaderInfo);
+    const auto compile = [&](const std::filesystem::path& path, asset::ShaderStage stage) {
+        return assets.createShader(importer::shader::SlangShaderCompiler{}.compile(
+            resolveAssetPath(createInfo.cookedAssetDirectory, path), stage));
+    };
+    content.pbrVertexShader = compile(createInfo.pbrVertexShader, asset::ShaderStage::Vertex);
+    content.pbrFragmentShader = compile(createInfo.pbrFragmentShader, asset::ShaderStage::Fragment);
+    content.presentVertexShader = compile(createInfo.presentVertexShader, asset::ShaderStage::Vertex);
+    content.presentFragmentShader = compile(createInfo.presentFragmentShader, asset::ShaderStage::Fragment);
 
     asset::MaterialTemplateAsset::CreateInfo templateInfo{};
     templateInfo.name = "glTF Metallic-Roughness PBR";

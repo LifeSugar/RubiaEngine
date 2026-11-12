@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vulkan/vulkan.h>
+#include "rhi/Presentation.hpp"
 #include "vulkan/ImageView.hpp"
 
 #include <cstddef>
@@ -34,7 +35,8 @@ public:
         uint32_t graphicsQueueFamily,
         uint32_t presentQueueFamily,
         VkExtent2D framebufferExtent,
-        VkSwapchainKHR oldSwapchain = VK_NULL_HANDLE);
+        VkSwapchainKHR oldSwapchain = VK_NULL_HANDLE,
+        const PresentationConfig& presentation = {});
     /// Destroys the swapchain and its image views.
     ~Swapchain();
 
@@ -54,7 +56,8 @@ public:
         uint32_t graphicsQueueFamily,
         uint32_t presentQueueFamily,
         VkExtent2D framebufferExtent,
-        VkSwapchainKHR oldSwapchain = VK_NULL_HANDLE);
+        VkSwapchainKHR oldSwapchain = VK_NULL_HANDLE,
+        const PresentationConfig& presentation = {});
     /// Destroys the swapchain and clears its cached image state.
     void reset() noexcept;
 
@@ -69,6 +72,7 @@ public:
     }
     /// Returns the selected swapchain image extent.
     [[nodiscard]] VkExtent2D extent() const noexcept { return extent_; }
+    PresentMode presentMode() const noexcept { return presentMode_; }
     /// Returns the number of images owned by the swapchain.
     [[nodiscard]] std::size_t imageCount() const noexcept { return images_.size(); }
     /// Returns the non-owning swapchain image handles.
@@ -86,10 +90,10 @@ public:
 private:
     /// Selects the preferred surface format from those available.
     [[nodiscard]] static VkSurfaceFormatKHR chooseSurfaceFormat(
-        const std::vector<VkSurfaceFormatKHR>& availableFormats);
+        const std::vector<VkSurfaceFormatKHR>& availableFormats, Format preferred);
     /// Selects the preferred presentation mode from those available.
     [[nodiscard]] static VkPresentModeKHR choosePresentMode(
-        const std::vector<VkPresentModeKHR>& availablePresentModes);
+        const std::vector<VkPresentModeKHR>& availablePresentModes, PresentMode preferred);
     /// Selects a supported image extent for the current framebuffer size.
     [[nodiscard]] static VkExtent2D chooseExtent(
         const VkSurfaceCapabilitiesKHR& capabilities,
@@ -109,6 +113,7 @@ private:
     VkColorSpaceKHR colorSpace_ = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     /// Drawable extent shared by all swapchain images.
     VkExtent2D extent_{};
+    PresentMode presentMode_ = PresentMode::Fifo;
 };
 
 } // namespace rubia::rhi::vulkan

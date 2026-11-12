@@ -3,7 +3,7 @@
 #include <filesystem>
 namespace rubia::importer::shader
 {
-// CPU-only DXC invocation. Call from an import worker, never the render thread.
+// Compatibility spelling: HLSL input now uses Slang compilation and reflection.
 class HlslShaderCompiler final
 {
   public:

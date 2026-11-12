@@ -1,6 +1,8 @@
 # Primitive GPU implementation. It must build without Engine, Renderer, a window
 # toolkit, or GUI libraries. Native headers are intentionally exposed only here.
 add_library(rubia_rhi_vulkan STATIC
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanPresentation.cpp
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanPresentation.hpp
     ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanResourceDevice.cpp
     ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanResourceDevice.hpp
     ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanPipelineDevice.cpp

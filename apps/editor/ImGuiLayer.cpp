@@ -1,17 +1,15 @@
 #include "ImGuiLayer.hpp"
 #include "EditorTheme.hpp"
 
-#include "vulkan/VulkanContext.hpp"
-#include "vulkan/Window.hpp"
 
 #include <imgui.h>
-#include <imgui_impl_glfw.h>
 
 #include <filesystem>
 #include <cstdlib>
 #include <cstdio>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 
 namespace rubia::editor
 {
@@ -55,9 +53,9 @@ void loadEditorFont(ImGuiIO& io)
 
 } // namespace
 
-ImGuiLayer::ImGuiLayer(const CreateInfo& createInfo)
+ImGuiLayer::ImGuiLayer(CreateInfo createInfo)
 {
-    create(createInfo);
+    create(std::move(createInfo));
 }
 
 ImGuiLayer::~ImGuiLayer()
@@ -65,20 +63,14 @@ ImGuiLayer::~ImGuiLayer()
     reset();
 }
 
-void ImGuiLayer::create(const CreateInfo& createInfo)
+void ImGuiLayer::create(CreateInfo createInfo)
 {
-    if (createInfo.window == nullptr || !*createInfo.window ||
-        createInfo.context == nullptr || !*createInfo.context ||
-        createInfo.renderPass == VK_NULL_HANDLE ||
-        createInfo.minImageCount < 2 ||
-        createInfo.imageCount < createInfo.minImageCount)
-    {
-        throw std::invalid_argument("ImGuiLayer create info is incomplete");
-    }
+    if (!createInfo.platform || !createInfo.renderer)
+        throw std::invalid_argument("ImGuiLayer requires platform and renderer backends");
 
     reset();
-    context_ = createInfo.context;
-    minImageCount_ = createInfo.minImageCount;
+    platformBackend_ = std::move(createInfo.platform);
+    rendererBackend_ = std::move(createInfo.renderer);
     iniFilename_ = createInfo.iniFilename;
 
     try
@@ -99,27 +91,16 @@ void ImGuiLayer::create(const CreateInfo& createInfo)
         applyEditorTheme(themeSettings_);
         loadEditorFont(io);
 
-        if (!ImGui_ImplGlfw_InitForVulkan(
-                createInfo.window->nativeHandle(),
-                true))
-        {
-            throw std::runtime_error(
-                "failed to initialize Dear ImGui GLFW backend");
-        }
+        platformBackend_->initialize(imguiContext_);
         platformBackendInitialized_ = true;
-
-        const float contentScale =
-            ImGui_ImplGlfw_GetContentScaleForWindow(
-                createInfo.window->nativeHandle());
+        const float contentScale = platformBackend_->contentScale();
         if (contentScale > 0.0f && contentScale != 1.0f)
         {
             ImGui::GetStyle().ScaleAllSizes(contentScale);
             ImGui::GetStyle().FontScaleDpi = contentScale;
         }
 
-        initializeRendererBackend(
-            createInfo.renderPass,
-            createInfo.imageCount);
+        rendererBackend_->initialize(imguiContext_);
     }
     catch (...)
     {
@@ -131,22 +112,22 @@ void ImGuiLayer::create(const CreateInfo& createInfo)
 void ImGuiLayer::reset() noexcept
 {
     makeContextCurrent();
-    shutdownRendererBackend();
+    if (rendererBackend_) rendererBackend_->shutdown();
+    rendererBackend_.reset();
 
     if (platformBackendInitialized_)
     {
-        ImGui_ImplGlfw_Shutdown();
+        platformBackend_->shutdown();
         platformBackendInitialized_ = false;
     }
+    platformBackend_.reset();
     if (imguiContext_ != nullptr)
     {
         ImGui::DestroyContext(imguiContext_);
         imguiContext_ = nullptr;
     }
 
-    context_ = nullptr;
     iniFilename_.clear();
-    minImageCount_ = 2;
 }
 
 void ImGuiLayer::beginFrame()
@@ -157,8 +138,8 @@ void ImGuiLayer::beginFrame()
     }
 
     makeContextCurrent();
-    rendererBackend_.newFrame();
-    ImGui_ImplGlfw_NewFrame();
+    rendererBackend_->newFrame();
+    platformBackend_->newFrame();
     ImGui::NewFrame();
 }
 
@@ -171,60 +152,26 @@ const render::GuiOverlay* ImGuiLayer::endFrame()
 
     makeContextCurrent();
     ImGui::Render();
-    rendererBackend_.prepare(ImGui::GetDrawData());
-    return &rendererBackend_;
+    rendererBackend_->prepare(ImGui::GetDrawData());
+    return rendererBackend_.get();
 }
 
-void ImGuiLayer::shutdownRendererBackend() noexcept
+void ImGuiLayer::reconfigureRenderer()
 {
+    if (!*this) throw std::logic_error("cannot reconfigure an uninitialized GUI layer");
     makeContextCurrent();
-    rendererBackend_.shutdown();
+    rendererBackend_->reconfigure();
 }
 
-void ImGuiLayer::initializeRendererBackend(
-    VkRenderPass renderPass,
-    uint32_t imageCount)
+integration::imgui::GuiRendererBackend& ImGuiLayer::rendererBackend()
 {
-    if (imguiContext_ == nullptr || context_ == nullptr || !*context_ ||
-        !platformBackendInitialized_ || rendererBackend_ ||
-        renderPass == VK_NULL_HANDLE || imageCount < minImageCount_)
-    {
-        throw std::logic_error(
-            "cannot initialize Dear ImGui Vulkan backend");
-    }
-
-    makeContextCurrent();
-    const rhi::vulkan::Device& device = context_->device();
-
-    integration::imgui::VulkanGuiRenderer::CreateInfo createInfo{};
-    createInfo.imguiContext = imguiContext_;
-    createInfo.instance = context_->instance();
-    createInfo.physicalDevice = device.physical();
-    createInfo.device = device.get();
-    createInfo.graphicsQueueFamily = device.graphicsQueueFamily();
-    createInfo.graphicsQueue = device.graphicsQueue();
-    createInfo.minImageCount = minImageCount_;
-    createInfo.imageCount = imageCount;
-    createInfo.renderPass = renderPass;
-    rendererBackend_.initialize(createInfo);
-}
-
-void ImGuiLayer::recreateRendererPipeline(VkRenderPass renderPass)
-{
-    if (!*this || renderPass == VK_NULL_HANDLE)
-    {
-        throw std::logic_error(
-            "cannot recreate Dear ImGui Vulkan pipeline");
-    }
-
-    makeContextCurrent();
-    rendererBackend_.recreatePipeline(renderPass);
+    if (!*this) throw std::logic_error("GUI renderer backend is unavailable");
+    return *rendererBackend_;
 }
 
 ImGuiLayer::operator bool() const noexcept
 {
-    return context_ != nullptr && imguiContext_ != nullptr &&
-        platformBackendInitialized_ && static_cast<bool>(rendererBackend_);
+    return imguiContext_ && platformBackendInitialized_ && rendererBackend_ && rendererBackend_->ready();
 }
 
 void ImGuiLayer::makeContextCurrent() const noexcept

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "render/GuiOverlay.hpp"
+#include "imgui/GuiBackend.hpp"
 
 #include <vulkan/vulkan.h>
 
@@ -9,11 +9,13 @@
 struct ImDrawData;
 struct ImGuiContext;
 
+namespace rubia::rhi::vulkan { class VulkanContext; class VulkanRenderer; }
+
 namespace rubia::integration::imgui
 {
 
 /// Owns the ImGui Vulkan backend; the ImGui context and device are borrowed.
-class VulkanGuiRenderer final : public render::GuiOverlay
+class VulkanGuiRenderer final : public GuiRendererBackend
 {
 public:
     struct CreateInfo
@@ -30,27 +32,35 @@ public:
         uint32_t apiVersion = VK_API_VERSION_1_3;
     };
 
-    VulkanGuiRenderer() = default;
+    VulkanGuiRenderer(const rhi::vulkan::VulkanContext&, const rhi::vulkan::VulkanRenderer&);
     ~VulkanGuiRenderer() override;
     VulkanGuiRenderer(const VulkanGuiRenderer&) = delete;
     VulkanGuiRenderer& operator=(const VulkanGuiRenderer&) = delete;
     VulkanGuiRenderer(VulkanGuiRenderer&&) = delete;
     VulkanGuiRenderer& operator=(VulkanGuiRenderer&&) = delete;
 
-    void initialize(const CreateInfo& createInfo);
+    void initialize(ImGuiContext*) override;
+    void reconfigure() override;
+    GuiTextureRef registerTexture(const rhi::TextureViewRef&) override;
+    bool ready() const noexcept override { return initialized_; }
     /// All GPU use and external GUI registrations must have been drained first.
-    void shutdown() noexcept;
-    void newFrame();
+    void shutdown() noexcept override;
+    void newFrame() override;
     /// Called after ImGui::Render, outside command recording. Dynamic texture
     /// work uses an explicit blocking compatibility path before exposing commands.
-    void prepare(ImDrawData* drawData);
-    /// Requires the caller to have completed GPU use of the previous pipeline.
-    void recreatePipeline(VkRenderPass renderPass);
+    void prepare(ImDrawData* drawData) override;
     void record(render::GuiCommandContext& context) const override;
 
     [[nodiscard]] explicit operator bool() const noexcept { return initialized_; }
 
 private:
+    struct TextureSession;
+    struct TextureRegistration;
+    void initialize(const CreateInfo&);
+    void recreatePipeline(VkRenderPass);
+    const rhi::vulkan::VulkanContext& context_;
+    const rhi::vulkan::VulkanRenderer& renderer_;
+    std::shared_ptr<TextureSession> textures_;
     void makeContextCurrent() const noexcept;
 
     ImGuiContext* imguiContext_ = nullptr;

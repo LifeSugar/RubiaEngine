@@ -1,6 +1,7 @@
 add_library(rubia_renderer STATIC
     passes/FramePipeline.cpp
     passes/OutputBindings.cpp
+    core/PresentationFrame.cpp
     core/FrameScheduler.cpp
     core/DrawCompiler.cpp
     core/DrawRecorder.cpp

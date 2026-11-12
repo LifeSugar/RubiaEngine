@@ -9,7 +9,8 @@
 #include "vulkan/RenderAssetCache.hpp"
 #include "scene/Scene.hpp"
 #include "vulkan/VulkanContext.hpp"
-#include "vulkan/VulkanApplicationGuiRenderBridge.hpp"
+#include "imgui/ApplicationGuiRenderBridge.hpp"
+#include "imgui/VulkanGuiRenderHost.hpp"
 #include "vulkan/VulkanRenderer.hpp"
 #include "resources/ResourcePreparationSession.hpp"
 #include "vulkan/Window.hpp"
@@ -49,10 +50,10 @@ public:
             rhi::vulkan::VulkanRenderer::OutputMode::Runtime;
         DemoContentLoader::CreateInfo demoContent{
             "ABeautifulGame_extracted/ABeautifulGame.gltf",
-            "shaders/triangle.vert.spv",
-            "shaders/triangle.frag.spv",
-            "shaders/present.vert.spv",
-            "shaders/present.frag.spv",
+            "shaders/triangle.vert.hlsl",
+            "shaders/triangle.frag.hlsl",
+            "shaders/present.vert.hlsl",
+            "shaders/present.frag.hlsl",
             "assets",
             DemoContentLoader::TextureImportPolicy{
                 importer::texture::KtxPayloadEncoding::Uastc,
@@ -108,11 +109,12 @@ private:
     scene::Scene scene;
     rhi::vulkan::RenderAssetCache renderAssets;
     rhi::vulkan::VulkanRenderer renderer;
+    integration::imgui::VulkanGuiRenderHost guiRenderHost{renderer};
     render::ResourcePreparationSession resourcePreparation_{renderer, renderAssets};
     // Must be destroyed before the renderer, device, and GLFW window.
     ImGuiLayer imguiLayer;
     // Must release ImGui descriptors before ImGuiLayer is destroyed.
-    rhi::vulkan::VulkanApplicationGuiRenderBridge guiRenderBridge;
+    integration::imgui::ApplicationGuiRenderBridge guiRenderBridge;
 
     render::Camera camera;
     static constexpr uint32_t kMaxFramesInFlight = 2;

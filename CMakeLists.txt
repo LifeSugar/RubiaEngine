@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.23)
 
-project(RubiaEngine LANGUAGES CXX)
+project(RubiaEngine VERSION 0.1.0 LANGUAGES CXX)
 
 option(VK_RENDERER_USE_VMA "Use Vulkan Memory Allocator in renderer resources" ON)
 option(RUBIA_BUILD_VULKAN "Build the Vulkan backend and its platform integration" ON)
@@ -28,9 +28,9 @@ endif()
 if(RUBIA_BUILD_VULKAN)
     add_subdirectory(platform/glfw)
     add_subdirectory(integrations/vulkan_glfw)
-    add_subdirectory(integrations/imgui)
 endif()
 add_subdirectory(renderer)
+add_subdirectory(integrations/imgui)
 if(RUBIA_BUILD_APPS)
     add_subdirectory(apps)
 endif()

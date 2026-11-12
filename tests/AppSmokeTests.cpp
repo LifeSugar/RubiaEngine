@@ -1089,7 +1089,7 @@ void AppSmokeTests::runRenderTest(
     }
     validateKtxTextureImportAndUpload(app.vulkanContext.device());
     app.initImGui(config);
-    app.guiRenderBridge.attach(app.renderer, app.renderAssets);
+    app.guiRenderBridge.attach(app.guiRenderHost, app.renderAssets, app.imguiLayer.rendererBackend());
     editor::ApplicationGuiContext guiContext{
         app.assetManager,
         app.scene,

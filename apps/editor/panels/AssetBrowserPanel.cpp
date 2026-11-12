@@ -280,7 +280,7 @@ void AssetBrowserPanel::drawFiles(const asset::AssetManager&, EditorAssetControl
             const auto path = entry.path.u8string();
             const std::string utf8(reinterpret_cast<const char*>(path.data()), path.size());
             const auto filename = entry.path.filename().u8string();
-            const std::string label = (entry.directory ? "[Folder] " : "") +
+            const std::string label = (entry.path.extension() == ".spv" ? "[Legacy SPIR-V] " : "") + std::string(entry.directory ? "[Folder] " : "") +
                 std::string(reinterpret_cast<const char*>(filename.data()), filename.size());
             ImGui::PushID(utf8.c_str());
             if (ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick) && ImGui::IsMouseDoubleClicked(0))

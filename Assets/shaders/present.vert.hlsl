@@ -12,7 +12,7 @@ struct PresentVertexOutput
     float2 texCoord : TEXCOORD0;
 };
 
-PresentVertexOutput main(uint vertexId : SV_VertexID)
+PresentVertexOutput main(uint vertexId : SV_VulkanVertexID)
 {
     // Generates (-1,-1), (3,-1), (-1,3). The oversized triangle avoids the
     // diagonal interpolation seam of a full-screen quad.

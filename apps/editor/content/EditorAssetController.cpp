@@ -3,7 +3,7 @@
 #include "gltf/GLBModelImporter.hpp"
 #include "render/SceneRenderExtractor.hpp"
 #include "render/SceneResourcePreparation.hpp"
-#include "shader/HlslShaderCompiler.hpp"
+#include "shader/SlangShaderCompiler.hpp"
 #include "shader/SpirvShaderImporter.hpp"
 #include "texture/KtxTextureImporter.hpp"
 #include "texture/StbImageDecoder.hpp"
@@ -28,8 +28,8 @@ std::string extension(const std::filesystem::path &path)
 bool supported(const std::filesystem::path &path)
 {
     const auto ext = extension(path);
-    return ext == ".glb" || ext == ".gltf" || ext == ".hlsl" || ext == ".spv" || ext == ".png" ||
-           ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".bmp" || ext == ".ktx2";
+    return ext == ".glb" || ext == ".gltf" || ext == ".hlsl" || ext == ".slang" ||
+           ext == ".spv" || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".bmp" || ext == ".ktx2";
 }
 std::string importKey(const std::filesystem::path &path,
                       const EditorAssetController::ImportOptions &options)
@@ -40,7 +40,7 @@ std::string importKey(const std::filesystem::path &path,
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 #endif
     const auto ext = extension(path);
-    if (ext == ".spv" || ext == ".hlsl")
+    if (ext == ".spv" || ext == ".hlsl" || ext == ".slang")
         key += "|" + std::to_string(static_cast<int>(options.stage)) + "|" + options.entryPoint;
     else if (ext != ".glb" && ext != ".gltf")
         key += "|" + std::to_string(static_cast<int>(options.colorSpace));
@@ -65,8 +65,11 @@ void EditorAssetController::importFile(std::filesystem::path path, ImportOptions
                          parent](const auto &context, auto &selection) {
         const auto absolute = std::filesystem::canonical(path);
         const auto key = importKey(absolute, options);
+        // Source shaders always recompile: includes/modules may have changed
+        // even when the entry file's timestamp and size stayed the same.
+        const auto sourceExtension = extension(absolute);
         if (const auto found = imported_.find(key);
-            found != imported_.end() && extension(absolute) != ".hlsl")
+            found != imported_.end() && sourceExtension != ".hlsl" && sourceExtension != ".slang")
         {
             if (auto model = std::get_if<asset::ModelAssetHandle>(&found->second))
             {
@@ -116,8 +119,8 @@ void EditorAssetController::importFile(std::filesystem::path path, ImportOptions
                     }
                     result.data = std::move(*model);
                 }
-                else if (ext == ".hlsl")
-                    result.data = importer::shader::HlslShaderCompiler{}.compile(
+                else if (ext == ".hlsl" || ext == ".slang")
+                    result.data = importer::shader::SlangShaderCompiler{}.compile(
                         absolute, options.stage, options.entryPoint);
                 else if (ext == ".spv")
                 {

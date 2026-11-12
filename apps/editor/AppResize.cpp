@@ -41,11 +41,10 @@ void App::recreateSwapChain(ApplicationGui&)
 
     if (recreateImGui)
     {
-        imguiLayer.recreateRendererPipeline(
-            renderer.presentRenderPass());
+        imguiLayer.reconfigureRenderer();
     }
 
-    guiRenderBridge.attach(renderer, renderAssets);
+    guiRenderBridge.attach(guiRenderHost, renderAssets, imguiLayer.rendererBackend());
 
     const VkExtent2D renderExtent = renderer.extent();
     camera.setAspect(

@@ -1,4 +1,5 @@
 #include "vulkan/VulkanRenderer.hpp"
+#include "core/PresentationFrame.hpp"
 #include "resources/ResourcePreparationService.hpp"
 
 #include "resources/RenderAssetStore.hpp"
@@ -204,13 +205,9 @@ void VulkanRenderer::createPresentation(const CreateInfo& createInfo)
         const Device& device = context_->device();
         scheduler_ = std::make_unique<render::FrameScheduler>(createInfo.framesInFlight);
         resourceDevice_ = std::make_unique<VulkanResourceDevice>(device);
-        SwapchainResources::CreateInfo swapchainCreateInfo{};
-        swapchainCreateInfo.surface = context_->surface();
-        swapchainCreateInfo.framebufferExtent =
-            createInfo.framebufferExtent;
-        swapchainResources_.create(device, swapchainCreateInfo);
-
-        createFrameSlots(createInfo.framesInFlight);
+        presentation_ = std::make_unique<VulkanPresentation>(device, resourceDevice_->id(),
+            context_->surface(), createInfo.framesInFlight);
+        presentation_->configure({createInfo.framebufferExtent.width, createInfo.framebufferExtent.height});
         pipelineDevice_ = std::make_unique<VulkanPipelineDevice>(*resourceDevice_);
         pipelineCache_ = std::make_unique<render::PipelineLibrary>(*pipelineDevice_);
         pipelinePreparation_ = std::make_unique<render::PipelinePreparation>(*pipelineDevice_, *pipelineCache_);
@@ -294,7 +291,7 @@ void VulkanRenderer::beginScenePreparation(
 
 bool VulkanRenderer::canPrepareResources() const noexcept
 {
-    return resourcePreparation_ && !failed_ && !recordingFrame_ &&
+    return resourcePreparation_ && presentation_ && !presentation_->failed() && !recordingFrame_ &&
         (!scenePreparation_ || !scenePreparation_->ownsResources());
 }
 
@@ -541,12 +538,10 @@ void VulkanRenderer::reset() noexcept
     pipelinePreparation_.reset();
     pipelineCache_.reset();
     pipelineDevice_.reset();
-    frameSlots_.clear();
+    presentation_.reset();
     scheduler_.reset();
-    failed_ = false;
     recordingFrame_ = false;
     resourceDevice_.reset();
-    swapchainResources_.reset();
     outputMode_ = OutputMode::Runtime;
     context_ = nullptr;
     currentFrame_ = 0;
@@ -598,10 +593,7 @@ void VulkanRenderer::resize(VkExtent2D framebufferExtent)
         renderExtent = editorViewportTargets_.front().extent();
     }
 
-    SwapchainResources::CreateInfo createInfo{};
-    createInfo.surface = context_->surface();
-    createInfo.framebufferExtent = framebufferExtent;
-    static_cast<void>(swapchainResources_.recreate(device, createInfo));
+    presentation_->configure({framebufferExtent.width, framebufferExtent.height});
     if (!hasSceneResources())
     {
         return;
@@ -613,8 +605,8 @@ void VulkanRenderer::resize(VkExtent2D framebufferExtent)
             sceneRenderPass_.get(),
             outputMode_ == OutputMode::Editor
                 ? renderExtent
-                : swapchainResources_.extent(),
-            static_cast<uint32_t>(frameSlots_.size()),
+                : extent(),
+            frameCount(),
             sceneColorFormat_,
             sceneDepthFormat_);
     std::vector<RenderTarget> newEditorViewportTargets;
@@ -624,7 +616,7 @@ void VulkanRenderer::resize(VkExtent2D framebufferExtent)
             device,
             editorViewportRenderPass_.get(),
             renderExtent,
-            static_cast<uint32_t>(frameSlots_.size()),
+            frameCount(),
             editorViewportFormat_);
     }
     sceneRenderTargets_ = std::move(newSceneRenderTargets);
@@ -634,10 +626,10 @@ void VulkanRenderer::resize(VkExtent2D framebufferExtent)
         ++editorViewportRevision_;
     }
     recreatePresentDescriptorSets(
-        static_cast<uint32_t>(frameSlots_.size()));
+        frameCount());
     presentOutputTransferFunction_ =
-        render::outputTransferFunction(fromVulkanFormat(swapchainResources_.format()),
-            swapchainResources_.colorSpace() == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+        render::outputTransferFunction(presentation_->output().format,
+            presentation_->output().colorSpace == rhi::OutputColorSpace::SrgbNonlinear);
 
     if (outputMode_ == OutputMode::Runtime)
     {
@@ -683,7 +675,7 @@ void VulkanRenderer::resizeEditorViewport(VkExtent2D extent)
             device,
             sceneRenderPass_.get(),
             extent,
-            static_cast<uint32_t>(frameSlots_.size()),
+            frameCount(),
             sceneColorFormat_,
             sceneDepthFormat_);
     std::vector<RenderTarget> newEditorViewportTargets =
@@ -691,7 +683,7 @@ void VulkanRenderer::resizeEditorViewport(VkExtent2D extent)
             device,
             editorViewportRenderPass_.get(),
             extent,
-            static_cast<uint32_t>(frameSlots_.size()),
+            frameCount(),
             editorViewportFormat_);
     std::vector<rhi::TextureViewRef> resolveViews;
     for (const auto& target : newSceneRenderTargets) resolveViews.push_back(target.view(kSceneResolveAttachment));
@@ -734,7 +726,7 @@ VulkanRenderer::RenderResult VulkanRenderer::renderFrame(
     {
         throw std::logic_error("cannot render with an uninitialized VulkanRenderer");
     }
-    if (failed_) throw std::logic_error("presentation session failed; recreate it before rendering");
+    if (presentation_->failed()) throw std::logic_error("presentation session failed; recreate it before rendering");
     if (recordingFrame_) throw std::logic_error("recursive frame recording");
     recordingFrame_ = true;
     struct RecordingScope { bool& active; ~RecordingScope() { active = false; } } recordingScope{recordingFrame_};
@@ -763,112 +755,27 @@ VulkanRenderer::RenderResult VulkanRenderer::renderFrame(
         drawList = compileDrawList(frameData.renderList, *renderAssets);
     }
 
-    const Device& device = context_->device();
-    RenderFrameSlot& slot = frameSlots_[currentFrame_];
-    FrameContext& frame = slot.context;
-    frame.waitUntilReusable();
-    frame.resetCommands();
-    scheduler_->beginReusableSlot(currentFrame_);
-
-    uint32_t imageIndex = 0;
-    const VkResult acquireResult = swapchainResources_.acquireNextImage(
-        device,
-        frame.imageAvailable(),
-        imageIndex);
-    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR)
-    {
-        return RenderResult::NeedsResize;
-    }
-    if (acquireResult != VK_SUCCESS &&
-        acquireResult != VK_SUBOPTIMAL_KHR)
-    {
-        throw std::runtime_error("failed to acquire swapchain image");
-    }
-    // Any exception after acquisition terminates this presentation session.
-    // Its acquire semaphore/image and possibly reset fence cannot be retried.
-    bool frameFinished = false;
-    struct AcquiredScope {
-        bool& failed; bool& finished;
-        ~AcquiredScope() { if (!finished) failed = true; }
-    } acquiredScope{failed_, frameFinished};
-    bool needsResize = acquireResult == VK_SUBOPTIMAL_KHR;
-
-    swapchainResources_.waitUntilImageReusable(device, imageIndex);
-    swapchainResources_.markImageInFlight(
-        imageIndex,
-        frame.inFlightFence());
-
-    if (sceneFrame != nullptr)
-    {
-        updateFrameData(currentFrame_, *sceneFrame);
-    }
-    recordCommandBuffer(
-        frame.commandBuffer(),
-        currentFrame_,
-        imageIndex,
-        sceneFrame != nullptr ? frameDataResources_.bindingSet(currentFrame_) : rhi::BindingSetRef{},
-        drawList,
-        uiDrawData,
-        sceneFrame != nullptr);
-
-    const rhi::CompletionPoint submittedPoint = scheduler_->candidate();
-    frame.resetFence();
-
-    const VkSemaphore waitSemaphore = frame.imageAvailable();
-    const VkPipelineStageFlags waitStage =
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    const VkSemaphore signalSemaphore =
-        swapchainResources_.renderFinished(imageIndex);
-    const VkCommandBuffer commandBuffer = frame.commandBuffer();
-
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = &waitSemaphore;
-    submitInfo.pWaitDstStageMask = &waitStage;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &commandBuffer;
-    submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = &signalSemaphore;
-
-    if (vkQueueSubmit(
-            device.graphicsQueue(),
-            1,
-            &submitInfo,
-            frame.inFlightFence()) != VK_SUCCESS)
-    {
-        throw std::runtime_error("failed to submit draw command buffer");
-    }
-
-    // No allocation or destruction after submit: associate only with this NEW
-    // submission, never the previous fence cycle we waited for above. Early
-    // acquire returns and exceptions before submit leave pending retirement intact.
-    scheduler_->commitSuccess(currentFrame_, submittedPoint);
-
-    const VkResult presentResult =
-        swapchainResources_.present(device.presentQueue(), imageIndex);
-    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR ||
-        presentResult == VK_SUBOPTIMAL_KHR)
-    {
-        needsResize = true;
-    }
-    else if (presentResult != VK_SUCCESS)
-    {
-        throw std::runtime_error("failed to present swapchain image");
-    }
-
-    frameFinished = true;
-    currentFrame_ =
-        (currentFrame_ + 1) % static_cast<uint32_t>(frameSlots_.size());
-    return needsResize
-        ? RenderResult::RenderedNeedsResize
-        : RenderResult::Rendered;
+    const auto result = render::executePresentationFrame(*presentation_, *presentation_,
+        *scheduler_, currentFrame_, [&](rhi::AcquiredFrame& acquired, rhi::CommandEncoder& commands)
+        {
+            if (sceneFrame) updateFrameData(currentFrame_, *sceneFrame);
+            recordCommandBuffer(acquired, commands, currentFrame_,
+                sceneFrame ? frameDataResources_.bindingSet(currentFrame_) : rhi::BindingSetRef{},
+                drawList, uiDrawData, sceneFrame != nullptr);
+        });
+    if (result.submitted) currentFrame_ = (currentFrame_ + 1) % frameCount();
+    if (result.status == rhi::PresentationStatus::SurfaceLost)
+        throw std::runtime_error("presentation surface lost; recreate the window presentation session");
+    const bool reconfigure = result.status == rhi::PresentationStatus::NeedsReconfigure ||
+        result.status == rhi::PresentationStatus::Suboptimal;
+    if (!result.submitted) return reconfigure ? RenderResult::NeedsResize : RenderResult::Skipped;
+    return reconfigure ? RenderResult::RenderedNeedsResize : RenderResult::Rendered;
 }
 
 VulkanRenderer::operator bool() const noexcept
 {
-    return context_ != nullptr && static_cast<bool>(swapchainResources_) &&
-        !frameSlots_.empty();
+    return context_ != nullptr && static_cast<bool>(presentation_) &&
+        frameCount() != 0;
 }
 
 bool VulkanRenderer::sceneReady() const noexcept
@@ -880,19 +787,19 @@ bool VulkanRenderer::hasSceneResources() const noexcept
 {
     const bool editorResourcesValid = outputMode_ != OutputMode::Editor ||
         (static_cast<bool>(editorViewportRenderPass_) &&
-         editorViewportTargets_.size() == frameSlots_.size() &&
+         editorViewportTargets_.size() == frameCount() &&
          editorViewportFormat_ != VK_FORMAT_UNDEFINED &&
          editorViewportRevision_ != 0);
     return context_ != nullptr &&
         frameDataResources_.frameCount() != 0 &&
-        static_cast<bool>(swapchainResources_) &&
+        static_cast<bool>(presentation_) &&
         static_cast<bool>(sceneRenderPass_) &&
-        sceneRenderTargets_.size() == frameSlots_.size() &&
+        sceneRenderTargets_.size() == frameCount() &&
         static_cast<bool>(outputBindings_.layout()) &&
-        outputBindings_.size() == frameSlots_.size() &&
+        outputBindings_.size() == frameCount() &&
         static_cast<bool>(graphicsPipeline_) &&
         static_cast<bool>(presentPipeline_) &&
-        !frameSlots_.empty() &&
+        frameCount() != 0 &&
         editorResourcesValid;
 }
 
@@ -916,24 +823,8 @@ VulkanRenderer::editorViewportOutput(uint32_t frameIndex) const
 
 void VulkanRenderer::collectRetiredResourcesAfterIdle()
 {
-    for (RenderFrameSlot& slot : frameSlots_)
-    {
-        slot.context.resetCommands();
-    }
+    if (presentation_) presentation_->resetCommandsAfterIdle();
     if (scheduler_) scheduler_->collectAfterIdle();
-}
-
-void VulkanRenderer::createFrameSlots(uint32_t frameCount)
-{
-    const Device& device = context_->device();
-    std::vector<RenderFrameSlot> newContexts;
-    newContexts.reserve(frameCount);
-    for (uint32_t i = 0; i < frameCount; ++i)
-    {
-        newContexts.emplace_back(device);
-    }
-    frameSlots_ = std::move(newContexts);
-    currentFrame_ = 0;
 }
 
 void VulkanRenderer::createSceneRenderTargets(
@@ -1006,8 +897,8 @@ void VulkanRenderer::createPresentResources(uint32_t frameCount)
     std::vector<rhi::TextureViewRef> views;
     for (const auto& target : sceneRenderTargets_) views.push_back(target.view(kSceneResolveAttachment));
     outputBindings_.create(*resourceDevice_, views);
-    presentOutputTransferFunction_ = render::outputTransferFunction(fromVulkanFormat(swapchainResources_.format()),
-        swapchainResources_.colorSpace() == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+    presentOutputTransferFunction_ = render::outputTransferFunction(presentation_->output().format,
+        presentation_->output().colorSpace == rhi::OutputColorSpace::SrgbNonlinear);
 }
 
 void VulkanRenderer::recreatePresentDescriptorSets(uint32_t frameCount)
@@ -1044,7 +935,7 @@ VulkanRenderer::makePresentPipelineCreateInfo() const
     GraphicsPipeline::CreateInfo createInfo = presentPipelineCreateInfo_;
     createInfo.renderPass = outputMode_ == OutputMode::Editor
         ? editorViewportRenderPass_.reference()
-        : swapchainResources_.renderPassReference();
+        : presentation_->renderPassReference();
     createInfo.descriptorSetLayouts.insert(
         createInfo.descriptorSetLayouts.begin(),
         nativeBindingLayout(outputBindings_.layout()));
@@ -1072,22 +963,14 @@ void VulkanRenderer::updateFrameData(
     frameDataResources_.sync(frameIndex);
 }
 
-void VulkanRenderer::recordCommandBuffer(VkCommandBuffer commandBuffer,
-    uint32_t frameIndex, uint32_t imageIndex, const rhi::BindingSetRef& descriptorSet,
+void VulkanRenderer::recordCommandBuffer(rhi::AcquiredFrame& presentation,
+    rhi::CommandEncoder& commands, uint32_t frameIndex, const rhi::BindingSetRef& descriptorSet,
     const render::PreparedDrawList& drawList, const render::GuiOverlay* uiDrawData, bool drawScene)
 {
-    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS)
-        throw std::runtime_error("failed to begin recording command buffer");
-
-    VulkanCommandEncoder commands(resourceDevice_->id(), commandBuffer);
-    VulkanGuiCommandContext guiContext{commandBuffer};
-    VulkanPassTarget presentation(resourceDevice_->id(), swapchainResources_.renderPassReference(),
-        swapchainResources_.framebuffer(imageIndex), swapchainResources_.extent());
+    VulkanGuiCommandContext guiContext{presentation_->commandBuffer(presentation)};
     std::optional<VulkanPassTarget> scene, viewport;
     render::FramePasses passes;
-    passes.presentation = &presentation;
+    passes.presentation = &presentation.target();
     if (drawScene)
     {
         const auto& target = sceneRenderTargets_.at(frameIndex);
@@ -1097,7 +980,10 @@ void VulkanRenderer::recordCommandBuffer(VkCommandBuffer commandBuffer,
         passes.frameBindings = descriptorSet;
         passes.outputBindings = outputBindings_.set(frameIndex);
         passes.outputPipeline = presentPipeline_;
-        passes.outputTransfer = presentOutputTransferFunction_;
+        passes.outputTransfer = outputMode_ == OutputMode::Runtime
+            ? render::outputTransferFunction(presentation.output().format,
+                presentation.output().colorSpace == rhi::OutputColorSpace::SrgbNonlinear)
+            : presentOutputTransferFunction_;
         if (outputMode_ == OutputMode::Editor)
         {
             const auto& output = editorViewportTargets_.at(frameIndex);
@@ -1106,8 +992,6 @@ void VulkanRenderer::recordCommandBuffer(VkCommandBuffer commandBuffer,
         }
     }
     render::recordFramePipeline(commands, outputMode_, passes, drawScene ? &drawList : nullptr, uiDrawData, guiContext);
-    if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
-        throw std::runtime_error("failed to record command buffer");
 }
 
 

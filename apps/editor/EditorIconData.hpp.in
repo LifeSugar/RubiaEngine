@@ -1,0 +1,9 @@
+#pragma once
+
+#include <cstdint>
+
+namespace rubia::editor
+{
+// Embedded from assets/branding/rubia-icon-64.png at configure time.
+inline constexpr uint8_t kEditorIconPng[] = { @RUBIA_ICON_BYTES@ };
+} // namespace rubia::editor

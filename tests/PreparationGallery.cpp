@@ -60,7 +60,7 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
         app.startEmptyScene(config);
         app.setupCamera();
         app.initImGui(config);
-        app.guiRenderBridge.attach(app.renderer, app.renderAssets);
+        app.guiRenderBridge.attach(app.guiRenderHost, app.renderAssets, app.imguiLayer.rendererBackend());
         awaitGallery([&] {
             app.resourcePreparation().advance(); app.updateContentLoading(); app.window.pollEvents();
             requireGallery(app.contentLoadStatus_.state != editor::ContentLoadState::Failed,

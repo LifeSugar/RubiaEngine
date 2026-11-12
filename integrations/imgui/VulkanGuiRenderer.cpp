@@ -1,6 +1,9 @@
 #include "imgui/VulkanGuiRenderer.hpp"
 
 #include "vulkan/VulkanGuiCommandContext.hpp"
+#include "vulkan/VulkanContext.hpp"
+#include "vulkan/VulkanRenderer.hpp"
+#include "vulkan/VulkanResourceDevice.hpp"
 
 #include <imgui.h>
 #include <imgui_impl_vulkan.h>
@@ -30,6 +33,80 @@ bool needsTextureWork(const ImTextureData& texture, uint32_t imageCount)
 
 } // namespace
 
+struct VulkanGuiRenderer::TextureSession
+{
+    ImGuiContext* context = nullptr;
+    bool active = false;
+};
+struct VulkanGuiRenderer::TextureRegistration final : GuiTexture
+{
+    TextureRegistration(std::shared_ptr<TextureSession> session, rhi::TextureViewRef view)
+        : session(std::move(session)), view(std::move(view))
+    {
+        set = ImGui_ImplVulkan_AddTexture(rhi::vulkan::nativeTextureView(this->view),
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (!set) throw std::runtime_error("failed to register GUI texture");
+    }
+    ~TextureRegistration() override
+    {
+        if (session->active)
+        {
+            auto* previous = ImGui::GetCurrentContext();
+            ImGui::SetCurrentContext(session->context);
+            ImGui_ImplVulkan_RemoveTexture(set);
+            ImGui::SetCurrentContext(previous);
+        }
+    }
+    std::uintptr_t token() const noexcept override
+    { return session->active ? reinterpret_cast<std::uintptr_t>(set) : 0; }
+    std::shared_ptr<TextureSession> session;
+    rhi::TextureViewRef view;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+};
+
+VulkanGuiRenderer::VulkanGuiRenderer(const rhi::vulkan::VulkanContext& context,
+    const rhi::vulkan::VulkanRenderer& renderer) : context_(context), renderer_(renderer) {}
+
+void VulkanGuiRenderer::initialize(ImGuiContext* imguiContext)
+{
+    const auto& device = context_.device();
+    CreateInfo info;
+    info.imguiContext = imguiContext;
+    info.instance = context_.instance();
+    info.physicalDevice = device.physical();
+    info.device = device.get();
+    info.graphicsQueue = device.graphicsQueue();
+    info.graphicsQueueFamily = device.graphicsQueueFamily();
+    info.renderPass = renderer_.presentRenderPass();
+    info.imageCount = renderer_.swapchainImageCount();
+    initialize(info);
+}
+
+void VulkanGuiRenderer::reconfigure()
+{
+    if (!initialized_) throw std::logic_error("cannot reconfigure an uninitialized GUI backend");
+    if (textures_.use_count() != 1)
+        throw std::logic_error("GUI registrations must be drained before reconfiguration");
+    // The official backend's draw-buffer ring also depends on image count.
+    if (imageCount_ != renderer_.swapchainImageCount())
+    {
+        auto* context = imguiContext_;
+        shutdown();
+        initialize(context);
+    }
+    else recreatePipeline(renderer_.presentRenderPass());
+}
+
+GuiTextureRef VulkanGuiRenderer::registerTexture(const rhi::TextureViewRef& view)
+{
+    if (!initialized_ || !view || !view->texture())
+        throw std::invalid_argument("GUI texture registration requires an active backend and view");
+    if (rhi::vulkan::nativeImage(view->texture()).ownerDevice() != device_)
+        throw std::invalid_argument("GUI texture belongs to a different Vulkan device");
+    makeContextCurrent();
+    return std::make_shared<TextureRegistration>(textures_, view);
+}
+
 VulkanGuiRenderer::~VulkanGuiRenderer()
 {
     shutdown();
@@ -48,6 +125,7 @@ void VulkanGuiRenderer::initialize(const CreateInfo& createInfo)
         throw std::invalid_argument("ImGui Vulkan adapter create info is incomplete or already initialized");
     }
 
+    auto textureSession = std::make_shared<TextureSession>();
     imguiContext_ = createInfo.imguiContext;
     device_ = createInfo.device;
     imageCount_ = createInfo.imageCount;
@@ -76,11 +154,17 @@ void VulkanGuiRenderer::initialize(const CreateInfo& createInfo)
         imageCount_ = 0;
         throw std::runtime_error("failed to initialize Dear ImGui Vulkan backend");
     }
+    textureSession->context = imguiContext_;
+    textureSession->active = true;
+    textures_ = std::move(textureSession);
     initialized_ = true;
 }
 
 void VulkanGuiRenderer::shutdown() noexcept
 {
+    // Invalidates escaped CPU tokens; callers still must drain GPU use first.
+    if (textures_) textures_->active = false;
+    textures_.reset();
     if (initialized_)
     {
         makeContextCurrent();
