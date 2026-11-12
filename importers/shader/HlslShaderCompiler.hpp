@@ -9,6 +9,6 @@ class HlslShaderCompiler final
   public:
     [[nodiscard]] asset::ShaderAsset::CreateInfo compile(
         const std::filesystem::path &source, asset::ShaderStage stage,
-        const std::string &entryPoint = "main") const;
+        const std::string &entryPoint = "main", const ShaderTarget& target = {}) const;
 };
 } // namespace rubia::importer::shader

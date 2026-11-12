@@ -12,7 +12,7 @@ using namespace rubia;
 void require(bool condition,const char* message) { if(!condition) throw std::runtime_error(message); }
 struct Shader final : rhi::ShaderResource
 {
-    rhi::DeviceId owner=1; rhi::ShaderCode value{rhi::ShaderStage::Vertex,"main",{0x07230203,1,2,3}};
+    rhi::DeviceId owner=1; rhi::ShaderCode value{rhi::ShaderStage::Vertex,"main",{{ShaderBackend::Vulkan, "spirv_1_3"}, ShaderFormat::SpirV, {1,2,3}}};
     rhi::DeviceId deviceId() const noexcept override{return owner;}
     const rhi::ShaderCode& code() const noexcept override{return value;}
 };
@@ -82,9 +82,16 @@ void testKeysAndLifetime()
     require(render::PipelineKey::from(changed)!=render::PipelineKey::from(base),"static stencil reference missing from key");
     changed=base;changed.colorBlend.attachments[0].writeMask=1;
     require(render::PipelineKey::from(changed)!=render::PipelineKey::from(base),"color mask missing from key");
-    changed=base;auto alteredShader=std::make_shared<Shader>();alteredShader->value.spirv.back()++;
+    changed=base;auto alteredShader=std::make_shared<Shader>();alteredShader->value.artifact.bytes.back()++;
     changed.shaders={alteredShader};
     require(library.getOrCreate(changed)!=first,"shader content revision reused old PSO");
+    changed=base;auto profiled=std::make_shared<Shader>();
+    profiled->value.artifact.target.profile="spirv_1_4";changed.shaders={profiled};
+    require(render::PipelineKey::from(changed)!=render::PipelineKey::from(base),"shader profile missing from PSO key");
+    auto foreignFormat=std::make_shared<Shader>();
+    foreignFormat->value.artifact.target={ShaderBackend::Metal,"metallib_2_3"};
+    foreignFormat->value.artifact.format=ShaderFormat::MetalSource;changed.shaders={foreignFormat};
+    require(render::PipelineKey::from(changed)!=render::PipelineKey::from(base),"shader target/format missing from PSO key");
     changed=base;auto foreign=std::make_shared<Shader>();foreign->owner=2;changed.shaders={foreign};
     bool rejected=false;try{(void)library.getOrCreate(changed);}catch(const std::invalid_argument&){rejected=true;}
     require(rejected,"cache hit bypassed device ownership validation");

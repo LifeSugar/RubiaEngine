@@ -1,4 +1,5 @@
 #pragma once
+#include "rubia/ShaderArtifact.hpp"
 #include "rhi/PipelineTypes.hpp"
 #include <cstddef>
 #include <cstdint>
@@ -174,7 +175,7 @@ struct ShaderCode
 {
     ShaderStage stage = ShaderStage::Vertex;
     std::string entryPoint = "main";
-    std::vector<uint32_t> spirv;
+    ShaderArtifact artifact;
 };
 enum class AccessUsage
 {

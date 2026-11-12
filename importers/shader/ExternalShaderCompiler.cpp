@@ -1,5 +1,6 @@
 #include "shader/ExternalShaderCompiler.hpp"
 #include "SlangCompilerConfig.hpp"
+#include "shader/SlangTarget.hpp"
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -36,7 +37,8 @@ namespace rubia::importer::shader::detail {
 asset::ShaderAsset::CreateInfo
 compileExternalShader(const std::filesystem::path &source,
                       asset::ShaderStage stage, const std::string &entryPoint,
-                      ShaderCompiler) {
+                      const ShaderTarget& requestedTarget) {
+  const auto target = resolveSlangTarget(requestedTarget);
   if (entryPoint.empty() ||
       (entryPoint.front() >= '0' && entryPoint.front() <= '9') ||
       entryPoint.find_first_not_of(
@@ -83,7 +85,7 @@ compileExternalShader(const std::filesystem::path &source,
       std::filesystem::remove_all(path, error);
     }
   } cleanup{temporary};
-  const auto output = temporary / "shader.spv";
+  const auto output = temporary / "shader.output";
   const auto log = temporary / "diagnostics.txt";
   auto sourceArgument = absolute.u8string();
 #ifdef __APPLE__
@@ -94,19 +96,24 @@ compileExternalShader(const std::filesystem::path &source,
   std::vector<std::string> arguments;
   arguments = {sourceArgument,
                "-target",
-               "spirv",
+               target.argument,
                "-profile",
-               "spirv_1_3",
+               target.target.profile,
                "-entry",
                entryPoint,
                "-stage",
                stageName,
                "-matrix-layout-column-major",
-               "-fvk-use-entrypoint-name",
                "-I",
                absolute.parent_path().u8string(),
                "-o",
                output.u8string()};
+
+  if (target.target.backend == ShaderBackend::Vulkan)
+  {
+    arguments.push_back("-fvk-use-entrypoint-name");
+    arguments.push_back("-emit-spirv-directly");
+  }
 
 #ifdef _WIN32
   struct Handle {
@@ -244,11 +251,13 @@ compileExternalShader(const std::filesystem::path &source,
   result.entryPoint = entryPoint;
   std::ifstream binary(output, std::ios::binary | std::ios::ate);
   const auto size = binary.tellg();
-  if (size <= 0 || size % 4 != 0)
-    throw std::runtime_error("Invalid Slang SPIR-V output");
-  result.spirv.resize(static_cast<size_t>(size) / 4);
+  if (size <= 0)
+    throw std::runtime_error("Empty Slang shader output");
+  result.artifact.target = target.target;
+  result.artifact.format = target.format;
+  result.artifact.bytes.resize(static_cast<size_t>(size));
   binary.seekg(0);
-  if (!binary.read(reinterpret_cast<char *>(result.spirv.data()), size))
+  if (!binary.read(reinterpret_cast<char *>(result.artifact.bytes.data()), size))
     throw std::runtime_error("Cannot read Slang output");
   return result;
 }

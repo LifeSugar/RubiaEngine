@@ -95,6 +95,14 @@ ShaderProgramAsset ShaderProgramBuilder::build(ShaderProgramAsset::CreateInfo cr
             "Program.InvalidStages", "shaders",
             "graphics programs currently require exactly one vertex and one fragment shader");
     }
+    if (!stages.empty())
+    {
+        const auto& expected = stages.begin()->second->artifact();
+        for (const auto& [stage, shader] : stages)
+            if (shader->artifact().target != expected.target || shader->artifact().format != expected.format)
+                report.addError("Program.TargetMismatch", "shaders",
+                    "shader stages must use the same target, profile and code format");
+    }
     if (!report.valid())
     {
         throw AssetValidationError(std::move(report));
@@ -148,11 +156,12 @@ ShaderProgramAsset ShaderProgramBuilder::build(ShaderProgramAsset::CreateInfo cr
         const auto mask = shaderStageMask(stage);
         code.add(static_cast<uint64_t>(stage));
         code.add(shader->entryPoint());
-        code.add(shader->spirv().size());
-        for (auto word : shader->spirv())
-        {
-            code.add(word);
-        }
+        const auto& artifact = shader->artifact();
+        code.add(static_cast<uint64_t>(artifact.target.backend));
+        code.add(static_cast<uint64_t>(artifact.format));
+        code.add(artifact.target.profile);
+        code.add(artifact.bytes.size());
+        for (auto byte : artifact.bytes) code.add(byte);
         std::set<std::pair<uint32_t, uint32_t>> stageBindings;
         for (const auto &resource : shader->interface().resources)
         {

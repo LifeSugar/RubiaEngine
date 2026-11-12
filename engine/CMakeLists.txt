@@ -9,6 +9,7 @@ target_compile_definitions(rubia_engine PUBLIC
 )
 target_link_libraries(rubia_engine
     PUBLIC
+        Rubia::ShaderTypes
         glm::glm
         rubia_project_options
 )

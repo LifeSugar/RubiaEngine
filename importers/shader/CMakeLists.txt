@@ -7,6 +7,7 @@ target_sources(rubia_importers PRIVATE
     HlslShaderCompiler.hpp
     SlangShaderCompiler.cpp
     SlangShaderCompiler.hpp
+    SlangTarget.hpp
     SpirvReflection.cpp
     SpirvReflection.hpp
     SpirvShaderImporter.cpp

@@ -1,3 +1,4 @@
+#include "SpirvCode.hpp"
 #include "PipelineNativeDescription.hpp"
 #include "PipelineConversions.hpp"
 #include <algorithm>
@@ -136,8 +137,8 @@ rhi::GraphicsPipelineDesc describeGraphicsPipeline(const GraphicsPipeline::Creat
     result.shaders = d.shaders;
     if (result.shaders.empty())
     {
-        result.shaders.push_back(device.createShader({rhi::ShaderStage::Vertex, d.vertexEntryPoint, d.vertexShaderSpirv}));
-        if (!d.fragmentShaderSpirv.empty()) result.shaders.push_back(device.createShader({rhi::ShaderStage::Fragment,d.fragmentEntryPoint,d.fragmentShaderSpirv}));
+        result.shaders.push_back(device.createShader({rhi::ShaderStage::Vertex, d.vertexEntryPoint, spirvArtifact(d.vertexShaderSpirv)}));
+        if (!d.fragmentShaderSpirv.empty()) result.shaders.push_back(device.createShader({rhi::ShaderStage::Fragment,d.fragmentEntryPoint,spirvArtifact(d.fragmentShaderSpirv)}));
     }
     for (const auto& layout : d.descriptorSetLayouts) result.bindingLayouts.push_back(borrowBindingLayout(device, layout));
     for (const auto& range : d.pushConstantRanges) result.constantRanges.push_back({stages(range.stageFlags),range.offset,range.size});

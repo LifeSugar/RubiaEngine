@@ -33,7 +33,7 @@ void App::mainLoop(ApplicationGui& gui)
         updateContentLoading();
         processPendingTextureReimport();
         gui.update({assetManager, scene, guiRenderBridge, &textureImports,
-                    &contentLoadStatus_, resourcePreparation_.get(), demoContent.defaultMaterial});
+                    &contentLoadStatus_, resourcePreparation_.get(), demoContent.defaultMaterial, backend_->shaderTarget()});
 
         imguiLayer.beginFrame();
         drawGui(gui);

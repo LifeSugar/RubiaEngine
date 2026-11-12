@@ -20,6 +20,7 @@ target_compile_options(rubia_project_options INTERFACE
     $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
 )
 
+add_subdirectory(foundation)
 add_subdirectory(engine)
 add_subdirectory(rhi)
 if(RUBIA_BUILD_IMPORTERS)

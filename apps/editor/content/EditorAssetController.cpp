@@ -32,7 +32,7 @@ bool supported(const std::filesystem::path &path)
            ext == ".spv" || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".bmp" || ext == ".ktx2";
 }
 std::string importKey(const std::filesystem::path &path,
-                      const EditorAssetController::ImportOptions &options)
+                      const EditorAssetController::ImportOptions &options, const ShaderTarget& target)
 {
     auto key = path.generic_u8string();
 #ifdef _WIN32
@@ -41,7 +41,8 @@ std::string importKey(const std::filesystem::path &path,
 #endif
     const auto ext = extension(path);
     if (ext == ".spv" || ext == ".hlsl" || ext == ".slang")
-        key += "|" + std::to_string(static_cast<int>(options.stage)) + "|" + options.entryPoint;
+        key += "|" + std::to_string(static_cast<int>(options.stage)) + "|" + options.entryPoint +
+            "|target=" + std::to_string(static_cast<int>(target.backend)) + "|" + target.profile;
     else if (ext != ".glb" && ext != ".gltf")
         key += "|" + std::to_string(static_cast<int>(options.colorSpace));
     const auto modified = std::filesystem::last_write_time(path).time_since_epoch();
@@ -64,7 +65,10 @@ void EditorAssetController::importFile(std::filesystem::path path, ImportOptions
     commands_.push_back([this, path = std::move(path), options, addToScene,
                          parent](const auto &context, auto &selection) {
         const auto absolute = std::filesystem::canonical(path);
-        const auto key = importKey(absolute, options);
+        const auto target = context.shaderTarget;
+        const auto key = importKey(absolute, options, target);
+        if (extension(absolute) == ".spv" && target.backend != ShaderBackend::Vulkan)
+            throw std::invalid_argument("Legacy SPIR-V import requires the Vulkan shader target");
         // Source shaders always recompile: includes/modules may have changed
         // even when the entry file's timestamp and size stayed the same.
         const auto sourceExtension = extension(absolute);
@@ -85,7 +89,7 @@ void EditorAssetController::importFile(std::filesystem::path path, ImportOptions
         }
         message_ = "Importing " + absolute.filename().u8string();
         importFuture_ =
-            std::async(std::launch::async, [absolute, options, addToScene, parent, key] {
+            std::async(std::launch::async, [absolute, options, addToScene, parent, key, target] {
                 Imported result;
                 result.path = absolute;
                 result.options = options;
@@ -121,7 +125,7 @@ void EditorAssetController::importFile(std::filesystem::path path, ImportOptions
                 }
                 else if (ext == ".hlsl" || ext == ".slang")
                     result.data = importer::shader::SlangShaderCompiler{}.compile(
-                        absolute, options.stage, options.entryPoint);
+                        absolute, options.stage, options.entryPoint, target);
                 else if (ext == ".spv")
                 {
                     asset::AssetManager temporary;
@@ -135,7 +139,7 @@ void EditorAssetController::importFile(std::filesystem::path path, ImportOptions
                     const auto &shader = temporary.shader(handle);
                     result.data = asset::ShaderAsset::CreateInfo{
                         absolute.filename().u8string(), options.stage, options.entryPoint,
-                        shader.spirv(), shader.interface()};
+                        shader.artifact(), shader.interface()};
                 }
                 else
                 {
@@ -157,8 +161,8 @@ void EditorAssetController::importFile(std::filesystem::path path, ImportOptions
 void EditorAssetController::publishImport(const ApplicationGuiContext &context, Imported value,
                                           EditorSelection &selection)
 {
-    if (importKey(value.path, value.options) != value.key)
-        throw std::runtime_error("Source file changed during import; import it again");
+    if (importKey(value.path, value.options, context.shaderTarget) != value.key)
+        throw std::runtime_error("Source file or shader target changed during import; import it again");
     auto &assets = context.assets;
     asset::AnyAssetHandle imported;
     if (auto source = std::get_if<importer::gltf::GLBModel>(&value.data))

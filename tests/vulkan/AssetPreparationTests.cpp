@@ -1,3 +1,4 @@
+#include "vulkan/SpirvCode.hpp"
 #include "vulkan/RetiredResources.hpp"
 #include "VulkanUploadTests.hpp"
 #include "render/SceneResourcePreparation.hpp"
@@ -491,12 +492,12 @@ void runAssetPreparationTests(const Device& device, asset::AssetManager& assets,
         {
             if (shader->code().stage == rhi::ShaderStage::Vertex)
             {
-                rawInfo.vertexShaderSpirv = shader->code().spirv;
+                rawInfo.vertexShaderSpirv = spirvWords(shader->code().artifact);
                 rawInfo.vertexEntryPoint = shader->code().entryPoint;
             }
             else
             {
-                rawInfo.fragmentShaderSpirv = shader->code().spirv;
+                rawInfo.fragmentShaderSpirv = spirvWords(shader->code().artifact);
                 rawInfo.fragmentEntryPoint = shader->code().entryPoint;
             }
         }

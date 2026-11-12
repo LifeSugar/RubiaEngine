@@ -58,6 +58,7 @@ add_library(rubia_rhi_vulkan STATIC
     Swapchain.hpp
     SwapchainResources.cpp
     SwapchainResources.hpp
+    "${PROJECT_SOURCE_DIR}/rhi/vulkan/SpirvCode.hpp"
     UploadValidation.cpp
     UploadValidation.hpp
     UploadContext.cpp

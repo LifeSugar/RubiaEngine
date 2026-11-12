@@ -4,6 +4,7 @@
 #include "shader/SlangShaderCompiler.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -51,6 +52,36 @@ void run()
         std::cerr << "Compiling " << file << '\n';
         (void)compiler.compile(sources / file, std::string(file).find(".vert.")!=std::string::npos ? asset::ShaderStage::Vertex : asset::ShaderStage::Fragment);
     }
+    // Text targets compile on the host without a Metal/OpenGL device.
+    const auto portable = directory / "portable.slang";
+    {
+        std::ofstream out(portable);
+        out << "struct Params { float4 tint; };\n"
+               "ConstantBuffer<Params> params : register(b0);\n"
+               "float4 PSMain() : SV_Target { return params.tint; }\n";
+    }
+    for (const auto backend : {ShaderBackend::Vulkan, ShaderBackend::OpenGL, ShaderBackend::Metal, ShaderBackend::Direct3D12})
+    {
+        // DXIL code generation requires the optional host DXC toolchain.
+        if (backend == ShaderBackend::Direct3D12 && !std::getenv("RUBIA_TEST_DXIL")) continue;
+        const auto compiled = compiler.compile(portable, asset::ShaderStage::Fragment, "PSMain", {backend});
+        require(compiled.artifact.target.backend == backend && !compiled.artifact.target.profile.empty() &&
+                compatibleShaderFormat(backend, compiled.artifact.format) && !compiled.artifact.bytes.empty(),
+                "Slang ignored the requested target");
+        require(compiled.interface.parameterBlocks.size() == 1 &&
+                compiled.interface.parameterBlocks[0].members[0].name == "tint" &&
+                compiled.interface.parameterBlocks[0].byteSize == 16,
+                "target-specific reflection lost the material layout");
+        if (compiled.artifact.format == ShaderFormat::Glsl || compiled.artifact.format == ShaderFormat::MetalSource)
+        {
+            const std::string text(compiled.artifact.bytes.begin(), compiled.artifact.bytes.end());
+            require(text.find(compiled.artifact.format == ShaderFormat::Glsl ? "#version 460" : "metal") != std::string::npos,
+                    "text target did not emit target source");
+        }
+        (void)asset::ShaderAsset(compiled);
+    }
+    rejects([&] { (void)compiler.compile(portable, asset::ShaderStage::Fragment, "PSMain", {static_cast<ShaderBackend>(99)}); }, "target backend");
+    rejects([&] { (void)compiler.compile(portable, asset::ShaderStage::Fragment, "PSMain", {ShaderBackend::Vulkan, "not_a_profile"}); }, "target profile");
     const auto path = directory / "editor_unlit.slang";
     auto vertexFuture = std::async(std::launch::async, [&] {
         return compiler.compile(path, asset::ShaderStage::Vertex, "VSMain");
@@ -62,7 +93,9 @@ void run()
             fragment.entryPoint == "PSMain" && fragment.interface.entryPoint == "PSMain" &&
             fragment.interface.stage == asset::ShaderStage::Fragment,
             "Slang lost entry names or stages");
-    require(vertex.spirv.at(1) == 0x00010300u, "Unexpected SPIR-V target version");
+    require(vertex.artifact.target.backend == ShaderBackend::Vulkan &&
+            vertex.artifact.format == ShaderFormat::SpirV &&
+            vertex.artifact.bytes.at(5) == 3 && vertex.artifact.bytes.at(6) == 1, "Unexpected SPIR-V target version");
     require(vertex.interface.pushConstants.size() == 1 &&
             vertex.interface.pushConstants.front().byteSize == 12,
             "Slang push constants do not match the draw ABI");
@@ -119,7 +152,7 @@ void run()
         include << "float4 color() { return float4(0, 1, 0, 1); }\n";
     }
     const auto after = compiler.compile(directory / "include.slang", asset::ShaderStage::Fragment, "shade");
-    require(before.spirv != after.spirv, "Include edit did not change shader output");
+    require(before.artifact.bytes != after.artifact.bytes, "Include edit did not change shader output");
     {
         std::ofstream source(directory / "compute.slang");
         source << "[[vk::binding(0, 0)]] RWStructuredBuffer<uint> result;\n"

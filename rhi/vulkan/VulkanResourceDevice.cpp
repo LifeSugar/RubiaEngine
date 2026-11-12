@@ -1,3 +1,4 @@
+#include "SpirvCode.hpp"
 #include "VulkanResourceDevice.hpp"
 #include "vulkan/ImageView.hpp"
 #include "vulkan/Sampler.hpp"
@@ -559,15 +560,16 @@ SamplerRef VulkanResourceDevice::createSampler(const SamplerDesc &desc) const
 ShaderRef VulkanResourceDevice::createShader(const ShaderCode &desc) const
 {
     const auto stage = toVulkanStages(shaderStageMask(desc.stage));
-    if (!stage || (stage & (stage - 1)) || desc.spirv.empty() || desc.entryPoint.empty())
+    if (!stage || (stage & (stage - 1)) || desc.artifact.bytes.empty() || desc.entryPoint.empty())
         invalid("invalid shader code");
+    const auto words = spirvWords(desc.artifact);
     auto result = std::make_shared<ShaderOwner>();
     result->device = id_;
     result->desc = desc;
     result->nativeDevice = device_.get();
     VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    info.codeSize = desc.spirv.size() * sizeof(uint32_t);
-    info.pCode = desc.spirv.data();
+    info.codeSize = desc.artifact.bytes.size();
+    info.pCode = words.data();
     if (vkCreateShaderModule(device_.get(), &info, nullptr, &result->value) != VK_SUCCESS)
         throw ResourceError(ResourceErrorCode::DeviceFailure, "failed to create shader module");
     return result;

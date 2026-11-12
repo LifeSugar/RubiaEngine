@@ -213,7 +213,7 @@ DemoContent DemoContentLoader::loadBuiltins(
 
     const auto compile = [&](const std::filesystem::path& path, asset::ShaderStage stage) {
         return assets.createShader(importer::shader::SlangShaderCompiler{}.compile(
-            resolveAssetPath(createInfo.cookedAssetDirectory, path), stage));
+            resolveAssetPath(createInfo.cookedAssetDirectory, path), stage, "main", createInfo.shaderTarget));
     };
     content.pbrVertexShader = compile(createInfo.pbrVertexShader, asset::ShaderStage::Vertex);
     content.pbrFragmentShader = compile(createInfo.pbrFragmentShader, asset::ShaderStage::Fragment);

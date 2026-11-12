@@ -63,6 +63,7 @@ struct Backend final : editor::ApplicationBackend, render::ResourcePreparationHo
     explicit Backend(State& state) : state(state) {}
     ~Backend() override { state.events.push_back("backend destroyed"); }
     bool ready() const noexcept override { return initialized; }
+    ShaderTarget shaderTarget() const override { return {ShaderBackend::Vulkan, "spirv_1_3"}; }
     void waitIdle() const override { state.events.push_back("idle"); }
     void shutdown() noexcept override { initialized = false; state.events.push_back("backend shutdown"); }
     platform::Extent2D extent() const noexcept override { return size; }

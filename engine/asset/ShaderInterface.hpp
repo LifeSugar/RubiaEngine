@@ -91,7 +91,7 @@ struct ShaderPushConstantDesc
     std::vector<ShaderBlockMemberDesc> members;
 };
 
-/// Backend-independent interface reflected from one SPIR-V entry point.
+/// Backend-independent schema for the layout of one target-compiled entry point.
 struct ShaderInterface
 {
     ShaderStage stage = ShaderStage::Vertex;

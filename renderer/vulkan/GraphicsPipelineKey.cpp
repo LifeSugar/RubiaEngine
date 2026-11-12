@@ -1,3 +1,4 @@
+#include "vulkan/SpirvCode.hpp"
 #include "vulkan/GraphicsPipelineKey.hpp"
 #include "VulkanResourceDevice.hpp"
 #include "vulkan/PipelineKeyData.hpp"
@@ -17,10 +18,13 @@ GraphicsPipelineKey GraphicsPipelineKey::from(const GraphicsPipeline::CreateInfo
     key.add(info.subpass);
 
     const auto shader = [&](VkShaderStageFlagBits stage, const std::string &entry,
-                            const std::vector<uint32_t> &code) {
+                            const ShaderArtifact &artifact) {
         key.add(stage);
         key.string(entry);
-        key.append(code);
+        key.add(static_cast<uint32_t>(artifact.target.backend));
+        key.add(static_cast<uint32_t>(artifact.format));
+        key.string(artifact.target.profile);
+        key.bytes(artifact.bytes.data(), artifact.bytes.size());
     };
     if (!info.shaders.empty())
     {
@@ -33,14 +37,14 @@ GraphicsPipelineKey GraphicsPipelineKey::from(const GraphicsPipeline::CreateInfo
         key.count(shaders.size());
         for (const auto &s : shaders)
             shader(static_cast<VkShaderStageFlagBits>(toVulkanStages(rhi::shaderStageMask(s->code().stage))),
-                   s->code().entryPoint, s->code().spirv);
+                   s->code().entryPoint, s->code().artifact);
     }
     else
     {
         key.count(info.fragmentShaderSpirv.empty() ? 1 : 2);
-        shader(VK_SHADER_STAGE_VERTEX_BIT, info.vertexEntryPoint, info.vertexShaderSpirv);
+        shader(VK_SHADER_STAGE_VERTEX_BIT, info.vertexEntryPoint, spirvArtifact(info.vertexShaderSpirv));
         if (!info.fragmentShaderSpirv.empty())
-            shader(VK_SHADER_STAGE_FRAGMENT_BIT, info.fragmentEntryPoint, info.fragmentShaderSpirv);
+            shader(VK_SHADER_STAGE_FRAGMENT_BIT, info.fragmentEntryPoint, spirvArtifact(info.fragmentShaderSpirv));
     }
 
     auto specializations = info.specializations;

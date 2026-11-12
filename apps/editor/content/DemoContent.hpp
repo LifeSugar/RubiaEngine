@@ -1,4 +1,5 @@
 #pragma once
+#include "rubia/ShaderArtifact.hpp"
 
 #include "EditorFwd.hpp"
 #include "asset/AssetFwd.hpp"
@@ -53,6 +54,7 @@ public:
         std::filesystem::path presentFragmentShader;
         std::filesystem::path cookedAssetDirectory;
         TextureImportPolicy textureImportPolicy;
+        ShaderTarget shaderTarget;
     };
 
     [[nodiscard]] static DemoContent load(

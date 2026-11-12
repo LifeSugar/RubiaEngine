@@ -10,7 +10,7 @@
 
 namespace rubia::editor
 {
-enum class GraphicsApi { Vulkan, Direct3D12, Metal, OpenGL };
+using GraphicsApi = ShaderBackend;
 
 struct BackendConfig
 {
@@ -28,6 +28,7 @@ class ApplicationBackend
 {
 public:
     virtual ~ApplicationBackend() = default;
+    virtual ShaderTarget shaderTarget() const = 0;
     virtual bool ready() const noexcept = 0;
     virtual void waitIdle() const = 0;
     // Stop renderer/jobs while keeping the device alive for resident asset release.

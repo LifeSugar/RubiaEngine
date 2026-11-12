@@ -1,6 +1,7 @@
 #pragma once
 
 #include "EditorFwd.hpp"
+#include "rubia/ShaderArtifact.hpp"
 #include "content/ContentLoadStatus.hpp"
 #include "texture/TextureImportRegistry.hpp"
 #include "render/ResourcePreparation.hpp"
@@ -24,6 +25,7 @@ struct ApplicationGuiContext
     // advances work before GUI/frame recording, never from draw().
     render::ResourcePreparation* preparations = nullptr;
     asset::MaterialAssetHandle defaultModelMaterial;
+    ShaderTarget shaderTarget;
 };
 
 /// Per-frame GUI decisions consumed before building the scene RenderFrame.

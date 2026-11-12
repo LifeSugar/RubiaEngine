@@ -5,6 +5,7 @@
 #include <iostream>
 #include <stdexcept>
 
+using namespace rubia;
 using namespace rubia::asset;
 
 namespace
@@ -44,7 +45,7 @@ ShaderAsset::CreateInfo shaderInfo(ShaderStage stage)
     ShaderAsset::CreateInfo info;
     info.name = stage == ShaderStage::Vertex ? "Test VS" : "Test PS";
     info.stage = stage;
-    info.spirv = {0x07230203u, 0x00010000u, 0u, 1u, 0u};
+    info.artifact = {{ShaderBackend::Vulkan, "spirv_1_3"}, ShaderFormat::SpirV, {1, 2, 3, 4}};
     info.interface.stage = stage;
     info.interface.signature = 1;
     if (stage == ShaderStage::Vertex)
@@ -102,13 +103,27 @@ void testMergeAndSignatures()
             "program ordering/name must not change signatures");
 
     auto changedCode = shaderInfo(ShaderStage::Fragment);
-    changedCode.spirv.back() = 42;
+    changedCode.artifact.bytes.back() = 42;
     const auto changed = program(assets, shaderInfo(ShaderStage::Vertex), changedCode);
     require(code != assets.shaderProgram(changed).codeSignature() &&
                 layout == assets.shaderProgram(changed).layoutSignature() &&
                 interface == assets.shaderProgram(changed).interfaceSignature(),
             "code-only changes must preserve interface compatibility");
 
+    auto foreign = shaderInfo(ShaderStage::Fragment);
+    foreign.artifact.target = {ShaderBackend::Metal, "metallib_2_3"};
+    foreign.artifact.format = ShaderFormat::MetalSource;
+    rejects([&] { (void)program(assets, shaderInfo(ShaderStage::Vertex), foreign); }, "Program.TargetMismatch");
+    auto otherVs = shaderInfo(ShaderStage::Vertex);
+    otherVs.artifact.target = foreign.artifact.target;
+    otherVs.artifact.format = foreign.artifact.format;
+    const auto other = program(assets, otherVs, foreign);
+    require(assets.shaderProgram(other).codeSignature() != code,
+            "identical payloads from different targets aliased in program signature");
+    auto profiledVs = shaderInfo(ShaderStage::Vertex), profiledPs = shaderInfo(ShaderStage::Fragment);
+    profiledVs.artifact.target.profile = profiledPs.artifact.target.profile = "spirv_1_4";
+    require(assets.shaderProgram(program(assets, profiledVs, profiledPs)).codeSignature() != code,
+            "target profile missing from program signature");
     auto changedPush = shaderInfo(ShaderStage::Fragment);
     changedPush.interface.pushConstants[0].offset = 8;
     const auto push = program(assets, shaderInfo(ShaderStage::Vertex), changedPush);

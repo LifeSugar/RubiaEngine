@@ -14,6 +14,7 @@ class VulkanApplicationBackend final : public ApplicationBackend
 public:
     VulkanApplicationBackend(platform::glfw::Window&, const BackendConfig&);
     ~VulkanApplicationBackend() override;
+    ShaderTarget shaderTarget() const override { return {ShaderBackend::Vulkan, "spirv_1_3"}; }
     bool ready() const noexcept override { return static_cast<bool>(renderer_); }
     void waitIdle() const override { renderer_.waitIdle(); }
     void shutdown() noexcept override { renderer_.reset(); }

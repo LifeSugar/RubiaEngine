@@ -90,6 +90,29 @@ void runEditorAssetImportTests(const editor::ApplicationGuiContext &context,
     require(context.assets.shader(vertex).stage() == asset::ShaderStage::Vertex &&
                 context.assets.shader(fragment).stage() == asset::ShaderStage::Fragment,
             "Shader stages were not retained");
+    // A GUI import request must carry its selected target into the worker.
+    // Keep the alternate artifact CPU-only; the active renderer is Vulkan.
+    {
+        const auto portable = directory / "target.slang";
+        { std::ofstream out(portable); out << "float4 PSMain() : SV_Target { return float4(1,0,0,1); }"; }
+        auto alternate = context;
+        alternate.shaderTarget = {ShaderBackend::Metal, "metallib_2_3"};
+        editor::EditorAssetController targetController;
+        targetController.update(alternate, selection);
+        const auto before = context.assets.shaderHandles().size();
+        targetController.importFile(portable, options);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (targetController.busy() && std::chrono::steady_clock::now() < deadline)
+        {
+            targetController.update(alternate, selection);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        require(!targetController.busy() && context.assets.shaderHandles().size() == before + 1,
+                "targeted editor shader import failed");
+        const auto& artifact = context.assets.shader(context.assets.shaderHandles().back()).artifact();
+        require(artifact.target == alternate.shaderTarget && artifact.format == ShaderFormat::MetalSource,
+                "editor import silently fell back to Vulkan");
+    }
     controller.buildProgram(vertex, fragment);
     pump();
     require(context.assets.contains(controller.draftProgram()),

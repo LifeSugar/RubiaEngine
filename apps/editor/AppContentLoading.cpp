@@ -14,7 +14,9 @@ namespace rubia::editor
 void App::startEmptyScene(const RunConfig& config)
 {
     preparedContent_ = std::make_shared<PreparedContent>();
-    preparedContent_->content = DemoContentLoader::loadBuiltins(preparedContent_->assets, config.demoContent);
+    auto contentConfig = config.demoContent;
+    contentConfig.shaderTarget = backend_->shaderTarget();
+    preparedContent_->content = DemoContentLoader::loadBuiltins(preparedContent_->assets, contentConfig);
     preparedContent_->scene.create({"Untitled Scene", {}});
     backend_->beginScenePreparation(renderAssets, render::makeSceneResourceRequest(
         preparedContent_->assets, {}, preparedContent_->content.materialTemplate,
@@ -30,6 +32,7 @@ void App::startContentLoading()
         return;
     }
     discardContentLoading();
+    contentLoadConfig_.shaderTarget = backend_->shaderTarget();
     contentLoadStatus_ = {ContentLoadState::Preparing,
         "Reading model and decoding textures..."};
     std::clog << "[Content] " << contentLoadStatus_.message

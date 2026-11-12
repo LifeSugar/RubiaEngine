@@ -47,7 +47,7 @@ void App::run(const RunConfig& config, ApplicationGui& gui)
         guiRenderBridge.attach(backend_->guiHost(), renderAssets, imguiLayer.rendererBackend());
         ApplicationGuiContext guiContext{
             assetManager, scene, guiRenderBridge, &textureImports, &contentLoadStatus_,
-            resourcePreparation_.get(), demoContent.defaultMaterial};
+            resourcePreparation_.get(), demoContent.defaultMaterial, backend_->shaderTarget()};
         gui.attach(guiContext);
         guiAttached = true;
         mainLoop(gui);
@@ -166,7 +166,7 @@ void App::drawGui(ApplicationGui& gui)
         guiRenderBridge,
         &textureImports,
         &contentLoadStatus_,
-        resourcePreparation_.get(), demoContent.defaultMaterial};
+        resourcePreparation_.get(), demoContent.defaultMaterial, backend_->shaderTarget()};
     const ApplicationGuiFrameOutput output = gui.draw(context);
     for (const importer::texture::TextureReimportRequest& request : output.textureReimports)
     {

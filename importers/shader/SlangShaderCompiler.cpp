@@ -1,5 +1,6 @@
 #include "shader/SlangShaderCompiler.hpp"
 #include "shader/ExternalShaderCompiler.hpp"
+#include "shader/SlangTarget.hpp"
 #include "shader/ShaderInterfaceSignature.hpp"
 #include <cstring>
 #include <fstream>
@@ -133,7 +134,8 @@ void check(SlangResult result, slang::IBlob *diagnostics) {
 asset::ShaderAsset::CreateInfo
 SlangShaderCompiler::compile(const std::filesystem::path &source,
                              asset::ShaderStage stage,
-                             const std::string &entryPoint) const {
+                             const std::string &entryPoint, const ShaderTarget& requestedTarget) const {
+  const auto selectedTarget = detail::resolveSlangTarget(requestedTarget);
   if (entryPoint.empty() || (entryPoint[0] >= '0' && entryPoint[0] <= '9') ||
       entryPoint.find_first_not_of(
           "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") !=
@@ -168,8 +170,10 @@ SlangShaderCompiler::compile(const std::filesystem::path &source,
     return result;
   }();
   slang::TargetDesc target{};
-  target.format = SLANG_SPIRV;
-  target.profile = global->findProfile("spirv_1_3");
+  target.format = selectedTarget.slangFormat;
+  target.profile = global->findProfile(selectedTarget.target.profile.c_str());
+  if (target.profile == SLANG_PROFILE_UNKNOWN)
+    throw std::invalid_argument("Unknown shader target profile: " + selectedTarget.target.profile);
   slang::CompilerOptionEntry options[2]{};
   options[0].name = slang::CompilerOptionName::VulkanUseEntryPointName;
   options[1].name = slang::CompilerOptionName::EmitSpirvDirectly;
@@ -186,7 +190,7 @@ SlangShaderCompiler::compile(const std::filesystem::path &source,
   desc.searchPaths = searches;
   desc.searchPathCount = 1;
   desc.compilerOptionEntries = options;
-  desc.compilerOptionEntryCount = 2;
+  desc.compilerOptionEntryCount = selectedTarget.target.backend == ShaderBackend::Vulkan ? 2 : 0;
   ComPtr<slang::ISession> session;
   check(global->createSession(desc, session.writeRef()), nullptr);
   ComPtr<slang::IBlob> diagnostics;
@@ -218,7 +222,7 @@ SlangShaderCompiler::compile(const std::filesystem::path &source,
     check(status, diagnostics);
   }
   auto result = detail::compileExternalShader(path, stage, entryPoint,
-                                              detail::ShaderCompiler::Slang);
+                                              selectedTarget.target);
   auto &reflected = result.interface;
   reflected.stage = stage;
   reflected.entryPoint = entryPoint;

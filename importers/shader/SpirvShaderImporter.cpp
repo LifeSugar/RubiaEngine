@@ -54,12 +54,12 @@ asset::ShaderAssetHandle SpirvShaderImporter::import(
         : createInfo.name;
     shaderInfo.stage = createInfo.stage;
     shaderInfo.entryPoint = createInfo.entryPoint;
-    shaderInfo.spirv.resize(
+    std::vector<uint32_t> words(
         static_cast<std::size_t>(byteSize) / sizeof(uint32_t));
 
     file.seekg(0);
     if (!file.read(
-            reinterpret_cast<char*>(shaderInfo.spirv.data()),
+            reinterpret_cast<char*>(words.data()),
             static_cast<std::streamsize>(byteSize)))
     {
         throw std::runtime_error(
@@ -67,8 +67,14 @@ asset::ShaderAssetHandle SpirvShaderImporter::import(
             createInfo.path.string());
     }
 
+    if (words.size() < 5 || words.front() != 0x07230203u)
+        throw std::runtime_error("Invalid legacy SPIR-V header");
+    const auto profile = "spirv_" + std::to_string((words[1] >> 16) & 0xff) +
+        "_" + std::to_string((words[1] >> 8) & 0xff);
+    shaderInfo.artifact = ShaderArtifact::copy({ShaderBackend::Vulkan, profile},
+        ShaderFormat::SpirV, words.data(), static_cast<size_t>(byteSize));
     shaderInfo.interface = SpirvReflection::reflect(
-        shaderInfo.spirv,
+        words,
         shaderInfo.stage,
         shaderInfo.entryPoint);
 

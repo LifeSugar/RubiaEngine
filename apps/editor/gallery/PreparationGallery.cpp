@@ -52,7 +52,7 @@ void PreparationGallery::run()
         auto& assets = app.assetManager;
         auto& preparation = app.resourcePreparation();
         editor::ApplicationGuiContext context{assets, app.scene, app.guiRenderBridge,
-            &app.textureImports, &app.contentLoadStatus_, &preparation, app.demoContent.defaultMaterial};
+            &app.textureImports, &app.contentLoadStatus_, &preparation, app.demoContent.defaultMaterial, app.backend_->shaderTarget()};
         gui.attach(context);
         const auto content = editor::loadGalleryContent(context, folder, [&] {
             app.window.pollEvents(); preparation.advance();

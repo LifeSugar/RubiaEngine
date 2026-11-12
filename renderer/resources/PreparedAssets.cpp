@@ -62,7 +62,7 @@ PreparedShader::PreparedShader(const rhi::Device &device,
     if (!source_ || !*source_)
         throw std::invalid_argument("invalid shader source");
     shader_ = device.createShader(
-        {shaderStage(source_->stage()), source_->entryPoint(), source_->spirv()});
+        {shaderStage(source_->stage()), source_->entryPoint(), source_->artifact()});
 }
 PreparedShaderProgram::PreparedShaderProgram(
     const rhi::Device &device, std::shared_ptr<const asset::ShaderProgramAsset> source,

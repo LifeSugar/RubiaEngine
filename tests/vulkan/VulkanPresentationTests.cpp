@@ -33,6 +33,17 @@ int main()
         info.enableValidationLayers = true;
         rhi::vulkan::VulkanContext context(window, info);
         rhi::vulkan::VulkanResourceDevice device(context.device());
+        // Reject foreign and malformed artifacts before reaching the Vulkan driver.
+        for (const auto& artifact : std::vector<ShaderArtifact>{
+                 {{ShaderBackend::Metal, "metallib_2_3"}, ShaderFormat::MetalSource, {1,2,3,4}},
+                 {{ShaderBackend::Vulkan, "spirv_1_3"}, ShaderFormat::SpirV, {1,2,3}},
+                 {{ShaderBackend::Vulkan, "spirv_1_3"}, ShaderFormat::SpirV, std::vector<uint8_t>(20)}})
+        {
+            bool rejected = false;
+            try { (void)device.createShader({rhi::ShaderStage::Vertex, "main", artifact}); }
+            catch (const std::invalid_argument&) { rejected = true; }
+            require(rejected, "Vulkan accepted foreign or malformed shader code");
+        }
         // One CPU slot and multiple presentation images deliberately differ.
         rhi::vulkan::VulkanPresentation backend(context.device(), device.id(), context.surface(), 1);
         rhi::PresentationSurface& surface = backend;

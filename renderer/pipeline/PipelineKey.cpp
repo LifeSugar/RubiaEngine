@@ -32,7 +32,11 @@ PipelineKey PipelineKey::from(const rhi::GraphicsPipelineDesc& info)
     {
         key.add(shader->code().stage);
         key.string(shader->code().entryPoint);
-        key.append(shader->code().spirv);
+        const auto& artifact = shader->code().artifact;
+        key.add(artifact.target.backend);
+        key.add(artifact.format);
+        key.string(artifact.target.profile);
+        key.bytes(artifact.bytes.data(), artifact.bytes.size());
     }
     auto specializations = info.specializations;
     std::sort(specializations.begin(), specializations.end(), [](const auto& a, const auto& b) {
