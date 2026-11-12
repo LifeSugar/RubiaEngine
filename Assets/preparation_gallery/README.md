@@ -16,7 +16,7 @@ bash Assets/preparation_gallery/run.sh
 ```
 
 脚本先编译最新代码，编译成功后打开交互展厅。自动回归可在
-`build/debug/apps/editor` 下执行 `./VulkanApp --preparation-gallery-test`。
+`build/debug/tests` 下执行 `./RubiaIntegrationTests --preparation-gallery-test`。
 
 Windows：
 
@@ -26,7 +26,7 @@ Windows：
 ./assets/preparation_gallery/run.ps1
 ```
 
-先完成 `debug-vs` 构建，安装 Vulkan SDK 的 `dxc.exe`。脚本打开已构建的 Debug 编辑器，装配并验证展厅，然后进入正常主循环。
+先完成 `debug-vs` 构建，安装 Vulkan SDK 的 `dxc.exe`。脚本打开已构建的 Debug 编辑器，装配展厅，然后进入正常主循环。
 普通编辑器仍从空场景启动。点击 Hierarchy 的分组可以编辑实例位置和材质。
 
 自动回归：
@@ -35,7 +35,7 @@ Windows：
 ctest --test-dir build/debug-vs -C Debug -R preparation-gallery-test --output-on-failure
 ```
 
-也可在 `build/debug-vs/apps/editor/Debug` 下运行 `./VulkanApp.exe --preparation-gallery-test`。
+也可在 `build/debug-vs/tests/Debug` 下运行 `./RubiaIntegrationTests.exe --preparation-gallery-test`。
 GPU 测试注册需要 `RUBIA_ENABLE_GPU_TESTS=ON`。
 
 ## 展台矩阵
@@ -91,7 +91,8 @@ GPU 测试注册需要 `RUBIA_ENABLE_GPU_TESTS=ON`。
 - `group_00.glb` … `group_09.glb`：每组 4 个测试几何体。
 - `environment.glb`：背景平面、墙、展台、文字、玻璃参照物，合为一个顶点色网格。
 - `gallery.hlsl`：10 个入口，引用 `../shaders/RenderData.hlsli`。
-- `tests/PreparationGallery.cpp`：专用场景装配入口，不是通用场景序列化格式。
+- `apps/editor/gallery/GalleryContent.cpp`：交互展厅与测试共享的场景装配，不是通用场景序列化格式。
+- `tests/integration/PreparationGalleryTests.cpp`：展厅回归、GPU 读回与报告。
 
 Blender 节点不会自动转换为任意 Rubia HLSL。拖入完整 GLB 得到标准 glTF 材质预览；
 上述专用启动入口负责实例材质覆盖、自定义 VS/PS 和准备流程的测试。

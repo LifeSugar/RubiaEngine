@@ -345,7 +345,7 @@ ctest --test-dir build/debug --output-on-failure
 | shader-program-test | Program 接口和材质模板规则 |
 | asset-smoke-test | 真实资产导入相关回归 |
 
-`asset-smoke-test` 入口还串接了多项 CPU 检查，可以从 [AppSmokeTests.cpp](tests/AppSmokeTests.cpp) 的 `runAssetImportTest()` 往下追。GPU 测试的注册条件和命令见 [tests/CMakeLists.txt](tests/CMakeLists.txt)。旧 CHANGELOG 中的 9/9 是当时 RTX 4070 环境的结果，与本机这次 4/4 分开看。
+`asset-smoke-test` 入口还串接了多项 CPU 检查，可以从 [AppSmokeTests.cpp](tests/integration/AppSmokeTests.cpp) 的 `runAssetImportTest()` 往下追。GPU 测试的注册条件和命令见 [tests/CMakeLists.txt](tests/CMakeLists.txt)。旧 CHANGELOG 中的 9/9 是当时 RTX 4070 环境的结果，与本机这次 4/4 分开看。
 
 ### 打开现有展厅
 
@@ -374,7 +374,7 @@ cd build/debug/apps/editor
 
 **实验三：追踪一次失败。** 在空编辑器从临时目录导入一个有语法错误的 HLSL，设置相应阶段与入口，观察错误和现有场景。然后读 `EditorAssetController::update()` 的 catch 与 `release()` 路径，区分“失败保留可用场景”与“回滚所有已注册 CPU 资产”；当前工作流不保证整套导入的数据库式回滚。用临时副本做实验，避免改展厅原文件。
 
-如果 GPU 环境暂时无法启动，改做代码练习：在 `tests/EditorAssetImportTests.cpp` 找到导入失败用例，在 `tests/PreparationGallery.cpp` 找到 CacheHit、取消订阅和纹理替换验证，再用文字预测结果。不要为了复习顺手改造平台层。
+如果 GPU 环境暂时无法启动，改做代码练习：在 `tests/integration/EditorAssetImportTests.cpp` 找到导入失败用例，在 `tests/integration/PreparationGalleryTests.cpp` 找到 CacheHit、取消订阅和纹理替换验证，再用文字预测结果。不要为了复习顺手改造平台层。
 
 ## 第七节 闭卷自测与参考答案
 
@@ -438,7 +438,7 @@ cd build/debug/apps/editor
 | 准备请求的状态与所有权 | [ResourcePreparation.hpp](engine/render/ResourcePreparation.hpp) |
 | 一个场景如何变成可绘制项 | [RenderFrameBuilder.cpp](engine/render/RenderFrameBuilder.cpp) |
 | Pipeline 的真正匹配条件 | [GraphicsPipelineKey.cpp](renderer/vulkan/GraphicsPipelineKey.cpp) |
-| 怎样证明准备、取消、更新没有破坏行为 | [AssetPreparationTests.cpp](tests/AssetPreparationTests.cpp)、[PipelinePreparationTests.cpp](tests/PipelinePreparationTests.cpp) |
-| 纹理上传细节怎样验证 | [VulkanUploadTests.cpp](tests/VulkanUploadTests.cpp) |
-| 展厅的材质矩阵与测试意图 | [展厅说明](Assets/preparation_gallery/README.md) 与 [PreparationGallery.cpp](tests/PreparationGallery.cpp) |
+| 怎样证明准备、取消、更新没有破坏行为 | [AssetPreparationTests.cpp](tests/vulkan/AssetPreparationTests.cpp)、[PipelinePreparationTests.cpp](tests/vulkan/PipelinePreparationTests.cpp) |
+| 纹理上传细节怎样验证 | [VulkanUploadTests.cpp](tests/vulkan/VulkanUploadTests.cpp) |
+| 展厅的材质矩阵与测试意图 | [展厅说明](Assets/preparation_gallery/README.md) 与 [PreparationGallery.cpp](tests/integration/PreparationGalleryTests.cpp) |
 | 更深入的上传设计讨论 | [GPU_RESOURCE_UPLOAD_DESIGN.md](GPU_RESOURCE_UPLOAD_DESIGN.md)，结合当前实现阅读 |

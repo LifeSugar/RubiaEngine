@@ -157,6 +157,7 @@ private:
 
     [[nodiscard]] render::RenderFrame makeRenderFrame();
 
+    friend class PreparationGallery;
     friend class rubia::test::AppSmokeTests;
     friend class rubia::test::AppBackendTests;
 };

@@ -11,11 +11,10 @@ class EditorApp final
 {
 public:
     void run();
-    void runRenderTest();
 
-private:
     [[nodiscard]] static App::RunConfig makeRunConfig();
 
+private:
     // App joins content workers before EditorLayer releases its log capture.
     EditorLayer editorLayer_;
     App app_;

@@ -1,6 +1,6 @@
 #include "App.hpp"
 #include "EditorApp.hpp"
-#include "AppSmokeTests.hpp"
+#include "gallery/PreparationGallery.hpp"
 
 #include <array>
 #include <cstdlib>
@@ -17,16 +17,10 @@ struct LaunchOption
     std::string_view label;
 };
 
-constexpr std::array<LaunchOption, 9> launchOptions{{
+constexpr std::array<LaunchOption, 3> launchOptions{{
     {"--editor", "编辑器（空场景）"},
     {"--runtime", "Runtime（空场景）"},
     {"--preparation-gallery", "资源准备展示"},
-    {"--asset-test", "资产导入测试"},
-    {"--startup-test", "启动与资源生命周期测试"},
-    {"--render-test", "Runtime 渲染测试"},
-    {"--editor-test", "编辑器渲染测试"},
-    {"--editor-assets-test", "编辑器资产工作流测试"},
-    {"--preparation-gallery-test", "资源准备展示测试"},
 }};
 
 void printLaunchOptions()
@@ -43,7 +37,7 @@ std::string_view chooseLaunchOption()
     printLaunchOptions();
     for (std::string input;;)
     {
-        std::cout << "请选择 [0-9，回车默认 1]: " << std::flush;
+        std::cout << "请选择 [0-3，回车默认 1]: " << std::flush;
         if (!std::getline(std::cin, input))
         {
             std::cout << '\n';
@@ -61,7 +55,7 @@ std::string_view chooseLaunchOption()
                 return launchOptions[i].argument;
             }
         }
-        std::cout << "无效选项，请输入 0 到 9。\n";
+        std::cout << "无效选项，请输入 0 到 3。\n";
     }
 }
 } // namespace
@@ -89,36 +83,9 @@ int main(int argc, char** argv)
             return EXIT_FAILURE;
         }
 
-        if (option == "--preparation-gallery" || option == "--preparation-gallery-test")
+        if (option == "--preparation-gallery")
         {
-            rubia::test::AppSmokeTests::runPreparationGallery(
-                option == "--preparation-gallery");
-        }
-        else if (option == "--asset-test")
-        {
-            rubia::test::AppSmokeTests::runAssetImportTest();
-            std::cout << "[OK] Asset import test passed\n";
-        }
-        else if (option == "--startup-test")
-        {
-            rubia::test::AppSmokeTests::runStartupTest();
-            std::cout << "[OK] Startup test passed\n";
-        }
-        else if (option == "--render-test")
-        {
-            rubia::test::AppSmokeTests::runRenderTest();
-            std::cout << "[OK] Render test passed\n";
-        }
-        else if (option == "--editor-assets-test")
-        {
-            rubia::test::AppSmokeTests::runEditorAssetTest();
-            std::cout << "[OK] Editor asset workflow test passed\n";
-        }
-        else if (option == "--editor-test")
-        {
-            rubia::editor::EditorApp editor;
-            editor.runRenderTest();
-            std::cout << "[OK] Editor render test passed\n";
+            rubia::editor::PreparationGallery::run();
         }
         else if (option == "--editor")
         {

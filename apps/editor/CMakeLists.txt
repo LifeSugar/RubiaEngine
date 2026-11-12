@@ -75,6 +75,8 @@ target_link_libraries(rubia_application_vulkan PUBLIC
 
 add_library(rubia_editor STATIC
     App.cpp
+    EditorApp.cpp
+    EditorApp.hpp
     AppFrameLoop.cpp
     backend/ApplicationBackend.hpp
     AppContentLoading.cpp
@@ -100,12 +102,18 @@ target_link_libraries(rubia_editor
         glfw
 )
 
-add_executable(VulkanApp
-    EditorApp.cpp
-    EditorApp.hpp
-    main.cpp
+add_library(rubia_preparation_gallery STATIC
+    gallery/GalleryContent.cpp
+    gallery/GalleryContent.hpp
+    gallery/PreparationGallery.cpp
+    gallery/PreparationGallery.hpp
 )
-target_link_libraries(VulkanApp PRIVATE Rubia::AppRuntime)
+add_library(Rubia::PreparationGallery ALIAS rubia_preparation_gallery)
+target_link_libraries(rubia_preparation_gallery PUBLIC Rubia::AppRuntime)
+target_compile_definitions(rubia_preparation_gallery PRIVATE PROJECT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+
+add_executable(VulkanApp main.cpp)
+target_link_libraries(VulkanApp PRIVATE Rubia::AppRuntime Rubia::PreparationGallery)
 if(WIN32)
     enable_language(RC)
     configure_file(RubiaEngine.rc.in generated/RubiaEngine.rc @ONLY)

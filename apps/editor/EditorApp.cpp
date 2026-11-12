@@ -1,8 +1,6 @@
 #include "EditorApp.hpp"
 #include "EditorBuildInfo.hpp"
 
-#include "AppSmokeTests.hpp"
-
 namespace rubia::editor
 {
 
@@ -10,14 +8,6 @@ void EditorApp::run()
 {
     App::RunConfig config = makeRunConfig();
     app_.run(config, editorLayer_);
-}
-
-void EditorApp::runRenderTest()
-{
-    rubia::test::AppSmokeTests::runRenderTest(
-        app_,
-        makeRunConfig(),
-        editorLayer_);
 }
 
 App::RunConfig EditorApp::makeRunConfig()

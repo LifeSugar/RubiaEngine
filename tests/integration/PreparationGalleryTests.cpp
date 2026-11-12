@@ -3,7 +3,7 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include "EditorLayer.hpp"
-#include "content/EditorAssetController.hpp"
+#include "gallery/GalleryContent.hpp"
 #include "vulkan/VulkanDrawList.hpp"
 #include <algorithm>
 #include <array>
@@ -43,7 +43,7 @@ void saveCapture(const std::filesystem::path& path,
 }
 }
 
-void AppSmokeTests::runPreparationGallery(bool interactive)
+void AppSmokeTests::runPreparationGalleryTest()
 {
     using namespace asset;
     using namespace render;
@@ -58,7 +58,7 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
     std::filesystem::create_directories(artifacts);
     try
     {
-        app.initWindow(config, interactive);
+        app.initWindow(config, false);
         app.initBackend(config);
         app.startEmptyScene(config);
         app.setupCamera();
@@ -75,80 +75,12 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
         editor::ApplicationGuiContext context{assets, app.scene, app.guiRenderBridge,
             &app.textureImports, &app.contentLoadStatus_, &preparation, app.demoContent.defaultMaterial};
         gui.attach(context);
-        editor::EditorAssetController imports;
-        editor::EditorSelection selection;
-        imports.update(context, selection);
-        const auto pumpImport = [&] {
-            awaitGallery([&] {
-                app.window.pollEvents(); preparation.advance(); imports.update(context, selection);
-                return !imports.busy();
-            });
-
-        };
-        std::map<std::string, ShaderAssetHandle> shaders;
-        for (const auto* entry : {"VSBasic", "VSColor", "VSFull", "VSTiled", "PSSolid", "PSColor", "PSTextured", "PSDetail", "PSGlass", "PSStage"})
-        {
-            editor::EditorAssetController::ImportOptions options;
-            options.entryPoint=entry;
-            options.stage=entry[0]=='V' ? ShaderStage::Vertex : ShaderStage::Fragment;
-            const auto before=assets.shaderHandles().size();
-            imports.importFile(folder / "gallery.hlsl", options); pumpImport();
-            requireGallery(assets.shaderHandles().size()==before+1, "HLSL import failed: " + std::string(entry) + ": " + imports.message());
-            shaders[entry]=assets.shaderHandles().back();
-        }
-        std::map<std::string, TextureAssetHandle> textures;
-        for (const auto* name : {"checker", "normal", "orm", "emission"})
-        {
-            editor::EditorAssetController::ImportOptions options;
-            options.colorSpace=(std::string(name)=="normal" || std::string(name)=="orm") ?
-                TextureColorSpace::Linear : TextureColorSpace::Srgb;
-            imports.importFile(folder / (std::string(name)+".png"), options); pumpImport();
-            textures[name]=std::get<TextureAssetHandle>(selection.target());
-        }
-        constexpr size_t materialCount=11; // Ten specimens plus the architectural background.
-        const std::array<const char*,materialCount> names={"00 Porcelain", "01 Vertex pigment", "02 Jade glaze", "03 Cobalt tile",
-            "04 Brushed copper", "05 Lattice 0.3", "06 Lattice 0.7", "07 Cyan glass", "08 Rose glass", "09 Two-sided silk", "Atelier architecture"};
-        const std::array<glm::vec4,materialCount> colors={glm::vec4(.88f,.55f,.25f,1), glm::vec4(1),
-            glm::vec4(.17f,.73f,.53f,1), glm::vec4(.18f,.38f,.85f,1), glm::vec4(.95f,.48f,.24f,1),
-            glm::vec4(.72f,.58f,.24f,1), glm::vec4(.12f,.64f,.52f,1), glm::vec4(.15f,.74f,.9f,.22f),
-            glm::vec4(.92f,.3f,.5f,.28f), glm::vec4(.75f,.28f,.21f,1), glm::vec4(1)};
-        std::array<MaterialAssetHandle,materialCount> materials;
-        std::array<ModelAssetHandle,materialCount> models;
-        std::map<std::pair<std::string,std::string>, MaterialTemplateAssetHandle> templates;
-        std::vector<ResourceAssetHandle> roots;
-        for (size_t i=0; i<materialCount; ++i)
-        {
-            const std::string vs=i==0?"VSBasic":i==1?"VSColor":i==3?"VSTiled":"VSFull";
-            const std::string ps=i==0?"PSSolid":i==1?"PSColor":i==4?"PSDetail":(i==7 || i==8)?"PSGlass":i==10?"PSStage":"PSTextured";
-            const auto pair=std::make_pair(vs,ps);
-            if (!templates.count(pair))
-            {
-                imports.buildProgram(shaders.at(vs),shaders.at(ps)); pumpImport();
-                MaterialTemplateAsset::CreateInfo info;
-                info.name=vs+"/"+ps; info.program=imports.draftProgram();
-                if (i>=2 && i<10) info.textureSlots.push_back({"color","colorTexture","colorSampler"});
-                if (i==4) for (const auto* slot : {"normal", "orm", "emission"})
-                    info.textureSlots.push_back({slot,std::string(slot)+"Texture",std::string(slot)+"Sampler"});
-                templates[pair]=assets.createMaterialTemplate(std::move(info));
-            }
-            MaterialAsset::CreateInfo info;
-            info.name=names[i]; info.materialTemplate=templates.at(pair);
-            info.parameters={{"tint",colors[i]}, {"surface",glm::vec4(
-                i==7 || i==8?.12f:i==4?.85f:i==10?.7f:.28f,
-                i==4?.85f:i==5?.55f:.08f, .85f, .18f)}};
-            if(i>=2 && i<10) info.textures.push_back({"color",textures.at("checker")});
-            if(i==4) for(const auto* slot : {"normal","orm","emission"}) info.textures.push_back({slot,textures.at(slot)});
-            if(i==5 || i==6) {info.renderState.alphaClipEnabled=true; info.renderState.alphaClipThreshold=i==5?.3f:.7f;}
-            if(i==7 || i==8) info.renderState=makeTransparentMaterialState();
-            if(i==9) info.renderState.doubleSided=true;
-            materials[i]=assets.createMaterial(std::move(info));
-            roots.push_back(materials[i]);
-            imports.importFile(folder / (i==10?"environment.glb":("group_0"+std::to_string(i)+".glb")), {}); pumpImport();
-            models[i]=std::get<ModelAssetHandle>(selection.target());
-            for (const auto& node: assets.model(models[i]).nodes())
-                for(auto mesh:node.meshes) roots.push_back(mesh);
-        }
-        imports.stop();
+        const auto content = editor::loadGalleryContent(context, folder, [&] {
+            app.window.pollEvents(); preparation.advance();
+        });
+        const auto& materials = content.materials;
+        const auto& textures = content.textures;
+        const auto& roots = content.roots;
         // Admit all roots before advancing: duplicate subscribers must share the same work.
         // Imported meshes also prepare their original glTF materials as dependencies.
         std::vector<ResourcePreparationTicket> tickets;
@@ -196,10 +128,7 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
         const auto warmCount=preparation.pipelineStatus(warm.ticket).total;
         requireGallery(warmCount==9,"expected 8 specimen PSOs plus 1 environment PSO");
         preparation.releasePipelines(warm.ticket);
-        for(size_t i=0;i<materialCount;++i) {
-            scene::SceneNode node; node.name=names[i]; node.model=models[i]; node.materialOverride=materials[i];
-            (void)app.scene.addNode(std::move(node));
-        }
+        editor::populateGalleryScene(app.scene, content);
         app.camera.setRotation(glm::vec3(-40,0,0));
         app.camera.setPosition(glm::vec3(0,1.9f,0)-app.camera.getForwardVector()*27.0f);
         app.camera.setAspect(16.0f/9.0f);
@@ -342,7 +271,6 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
         std::clog << "[Gallery] 41 draws, 10 specimen materials + architecture, 9 warmed PSOs; " << started
                   << " Started / " << shared << " Shared / " << cacheHits << " CacheHit; capture: " << artifacts << '\n';
         draw = {}; // Release retained pipeline owners before the device is destroyed.
-        if(interactive) app.mainLoop(gui);
         if (app.backend_) app.backend_->waitIdle();
         oldSets = {}; oldBuffers = {};
         gui.detach(); app.cleanup();

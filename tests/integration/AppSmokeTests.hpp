@@ -12,7 +12,7 @@ class App;
 namespace rubia::test
 {
 
-/// Existing command-line validation paths, kept outside the runtime App API.
+/// Integration checks invoked only by the dedicated test executable.
 class AppSmokeTests final
 {
 public:
@@ -20,7 +20,7 @@ public:
     static void runAssetImportTest();
     static void runStartupTest();
     static void runEditorAssetTest();
-    static void runPreparationGallery(bool interactive);
+    static void runPreparationGalleryTest();
     static void runRenderTest();
     static void runRenderTest(
         editor::App& app,

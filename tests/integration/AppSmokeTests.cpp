@@ -498,13 +498,14 @@ void validateOfflineMaterialAssets(
         {
             return block.set == 1 && block.binding == 0;
         });
+    // Slang includes the trailing 16-byte struct alignment in the block size.
     if (fragmentShader.interface().signature == 0 ||
         materialBlock == fragmentShader.interface().parameterBlocks.end() ||
-        materialBlock->byteSize != 36 ||
+        materialBlock->byteSize != 48 ||
         materialBlock->members.size() != 4)
     {
         throw std::runtime_error(
-            "CPU-only SPIR-V reflection produced an invalid material interface");
+            "Slang reflection produced an invalid material interface (expected 48-byte aligned block)");
     }
 
     const asset::MaterialTemplateAsset& materialTemplate =
@@ -525,7 +526,7 @@ void validateOfflineMaterialAssets(
             [&](const auto& value) { return value.name == member.name; });
         if (parameter == materialTemplate.parameters().end() || parameter->byteOffset != member.offset ||
             asset::MaterialTemplateAsset::valueSize(parameter->type) != member.size)
-            throw std::runtime_error("generated material layout does not match SPIR-V");
+            throw std::runtime_error("generated material layout does not match Slang reflection");
     }
 
     const asset::ValidationReport currentTemplateReport =

@@ -143,6 +143,8 @@ ctest --test-dir build/debug-vs -C Debug --output-on-failure
 
 GPU 测试默认不注册，避免无图形环境下自动失败。它们也可以直接执行：
 
+以下参数由独立的 `RubiaIntegrationTests` 执行，正式应用不再包含测试入口。
+
 - `--startup-test`：设备本地 buffer/image 上传回读、已有 image 局部更新与未覆盖内容保留、
   多 mip/数组层/padding/BC7 边缘复制、多操作请求、批次合并与取消、容量与重试、
   独立贴图上传和 ImGui 预览、Mesh 分批完成与取消、零上传准备和发布失败隔离，

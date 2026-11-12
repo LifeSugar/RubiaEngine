@@ -336,7 +336,7 @@ descriptor 的更新也必须考虑在途帧，不能只保证 image 存活。
 材质仍为单模板，pipeline 同步创建，纹理重导入尚未迁移。
 这些是后续迭代内容，不应将本轮视为完整资源流式系统。
 
-验证新增于 `tests/VulkanUploadTests.cpp` 和现有启动/渲染 smoke tests：
+验证新增于 `tests/vulkan/VulkanUploadTests.cpp` 和现有启动/渲染 smoke tests：
 设备本地 buffer 数据与 offset 回读、跨批次请求、合批取消保活、队列容量与重试、
 排队取消、停止清理、线程约束、非法 image 源数据拒绝、空 GUI 贴图预览、
 已有场景绘制时增量贴图上传。真实驱动 OOM / device-lost 失败未进行故障注入。
