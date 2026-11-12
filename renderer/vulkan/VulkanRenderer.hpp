@@ -1,6 +1,7 @@
 #pragma once
 #include "render/ResourcePreparation.hpp"
 #include "core/FrameScheduler.hpp"
+#include "core/RenderResult.hpp"
 #include "core/TextureOutput.hpp"
 #include "resources/ResourcePreparationSession.hpp"
 
@@ -71,28 +72,9 @@ public:
         GraphicsPipeline::CreateInfo presentPipeline;
     };
 
-    /// Outcome of a render attempt.
-    enum class RenderResult
-    {
-        /// The frame was submitted successfully.
-        Rendered,
-        /// No drawable is currently available; retry on a later frame.
-        Skipped,
-        /// No commands were submitted; recreate the swapchain and retry.
-        NeedsResize,
-        /// The frame was submitted, but acquire/present requested recreation.
-        /// Its offscreen outputs may be read before that recreation replaces them.
-        RenderedNeedsResize
-    };
-
-    [[nodiscard]] static constexpr bool wasSubmitted(RenderResult result) noexcept
-    {
-        return result == RenderResult::Rendered || result == RenderResult::RenderedNeedsResize;
-    }
-    [[nodiscard]] static constexpr bool needsResize(RenderResult result) noexcept
-    {
-        return result == RenderResult::NeedsResize || result == RenderResult::RenderedNeedsResize;
-    }
+    using RenderResult = render::RenderResult;
+    static constexpr bool wasSubmitted(RenderResult result) noexcept { return render::wasSubmitted(result); }
+    static constexpr bool needsResize(RenderResult result) noexcept { return render::needsResize(result); }
 
     /// Creates an empty renderer.
     VulkanRenderer();

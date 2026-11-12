@@ -16,7 +16,7 @@ void App::startEmptyScene(const RunConfig& config)
     preparedContent_ = std::make_shared<PreparedContent>();
     preparedContent_->content = DemoContentLoader::loadBuiltins(preparedContent_->assets, config.demoContent);
     preparedContent_->scene.create({"Untitled Scene", {}});
-    renderer.beginScenePreparation(renderAssets, render::makeSceneResourceRequest(
+    backend_->beginScenePreparation(renderAssets, render::makeSceneResourceRequest(
         preparedContent_->assets, {}, preparedContent_->content.materialTemplate,
         preparedContent_->content.presentProgram));
     contentLoadStatus_ = {ContentLoadState::Uploading, "Preparing editor defaults..."};
@@ -77,8 +77,8 @@ void App::updateContentLoading()
             auto request = render::makeSceneResourceRequest(preparedContent_->assets,
                 {preparedContent_->content.model}, preparedContent_->content.materialTemplate,
                 preparedContent_->content.presentProgram);
-            renderer.beginScenePreparation(renderAssets, std::move(request));
-            const auto status = renderer.scenePreparationStatus();
+            backend_->beginScenePreparation(renderAssets, std::move(request));
+            const auto status = backend_->scenePreparationStatus();
             if (status.state == render::ScenePreparationState::Failed)
             {
                 throw std::runtime_error(status.error);
@@ -92,7 +92,7 @@ void App::updateContentLoading()
         if (contentLoadStatus_.state == ContentLoadState::Uploading ||
             contentLoadStatus_.state == ContentLoadState::Finalizing)
         {
-            const auto status = renderer.scenePreparationStatus();
+            const auto status = backend_->scenePreparationStatus();
             if (status.state == render::ScenePreparationState::Failed)
             {
                 throw std::runtime_error(status.error);
@@ -138,7 +138,7 @@ void App::updateContentLoading()
             static_assert(std::is_nothrow_move_assignable_v<asset::AssetManager>);
             static_assert(std::is_nothrow_move_assignable_v<scene::Scene>);
             static_assert(std::is_nothrow_move_assignable_v<importer::texture::TextureImportRegistry>);
-            renderer.activatePreparedScene();
+            backend_->activatePreparedScene();
             assetManager = std::move(preparedContent_->assets);
             scene = std::move(preparedContent_->scene);
             textureImports = std::move(preparedContent_->textureImports);
@@ -169,7 +169,7 @@ void App::discardContentLoading() noexcept
         try { static_cast<void>(contentLoadFuture_.get()); }
         catch (...) {}
     }
-    renderer.cancelScenePreparation();
+    if (backend_) backend_->cancelScenePreparation();
     preparedContent_.reset();
     contentLoadCancelled_.reset();
 }

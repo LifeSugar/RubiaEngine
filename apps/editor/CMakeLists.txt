@@ -64,8 +64,19 @@ target_link_libraries(rubia_editor_gui PUBLIC Rubia::EditorCore Rubia::GuiIntegr
 
 # The application host remains the composition root for concrete backends.
 # Keep the old target/alias while existing application tests migrate.
+add_library(rubia_application_vulkan STATIC
+    backend/VulkanApplicationBackend.cpp
+    backend/VulkanApplicationBackend.hpp
+)
+add_library(Rubia::VulkanApplicationBackend ALIAS rubia_application_vulkan)
+target_include_directories(rubia_application_vulkan PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(rubia_application_vulkan PUBLIC
+    Rubia::RendererVulkan Rubia::ImGuiVulkanAdapter Rubia::ImGuiGlfwAdapter)
+
 add_library(rubia_editor STATIC
     App.cpp
+    AppFrameLoop.cpp
+    backend/ApplicationBackend.hpp
     AppContentLoading.cpp
     App.hpp
     AppResize.cpp
@@ -82,11 +93,11 @@ target_link_libraries(rubia_editor
     PUBLIC
         Rubia::EditorCore
         Rubia::EditorGui
-        Rubia::RendererVulkan
-        Rubia::ImGuiVulkanAdapter
+        Rubia::PlatformGlfw
         rubia_project_options
     PRIVATE
-        Rubia::ImGuiGlfwAdapter
+        Rubia::VulkanApplicationBackend
+        glfw
 )
 
 add_executable(VulkanApp

@@ -90,3 +90,22 @@ ImGui 的绘制缓冲环。所有字体图集维护仍在 prepare 阶段执行�
 
 `Rubia::GuiIntegration` 与 `Rubia::EditorGui` 不链接 Vulkan/GLFW；平台和 Vulkan 适配分开构建。
 OpenGL3、D3D12、Metal 官方源码已按现有 ImGui 提交补齐，尚未接入引擎运行路径。
+
+## 应用后端入口与运行接口
+
+`App::initBackend()` 根据 `RunConfig::graphicsApi` 选择具体实现，当前创建
+`VulkanApplicationBackend`；Direct3D12 / Metal / OpenGL 选择会明确报未实现，不自动回退。
+窗口使用平台层 `platform::glfw::Window`，其尺寸为 `platform::Extent2D`。
+
+`ApplicationBackend` 是应用会话接口：提供帧渲染、呈现重配、场景准备、资源准备宿主、
+GUI 宿主和 GUI 适配器创建。`App.hpp`、`AppFrameLoop.cpp`、`AppResize.cpp` 及内容加载、
+纹理重导入流程不引用原生 Vulkan 类型。帧结果统一使用 `render::RenderResult`。
+后端专用诊断测试显式取得 Vulkan 实现，不通过应用运行接口暴露设备或 command buffer。
+
+`VulkanApplicationBackend` 持有 context、renderer 和 GUI host；尺寸转换发生在该实现内。
+GUI 适配器和资源准备 session 借用后端，会在后端之前销毁。关闭顺序为：取消任务、等待 GPU、
+释放 GUI 注册和 GUI 后端、释放资源准备 session、shutdown renderer、释放驻留资源，
+最后销毁后端设备与窗口。`shutdown()` 停止 renderer，但保留 device 供驻留对象析构。
+
+边界检查禁止运行层重新包含 Vulkan 头文件或使用 `Vk*` 类型；替身后端测试直接运行
+真实 App 帧循环，覆盖 scene / GUI-only 分支、跳帧、重配请求、关闭顺序和未实现 API 拒绝。

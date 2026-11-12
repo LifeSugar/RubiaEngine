@@ -192,22 +192,22 @@ void App::processPendingTextureReimport()
         {
             if (!transaction.ticket)
             {
-                const auto result = resourcePreparation_.prepare(transaction.staged.snapshot());
+                const auto result = resourcePreparation_->prepare(transaction.staged.snapshot());
                 if (result.code == render::ResourcePreparationCode::QueueFull)
                     return;
                 if (!result.accepted())
                     throw std::runtime_error(result.error);
                 transaction.ticket = result.ticket;
-                resourcePreparation_.setPublicationTransaction(result.ticket,
+                resourcePreparation_->setPublicationTransaction(result.ticket,
                                                                textureReimportTransaction_);
             }
-            const auto status = resourcePreparation_.status(transaction.ticket);
+            const auto status = resourcePreparation_->status(transaction.ticket);
             if (!render::resourcePreparationFinished(status.state))
                 return;
             if (status.state != render::ResourcePreparationState::Ready || !transaction.committed)
                 throw std::runtime_error(status.error.empty() ? "texture preparation cancelled"
                                                               : status.error);
-            resourcePreparation_.release(transaction.ticket);
+            resourcePreparation_->release(transaction.ticket);
             transaction.ticket = {};
             textureImports.markSucceeded(transaction.request.texture, transaction.request.settings);
             // Preview descriptors refresh by the cache's publication serial on the next GUI draw.
@@ -220,8 +220,8 @@ void App::processPendingTextureReimport()
             {
                 try
                 {
-                    resourcePreparation_.cancel(transaction.ticket);
-                    resourcePreparation_.release(transaction.ticket);
+                    resourcePreparation_->cancel(transaction.ticket);
+                    resourcePreparation_->release(transaction.ticket);
                 }
                 catch (...)
                 {
@@ -355,8 +355,8 @@ void App::discardTextureReimport() noexcept
         {
             try
             {
-                resourcePreparation_.cancel(transaction.ticket);
-                resourcePreparation_.release(transaction.ticket);
+                resourcePreparation_->cancel(transaction.ticket);
+                resourcePreparation_->release(transaction.ticket);
             }
             catch (...)
             {

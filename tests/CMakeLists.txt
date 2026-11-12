@@ -22,6 +22,7 @@ if(RUBIA_BUILD_APPS)
             Rubia::AppRuntime
             rubia_project_options
         PRIVATE
+            Rubia::VulkanApplicationBackend
             imgui
             KTX::ktx
     )
@@ -75,6 +76,15 @@ if(BUILD_TESTING)
     target_link_libraries(gui_backend_tests PRIVATE Rubia::GuiIntegration)
     add_test(NAME gui-backend-test COMMAND gui_backend_tests)
     if(RUBIA_BUILD_APPS)
+        add_executable(app_backend_tests AppBackendTests.cpp)
+        target_link_libraries(app_backend_tests PRIVATE Rubia::AppRuntime glfw)
+        add_test(NAME app-backend-test COMMAND app_backend_tests)
+        set_tests_properties(app-backend-test PROPERTIES TIMEOUT 30)
+        if(WIN32)
+            add_custom_command(TARGET app_backend_tests POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:Slang::Compiler>" "$<TARGET_FILE_DIR:app_backend_tests>"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:KTX::ktx>" "$<TARGET_FILE_DIR:app_backend_tests>")
+        endif()
         add_executable(gui_layer_tests GuiLayerTests.cpp)
         target_link_libraries(gui_layer_tests PRIVATE Rubia::EditorGui)
         add_test(NAME gui-layer-test COMMAND gui_layer_tests)

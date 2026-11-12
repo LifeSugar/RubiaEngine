@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+namespace rubia::platform::glfw { class Window; }
+
 namespace rubia::rhi::vulkan
 {
 
@@ -55,6 +57,7 @@ public:
 
     /// Creates or replaces all context-level Vulkan resources.
     void create(const Window& window, const CreateInfo& createInfo);
+    void create(const platform::glfw::Window& window, const CreateInfo& createInfo);
     /// Releases all owned Vulkan resources.
     void reset() noexcept;
     /// Waits until the logical device has no pending work.

@@ -6,14 +6,12 @@
 #include "content/ContentLoadStatus.hpp"
 #include "ImGuiLayer.hpp"
 #include "texture/TextureImportRegistry.hpp"
-#include "vulkan/RenderAssetCache.hpp"
+#include "resources/RenderAssetStore.hpp"
 #include "scene/Scene.hpp"
-#include "vulkan/VulkanContext.hpp"
+#include "backend/ApplicationBackend.hpp"
 #include "imgui/ApplicationGuiRenderBridge.hpp"
-#include "imgui/VulkanGuiRenderHost.hpp"
-#include "vulkan/VulkanRenderer.hpp"
 #include "resources/ResourcePreparationSession.hpp"
-#include "vulkan/Window.hpp"
+#include "glfw/Window.hpp"
 
 #include <cstdint>
 #include <atomic>
@@ -23,10 +21,12 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <stdexcept>
 
 namespace rubia::test
 {
 class AppSmokeTests;
+class AppBackendTests;
 }
 
 namespace rubia::editor
@@ -46,8 +46,8 @@ public:
         bool initializeEmptyScene = false;
         render::ResourcePreparationOptions resourcePreparation;
         std::string imguiIniFilename;
-        rhi::vulkan::VulkanRenderer::OutputMode outputMode =
-            rhi::vulkan::VulkanRenderer::OutputMode::Runtime;
+        GraphicsApi graphicsApi = GraphicsApi::Vulkan;
+        render::OutputMode outputMode = render::OutputMode::Runtime;
         DemoContentLoader::CreateInfo demoContent{
             "ABeautifulGame_extracted/ABeautifulGame.gltf",
             "shaders/triangle.vert.hlsl",
@@ -71,9 +71,10 @@ public:
     void run();
     void run(const RunConfig& config, ApplicationGui& gui);
     // Frontend callers submit CPU handles/snapshots without a Vulkan cache or device.
-    [[nodiscard]] render::ResourcePreparation& resourcePreparation() noexcept
+    [[nodiscard]] render::ResourcePreparation& resourcePreparation()
     {
-        return resourcePreparation_;
+        if (!resourcePreparation_) throw std::logic_error("application backend is not initialized");
+        return *resourcePreparation_;
     }
 private:
     struct PreparedContent
@@ -101,16 +102,15 @@ private:
     static constexpr bool kEnableValidationLayers = true;
 #endif
 
-    rhi::vulkan::Window window;
-    rhi::vulkan::VulkanContext vulkanContext;
+    platform::glfw::Window window;
+    // Device outlives asset owners, preparation, GUI registrations and adapters.
+    std::unique_ptr<ApplicationBackend> backend_;
     asset::AssetManager assetManager;
     importer::texture::TextureImportRegistry textureImports;
     DemoContent demoContent;
     scene::Scene scene;
-    rhi::vulkan::RenderAssetCache renderAssets;
-    rhi::vulkan::VulkanRenderer renderer;
-    integration::imgui::VulkanGuiRenderHost guiRenderHost{renderer};
-    render::ResourcePreparationSession resourcePreparation_{renderer, renderAssets};
+    render::RenderAssetStore renderAssets;
+    std::unique_ptr<render::ResourcePreparationSession> resourcePreparation_;
     // Must be destroyed before the renderer, device, and GLFW window.
     ImGuiLayer imguiLayer;
     // Must release ImGui descriptors before ImGuiLayer is destroyed.
@@ -124,7 +124,7 @@ private:
     std::future<std::unique_ptr<PreparedContent>> contentLoadFuture_;
     std::shared_ptr<PreparedContent> preparedContent_;
     bool preferIntegratedGpu = false;
-    bool swapChainRecreationRequested = false;
+    bool presentationReconfigureRequested_ = false;
     std::deque<importer::texture::TextureReimportRequest> pendingTextureReimports_;
     struct TextureReimportTransaction;
     std::shared_ptr<TextureReimportTransaction> textureReimportTransaction_;
@@ -132,11 +132,11 @@ private:
     asset::TextureAssetHandle activeTextureReimport_;
     std::filesystem::path activeTextureReimportStagedPath_;
     double lastFramebufferResizeTime = 0.0;
-    static constexpr double kSwapChainResizeDebounceSeconds = 0.15;
+    static constexpr double kPresentationResizeDebounceSeconds = 0.15;
 
 private:
     void initWindow(const RunConfig& config, bool visible = true);
-    void initVulkan(const RunConfig& config);
+    void initBackend(const RunConfig& config);
     void startEmptyScene(const RunConfig& config);
     void startContentLoading();
     void updateContentLoading();
@@ -151,13 +151,14 @@ private:
 private:
     void setupCamera();
 
-    void recreateSwapChain(ApplicationGui& gui);
-    void requestSwapChainRecreation();
-    bool isSwapChainRecreationDue() const;
+    void reconfigurePresentation(ApplicationGui& gui);
+    void requestPresentationReconfigure();
+    bool isPresentationReconfigureDue() const;
 
     [[nodiscard]] render::RenderFrame makeRenderFrame();
 
     friend class rubia::test::AppSmokeTests;
+    friend class rubia::test::AppBackendTests;
 };
 
 } // namespace rubia::editor

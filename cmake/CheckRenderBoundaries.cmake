@@ -50,6 +50,20 @@ function(rubia_scan_render_boundaries)
     # and the application host are forbidden here.
     rubia_assert_source_includes(EditorCore "vulkan/|GLFW/|imgui_impl_|backends/imgui|vk_mem_alloc|App\\.hpp|ImGuiLayer\\.hpp" ${RUBIA_BOUNDARY_EDITOR_SOURCES})
     rubia_assert_source_includes(PlatformWindow "vulkan/|GLFW/" "${RUBIA_BOUNDARY_ROOT}/platform/glfw/Window.hpp")
+    set(application_runtime_sources
+        "${RUBIA_BOUNDARY_ROOT}/apps/editor/App.hpp"
+        "${RUBIA_BOUNDARY_ROOT}/apps/editor/backend/ApplicationBackend.hpp"
+        "${RUBIA_BOUNDARY_ROOT}/apps/editor/AppFrameLoop.cpp"
+        "${RUBIA_BOUNDARY_ROOT}/apps/editor/AppResize.cpp"
+        "${RUBIA_BOUNDARY_ROOT}/apps/editor/AppContentLoading.cpp"
+        "${RUBIA_BOUNDARY_ROOT}/apps/editor/AppTextureReimport.cpp")
+    rubia_assert_source_includes(AppRuntime "vulkan/|GLFW/|imgui_impl_|imgui/Vulkan|backend/Vulkan" ${application_runtime_sources})
+    foreach(source IN LISTS application_runtime_sources)
+        file(READ "${source}" source_text)
+        if(source_text MATCHES "Vk[A-Z][A-Za-z0-9_]*|rhi::vulkan::|VulkanApplicationBackend")
+            message(FATAL_ERROR "Render boundary: native Vulkan type leaked into application runtime: ${source}")
+        endif()
+    endforeach()
     rubia_assert_source_includes(GuiIntegration "vulkan/|GLFW/|imgui_impl_|backends/imgui|imgui/Vulkan|imgui/Glfw"
         "${RUBIA_BOUNDARY_ROOT}/integrations/imgui/GuiBackend.hpp"
         "${RUBIA_BOUNDARY_ROOT}/integrations/imgui/ApplicationGuiRenderBridge.hpp"

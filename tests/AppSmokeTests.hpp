@@ -5,6 +5,7 @@
 namespace rubia::editor
 {
 class ApplicationGui;
+class VulkanApplicationBackend;
 class App;
 }
 
@@ -15,6 +16,7 @@ namespace rubia::test
 class AppSmokeTests final
 {
 public:
+    static editor::VulkanApplicationBackend& vulkanBackend(editor::App&);
     static void runAssetImportTest();
     static void runStartupTest();
     static void runEditorAssetTest();

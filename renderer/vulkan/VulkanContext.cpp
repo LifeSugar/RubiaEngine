@@ -49,8 +49,13 @@ VulkanContext& VulkanContext::operator=(VulkanContext&& other) noexcept
     return *this;
 }
 
+void VulkanContext::create(const Window& window, const CreateInfo& createInfo)
+{
+    create(window.platformWindow(), createInfo);
+}
+
 void VulkanContext::create(
-    const Window& window,
+    const platform::glfw::Window& window,
     const CreateInfo& createInfo)
 {
     if (!window)
@@ -121,7 +126,7 @@ void VulkanContext::create(
     }
 
     replacement.surface_ =
-        integration::vulkan_glfw::createSurface(window.platformWindow(), replacement.instance_);
+        integration::vulkan_glfw::createSurface(window, replacement.instance_);
     replacement.device_.create(
         replacement.instance_,
         replacement.surface_,

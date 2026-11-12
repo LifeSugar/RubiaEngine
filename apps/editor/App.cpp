@@ -1,6 +1,7 @@
 #include "App.hpp"
-#include "imgui/GlfwGuiPlatform.hpp"
-#include "imgui/VulkanGuiRenderer.hpp"
+#include "backend/VulkanApplicationBackend.hpp"
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
 #include "EditorIconData.hpp"
 #include "texture/StbImageDecoder.hpp"
 
@@ -19,12 +20,7 @@ namespace rubia::editor
 
 App::~App()
 {
-    resourcePreparation_.cancelAll();
-    discardContentLoading();
-    discardTextureReimport();
-    // Destruction after an exception must not release resources still in use by
-    // the GPU. Member destruction then proceeds in reverse dependency order.
-    vulkanContext.waitIdle();
+    cleanup();
 }
 
 void App::setPreferIntegratedGPU(bool enabled)
@@ -44,14 +40,14 @@ void App::run(const RunConfig& config, ApplicationGui& gui)
     try
     {
         initWindow(config, true);
-        initVulkan(config);
+        initBackend(config);
         if (config.initializeEmptyScene) startEmptyScene(config);
         setupCamera();
         initImGui(config);
-        guiRenderBridge.attach(guiRenderHost, renderAssets, imguiLayer.rendererBackend());
+        guiRenderBridge.attach(backend_->guiHost(), renderAssets, imguiLayer.rendererBackend());
         ApplicationGuiContext guiContext{
             assetManager, scene, guiRenderBridge, &textureImports, &contentLoadStatus_,
-            &resourcePreparation_, demoContent.defaultMaterial};
+            resourcePreparation_.get(), demoContent.defaultMaterial};
         gui.attach(guiContext);
         guiAttached = true;
         mainLoop(gui);
@@ -59,13 +55,13 @@ void App::run(const RunConfig& config, ApplicationGui& gui)
     catch (...)
     {
         discardContentLoading();
-        renderer.waitIdle();
+        if (backend_) backend_->waitIdle();
         if (guiAttached) gui.detach();
         cleanup();
         throw;
     }
     discardContentLoading();
-    renderer.waitIdle();
+    if (backend_) backend_->waitIdle();
     gui.detach();
     cleanup();
 }
@@ -78,7 +74,7 @@ void App::initWindow(const RunConfig& config, bool visible)
         throw std::invalid_argument("App run config contains an invalid window");
     }
 
-    rhi::vulkan::Window::CreateInfo createInfo{};
+    platform::glfw::Window::CreateInfo createInfo{};
     createInfo.width = config.windowWidth;
     createInfo.height = config.windowHeight;
     createInfo.title = config.windowTitle;
@@ -91,48 +87,62 @@ void App::initWindow(const RunConfig& config, bool visible)
     glfwSetWindowIcon(window.nativeHandle(), 1, &windowIcon);
 }
 
-void App::initVulkan(const RunConfig& config)
+void App::initBackend(const RunConfig& config)
 {
-    rhi::vulkan::VulkanContext::CreateInfo contextCreateInfo{};
-    contextCreateInfo.enableValidationLayers = kEnableValidationLayers;
-    contextCreateInfo.preferIntegratedGpu = preferIntegratedGpu;
-    vulkanContext.create(window, contextCreateInfo);
-
-    rhi::vulkan::VulkanRenderer::CreateInfo rendererCreateInfo{};
-    rendererCreateInfo.context = &vulkanContext;
-    rendererCreateInfo.framebufferExtent = window.framebufferExtent();
-    rendererCreateInfo.framesInFlight = kMaxFramesInFlight;
-    rendererCreateInfo.outputMode = config.outputMode;
-    rendererCreateInfo.resourcePreparation = config.resourcePreparation;
-    renderer.createPresentation(rendererCreateInfo);
-
+    if (backend_) throw std::logic_error("application backend is already initialized");
+    BackendConfig backendConfig;
+    backendConfig.outputMode = config.outputMode;
+    backendConfig.resourcePreparation = config.resourcePreparation;
+    backendConfig.framesInFlight = kMaxFramesInFlight;
+    backendConfig.validation = kEnableValidationLayers;
+    backendConfig.preferIntegratedGpu = preferIntegratedGpu;
+    // The application composition root is the only place selecting an API.
+    switch (config.graphicsApi)
+    {
+    case GraphicsApi::Vulkan:
+        backend_ = std::make_unique<VulkanApplicationBackend>(window, backendConfig);
+        break;
+    case GraphicsApi::Direct3D12:
+        throw std::runtime_error("Direct3D12 application backend is not implemented");
+    case GraphicsApi::Metal:
+        throw std::runtime_error("Metal application backend is not implemented");
+    case GraphicsApi::OpenGL:
+        throw std::runtime_error("OpenGL application backend is not implemented");
+    default:
+        throw std::invalid_argument("unknown graphics API");
+    }
+    resourcePreparation_ = std::make_unique<render::ResourcePreparationSession>(
+        backend_->preparationHost(), renderAssets);
 }
 
 void App::cleanup()
 {
-    resourcePreparation_.cancelAll();
+    if (resourcePreparation_) resourcePreparation_->cancelAll();
     discardContentLoading();
     contentLoadStatus_ = {};
     discardTextureReimport();
-    renderer.waitIdle();
+    if (backend_) backend_->waitIdle();
     guiRenderBridge.detach();
     imguiLayer.reset();
-    renderer.reset();
+    resourcePreparation_.reset();
+    if (backend_) backend_->shutdown();
     renderAssets.reset();
     scene.reset();
     textureImports.reset();
     assetManager.reset();
     demoContent = {};
-    vulkanContext.reset();
+    backend_.reset();
     window.reset();
+    presentationReconfigureRequested_ = false;
+    lastFramebufferResizeTime = 0;
 }
 
 void App::initImGui(const RunConfig& config)
 {
     ImGuiLayer::CreateInfo createInfo{};
-    createInfo.platform = integration::imgui::makeGlfwGuiPlatform(window.nativeHandle(),
-        integration::imgui::GlfwGuiClientApi::Vulkan);
-    createInfo.renderer = std::make_unique<integration::imgui::VulkanGuiRenderer>(vulkanContext, renderer);
+    if (!backend_) throw std::logic_error("GUI creation requires an application backend");
+    createInfo.platform = backend_->createGuiPlatform();
+    createInfo.renderer = backend_->createGuiRenderer();
     createInfo.enableDocking = config.enableDocking;
     createInfo.iniFilename = config.imguiIniFilename;
     imguiLayer.create(std::move(createInfo));
@@ -142,55 +152,10 @@ void App::setupCamera()
 {
     camera.setPosition(glm::vec3(0.0f, 1.0f, 0.5f));
     camera.setRotation(glm::vec3(-60.0f, 0.0f, 0.0f));
-    const VkExtent2D extent = renderer.extent();
+    const auto extent = backend_->extent();
     camera.setAspect(
         static_cast<float>(extent.width) /
         static_cast<float>(extent.height));
-}
-
-void App::mainLoop(ApplicationGui& gui)
-{
-    while (!window.shouldClose())
-    {
-        window.pollEvents();
-
-        if (window.consumeFramebufferResize())
-        {
-            requestSwapChainRecreation();
-        }
-
-        if (swapChainRecreationRequested)
-        {
-            if (!isSwapChainRecreationDue())
-            {
-                // During an interactive resize, avoid repeatedly destroying and
-                // recreating GPU resources.
-                window.waitEventsTimeout(0.016);
-                continue;
-            }
-
-            recreateSwapChain(gui);
-        }
-
-        resourcePreparation_.advance();
-        updateContentLoading();
-        processPendingTextureReimport();
-        gui.update({assetManager, scene, guiRenderBridge, &textureImports,
-                    &contentLoadStatus_, &resourcePreparation_, demoContent.defaultMaterial});
-
-        imguiLayer.beginFrame();
-        drawGui(gui);
-        const render::GuiOverlay* uiDrawData = imguiLayer.endFrame();
-
-        const rhi::vulkan::VulkanRenderer::RenderResult renderResult =
-            renderer.sceneReady()
-                ? renderer.render(makeRenderFrame(), renderAssets, uiDrawData)
-                : renderer.renderGui(uiDrawData);
-        if (rhi::vulkan::VulkanRenderer::needsResize(renderResult))
-        {
-            requestSwapChainRecreation();
-        }
-    }
 }
 
 void App::drawGui(ApplicationGui& gui)
@@ -201,7 +166,7 @@ void App::drawGui(ApplicationGui& gui)
         guiRenderBridge,
         &textureImports,
         &contentLoadStatus_,
-        &resourcePreparation_, demoContent.defaultMaterial};
+        resourcePreparation_.get(), demoContent.defaultMaterial};
     const ApplicationGuiFrameOutput output = gui.draw(context);
     for (const importer::texture::TextureReimportRequest& request : output.textureReimports)
     {

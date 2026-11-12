@@ -29,7 +29,7 @@ App::RunConfig EditorApp::makeRunConfig()
     config.enableDocking = true;
     config.initializeEmptyScene = true;
     config.imguiIniFilename = "editor_imgui.ini";
-    config.outputMode = rhi::vulkan::VulkanRenderer::OutputMode::Editor;
+    config.outputMode = render::OutputMode::Editor;
     config.demoContent = DemoContentLoader::CreateInfo{
         "ABeautifulGame_extracted/ABeautifulGame.gltf",
         "shaders/triangle.vert.hlsl",

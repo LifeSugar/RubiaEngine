@@ -1,4 +1,7 @@
 #include "AppSmokeTests.hpp"
+#include "backend/VulkanApplicationBackend.hpp"
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
 #include "EditorLayer.hpp"
 #include "asset/AssetId.hpp"
 #include "content/EditorAssetController.hpp"
@@ -213,18 +216,18 @@ void AppSmokeTests::runEditorAssetTest()
     editor::EditorLayer gui;
     editor::App app;
     editor::App::RunConfig config;
-    config.outputMode = rhi::vulkan::VulkanRenderer::OutputMode::Editor;
+    config.outputMode = render::OutputMode::Editor;
     try
     {
         app.initWindow(config, false);
-        app.initVulkan(config);
+        app.initBackend(config);
         app.startEmptyScene(config);
         app.setupCamera();
         app.camera.setCullingFlags(render::CullingFlags::None);
         app.initImGui(config);
-        app.guiRenderBridge.attach(app.guiRenderHost, app.renderAssets, app.imguiLayer.rendererBackend());
+        app.guiRenderBridge.attach(app.backend_->guiHost(), app.renderAssets, app.imguiLayer.rendererBackend());
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-        while (!app.renderer.sceneReady() && std::chrono::steady_clock::now() < deadline)
+        while (!app.backend_->sceneReady() && std::chrono::steady_clock::now() < deadline)
         {
             app.resourcePreparation().advance();
             app.updateContentLoading();
@@ -232,7 +235,7 @@ void AppSmokeTests::runEditorAssetTest()
                 throw std::runtime_error(app.contentLoadStatus_.message);
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        if (!app.renderer.sceneReady() || !app.scene.nodes().empty() ||
+        if (!app.backend_->sceneReady() || !app.scene.nodes().empty() ||
             !app.assetManager.modelHandles().empty())
             throw std::runtime_error(
                 "empty editor bootstrap did not prepare defaults independently of a model");
@@ -252,22 +255,22 @@ void AppSmokeTests::runEditorAssetTest()
                     app.window.pollEvents();
                     app.imguiLayer.beginFrame();
                     app.drawGui(gui);
-                    const auto result = app.renderer.render(app.makeRenderFrame(), app.renderAssets,
+                    const auto result = app.backend_->render(app.makeRenderFrame(), app.renderAssets,
                                                             app.imguiLayer.endFrame());
-                    if (rhi::vulkan::VulkanRenderer::needsResize(result))
-                        app.recreateSwapChain(gui);
-                    if (rhi::vulkan::VulkanRenderer::wasSubmitted(result)) return;
+                    if (render::needsResize(result))
+                        app.reconfigurePresentation(gui);
+                    if (render::wasSubmitted(result)) return;
                 }
                 throw std::runtime_error("external asset frame did not submit after swapchain retries");
             }, shaderFile);
         }
-        app.renderer.waitIdle();
+        if (app.backend_) app.backend_->waitIdle();
         gui.detach();
         app.cleanup();
     }
     catch (...)
     {
-        app.renderer.waitIdle();
+        if (app.backend_) app.backend_->waitIdle();
         gui.detach();
         app.cleanup();
         throw;

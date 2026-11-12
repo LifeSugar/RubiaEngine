@@ -1,4 +1,7 @@
 #include "AppSmokeTests.hpp"
+#include "backend/VulkanApplicationBackend.hpp"
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
 #include "vulkan/TextureUploadBuilder.hpp"
 
 #include "ApplicationGui.hpp"
@@ -632,7 +635,7 @@ void validateRenderFrame(const render::RenderFrame& renderFrame)
 
 void validateVulkanDrawListCompilation(
     const render::RenderFrame& renderFrame,
-    const rhi::vulkan::RenderAssetCache& renderAssets,
+    const render::RenderAssetStore& renderAssets,
     rhi::vulkan::VulkanRenderer& renderer)
 {
     const rhi::vulkan::VulkanDrawList resolved = renderer.compileDrawList(
@@ -970,7 +973,7 @@ void validateStableTextureAssetReplacement()
 
 void validateGpuTextureReplacement(rhi::vulkan::VulkanRenderer& renderer,
                                    asset::AssetManager& assets,
-                                   rhi::vulkan::RenderAssetCache& renderAssets,
+                                   render::RenderAssetStore& renderAssets,
                                    asset::TextureAssetHandle handle)
 {
     const auto originalView = renderAssets.texture(handle).view();
@@ -993,6 +996,13 @@ void validateGpuTextureReplacement(rhi::vulkan::VulkanRenderer& renderer,
 }
 
 } // namespace
+
+editor::VulkanApplicationBackend& AppSmokeTests::vulkanBackend(editor::App& app)
+{
+    auto* backend = dynamic_cast<editor::VulkanApplicationBackend*>(app.backend_.get());
+    if (!backend) throw std::logic_error("test requires the Vulkan backend");
+    return *backend;
+}
 
 void AppSmokeTests::runAssetImportTest()
 {
@@ -1080,16 +1090,16 @@ void AppSmokeTests::runRenderTest(
     editor::ApplicationGui& gui)
 {
     app.initWindow(config, false);
-    app.initVulkan(config);
+    app.initBackend(config);
     app.setupCamera();
-    if (!app.renderer || app.renderer.sceneReady() ||
+    if ((!app.backend_ || !app.backend_->ready()) || app.backend_->sceneReady() ||
         !app.assetManager.modelHandles().empty())
     {
         throw std::runtime_error("presentation startup unexpectedly depends on scene assets");
     }
-    validateKtxTextureImportAndUpload(app.vulkanContext.device());
+    validateKtxTextureImportAndUpload(vulkanBackend(app).context().device());
     app.initImGui(config);
-    app.guiRenderBridge.attach(app.guiRenderHost, app.renderAssets, app.imguiLayer.rendererBackend());
+    app.guiRenderBridge.attach(app.backend_->guiHost(), app.renderAssets, app.imguiLayer.rendererBackend());
     editor::ApplicationGuiContext guiContext{
         app.assetManager,
         app.scene,
@@ -1102,14 +1112,14 @@ void AppSmokeTests::runRenderTest(
         app.imguiLayer.beginFrame();
         app.drawGui(gui);
         const render::GuiOverlay* drawData = app.imguiLayer.endFrame();
-        const auto result = app.renderer.renderGui(drawData);
-        if (rhi::vulkan::VulkanRenderer::needsResize(result))
+        const auto result = app.backend_->renderGui(drawData);
+        if (render::needsResize(result))
         {
-            app.recreateSwapChain(gui);
+            app.reconfigurePresentation(gui);
         }
     };
     drawLoadingFrame();
-    app.recreateSwapChain(gui);
+    app.reconfigurePresentation(gui);
     drawLoadingFrame();
 
     // A missing resource must leave presentation, resize and retry usable.
@@ -1125,12 +1135,12 @@ void AppSmokeTests::runRenderTest(
         drawLoadingFrame();
     }
     if (app.contentLoadStatus_.state != editor::ContentLoadState::Failed ||
-        !app.renderer || app.renderer.sceneReady() ||
+        (!app.backend_ || !app.backend_->ready()) || app.backend_->sceneReady() ||
         !app.assetManager.textureHandles().empty())
     {
         throw std::runtime_error("failed content import did not preserve the empty GUI session");
     }
-    app.recreateSwapChain(gui);
+    app.reconfigurePresentation(gui);
     drawLoadingFrame();
 
     app.contentLoadConfig_ = config.demoContent;
@@ -1160,29 +1170,29 @@ void AppSmokeTests::runRenderTest(
         }
         drawLoadingFrame();
     }
-    if (!app.renderer.sceneReady() || uploadFrames == 0)
+    if (!app.backend_->sceneReady() || uploadFrames == 0)
     {
         throw std::runtime_error("asynchronous content loading failed to render GUI upload frames");
     }
-    const auto pipelineStats = app.renderer.pipelineCacheStatistics();
+    const auto pipelineStats = vulkanBackend(app).renderer().pipelineCacheStatistics();
     if (pipelineStats.creations < 2)
         throw std::runtime_error("scene/present creation bypassed the pipeline cache");
-    app.recreateSwapChain(gui);
-    const auto resizedPipelineStats = app.renderer.pipelineCacheStatistics();
+    app.reconfigurePresentation(gui);
+    const auto resizedPipelineStats = vulkanBackend(app).renderer().pipelineCacheStatistics();
     if (resizedPipelineStats.creations != pipelineStats.creations ||
-        (config.outputMode == rhi::vulkan::VulkanRenderer::OutputMode::Runtime &&
+        (config.outputMode == render::OutputMode::Runtime &&
          resizedPipelineStats.hits <= pipelineStats.hits))
         throw std::runtime_error("compatible resize did not reuse the cached present pipeline");
-    if (app.renderer.scenePreparationStatus().state != render::ScenePreparationState::Activated ||
+    if (app.backend_->scenePreparationStatus().state != render::ScenePreparationState::Activated ||
         app.preparedContent_)
     {
         throw std::runtime_error("scene activation did not complete the CPU/GPU handoff");
     }
     bool replacementRejected = false;
-    try { app.renderer.beginScenePreparation(app.renderAssets, {}); }
+    try { app.backend_->beginScenePreparation(app.renderAssets, {}); }
     catch (const std::logic_error&) { replacementRejected = true; }
-    app.renderer.cancelScenePreparation();
-    if (!replacementRejected || !app.renderer.sceneReady() ||
+    app.backend_->cancelScenePreparation();
+    if (!replacementRejected || !app.backend_->sceneReady() ||
         !app.renderAssets.materialTemplate(app.demoContent.materialTemplate))
     {
         throw std::runtime_error("preparation request or cancellation destroyed the activated scene");
@@ -1215,11 +1225,11 @@ void AppSmokeTests::runRenderTest(
         throw std::runtime_error("default scene did not prepare its present program");
     // Loading must warm every referenced material, including currently invisible ones.
     const auto firstFrame = app.makeRenderFrame();
-    const auto readyPipelines = app.renderer.pipelineCacheStatistics().creations;
-    static_cast<void>(app.renderer.compileDrawList(firstFrame.renderList, app.renderAssets));
-    if (app.renderer.pipelineCacheStatistics().creations != readyPipelines ||
-        app.renderer.scenePreparationStatus().pipelinesTotal == 0 ||
-        app.renderer.scenePreparationStatus().pipelinesCompleted != app.renderer.scenePreparationStatus().pipelinesTotal)
+    const auto readyPipelines = vulkanBackend(app).renderer().pipelineCacheStatistics().creations;
+    static_cast<void>(vulkanBackend(app).renderer().compileDrawList(firstFrame.renderList, app.renderAssets));
+    if (vulkanBackend(app).renderer().pipelineCacheStatistics().creations != readyPipelines ||
+        app.backend_->scenePreparationStatus().pipelinesTotal == 0 ||
+        app.backend_->scenePreparationStatus().pipelinesCompleted != app.backend_->scenePreparationStatus().pipelinesTotal)
         throw std::runtime_error("scene became ready before material pipelines were warm");
 
     // Incremental resource admission remains separate from pass-specific prewarming.
@@ -1249,11 +1259,11 @@ void AppSmokeTests::runRenderTest(
     if (app.resourcePreparation().status(materialRequest.ticket).state != render::ResourcePreparationState::Ready)
         throw std::runtime_error("incremental material preparation failed");
     app.resourcePreparation().release(materialRequest.ticket);
-    const auto beforePrewarm = app.renderer.pipelineCacheStatistics().creations;
+    const auto beforePrewarm = vulkanBackend(app).renderer().pipelineCacheStatistics().creations;
     const auto prewarm = app.resourcePreparation().prewarmPipelines({incrementalMaterial});
     const auto sharedPrewarm = app.resourcePreparation().prewarmPipelines({incrementalMaterial});
     if (!prewarm.accepted() || !sharedPrewarm.accepted() ||
-        app.renderer.pipelineCacheStatistics().creations != beforePrewarm)
+        vulkanBackend(app).renderer().pipelineCacheStatistics().creations != beforePrewarm)
         throw std::runtime_error("incremental prewarm created pipelines during admission");
     app.resourcePreparation().cancelPipelines(prewarm.ticket);
     app.resourcePreparation().releasePipelines(prewarm.ticket);
@@ -1266,7 +1276,7 @@ void AppSmokeTests::runRenderTest(
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     if (app.resourcePreparation().pipelineStatus(sharedPrewarm.ticket).state != render::PipelinePreparationState::Ready ||
-        app.renderer.pipelineCacheStatistics().creations != beforePrewarm + 1)
+        vulkanBackend(app).renderer().pipelineCacheStatistics().creations != beforePrewarm + 1)
         throw std::runtime_error("incremental shared pipeline request failed");
     app.resourcePreparation().releasePipelines(sharedPrewarm.ticket);
     auto warmedFrame = firstFrame;
@@ -1275,9 +1285,9 @@ void AppSmokeTests::runRenderTest(
     draw.materialKey = render::makeMaterialKey(draw.material);
     draw.pipelineKey = render::makePipelineVariantKey(pipelineMaterial.materialTemplate, pipelineMaterial.renderState);
     draw.queue = render::renderQueueFor(pipelineMaterial.renderState);
-    const auto warmedCreations = app.renderer.pipelineCacheStatistics().creations;
-    static_cast<void>(app.renderer.compileDrawList(warmedFrame.renderList, app.renderAssets));
-    if (app.renderer.pipelineCacheStatistics().creations != warmedCreations)
+    const auto warmedCreations = vulkanBackend(app).renderer().pipelineCacheStatistics().creations;
+    static_cast<void>(vulkanBackend(app).renderer().compileDrawList(warmedFrame.renderList, app.renderAssets));
+    if (vulkanBackend(app).renderer().pipelineCacheStatistics().creations != warmedCreations)
         throw std::runtime_error("incremental prewarm did not match draw compilation");
     const auto warmedHit = app.resourcePreparation().prewarmPipelines({incrementalMaterial});
     if (!warmedHit.accepted() || warmedHit.disposition != render::ResourcePreparationDisposition::CacheHit)
@@ -1318,15 +1328,15 @@ void AppSmokeTests::runRenderTest(
         app.resourcePreparation().advance();
         app.imguiLayer.beginFrame();
         app.drawGui(gui);
-        const auto result = app.renderer.render(app.makeRenderFrame(), app.renderAssets, app.imguiLayer.endFrame());
-        if (rhi::vulkan::VulkanRenderer::needsResize(result)) app.recreateSwapChain(gui);
+        const auto result = app.backend_->render(app.makeRenderFrame(), app.renderAssets, app.imguiLayer.endFrame());
+        if (render::needsResize(result)) app.reconfigurePresentation(gui);
         if (app.resourcePreparation().status(incremental.ticket).state ==
             render::ResourcePreparationState::Ready)
         {
             break;
         }
     }
-    if (!app.renderer.sceneReady() || !app.renderAssets.tryTexture(incrementalHandle))
+    if (!app.backend_->sceneReady() || !app.renderAssets.tryTexture(incrementalHandle))
         throw std::runtime_error("incremental texture upload did not preserve the active scene");
     app.resourcePreparation().release(incremental.ticket);
     std::clog << "[Startup] GUI remained active for " << uploadFrames
@@ -1355,16 +1365,16 @@ void AppSmokeTests::runRenderTest(
             throw std::runtime_error(status.error);
         app.imguiLayer.beginFrame();
         app.drawGui(gui);
-        if (rhi::vulkan::VulkanRenderer::needsResize(
-                app.renderer.render(app.makeRenderFrame(), app.renderAssets, app.imguiLayer.endFrame())))
-            app.recreateSwapChain(gui);
+        if (render::needsResize(
+                app.backend_->render(app.makeRenderFrame(), app.renderAssets, app.imguiLayer.endFrame())))
+            app.reconfigurePresentation(gui);
         if (status.state == render::ResourcePreparationState::Ready)
         {
             meshReady = true;
             break;
         }
     }
-    if (!meshReady || !app.renderer.sceneReady() ||
+    if (!meshReady || !app.backend_->sceneReady() ||
         app.renderAssets.mesh(meshHandle).vertexBuffer() == oldVertexBuffer)
         throw std::runtime_error("frontend mesh revision did not replace the live GPU buffer");
     app.resourcePreparation().release(meshUpdate.ticket);
@@ -1451,10 +1461,10 @@ void AppSmokeTests::runRenderTest(
                      ImVec2(32, 32));
         ImGui::End();
         const auto drawResult =
-            app.renderer.render(app.makeRenderFrame(), app.renderAssets, app.imguiLayer.endFrame());
-        if (rhi::vulkan::VulkanRenderer::needsResize(drawResult))
+            app.backend_->render(app.makeRenderFrame(), app.renderAssets, app.imguiLayer.endFrame());
+        if (render::needsResize(drawResult))
         {
-            app.recreateSwapChain(gui);
+            app.reconfigurePresentation(gui);
         }
         const auto state = app.resourcePreparation().status(update.ticket);
         if (state.state == render::ResourcePreparationState::Failed)
@@ -1483,9 +1493,9 @@ void AppSmokeTests::runRenderTest(
     // Test snapshots now own RHI resources; release them before App destroys its device.
     oldBindings.clear();
     oldView.reset();
-    validateGpuTextureReplacement(app.renderer, app.assetManager,
+    validateGpuTextureReplacement(vulkanBackend(app).renderer(), app.assetManager,
                                   app.renderAssets, editorPreviewTexture);
-    if (config.outputMode == rhi::vulkan::VulkanRenderer::OutputMode::Editor)
+    if (config.outputMode == render::OutputMode::Editor)
     {
         const importer::texture::TextureImportRecord* before =
             app.textureImports.find(editorPreviewTexture);
@@ -1623,8 +1633,8 @@ void AppSmokeTests::runRenderTest(
         auto target = render::preparationTarget(app.renderAssets, app.assetManager.snapshot(sibling));
         auto siblingImage = app.renderAssets.texture(sibling).snapshot();
         auto bindings = app.renderAssets.captureTextureRebind(sibling, target.revision);
-        const rhi::vulkan::VulkanResourceDevice rebindDevice(app.vulkanContext.device());
-        rhi::vulkan::RenderAssetCache::buildTextureRebind(rebindDevice, *bindings, siblingImage);
+        const rhi::vulkan::VulkanResourceDevice rebindDevice(vulkanBackend(app).context().device());
+        render::RenderAssetStore::buildTextureRebind(rebindDevice, *bindings, siblingImage);
         rhi::vulkan::RetiredResources retired;
         app.renderAssets.acceptPreparation(target);
         app.renderAssets.publishPreparedTexture(retired, target, std::move(siblingImage), std::move(bindings));
@@ -1640,12 +1650,12 @@ void AppSmokeTests::runRenderTest(
             !app.assetManager.isCurrent(originalVersion) || app.renderAssets.texture(editorPreviewTexture).view() != originalView ||
             readBytes(finalPath) != originalFile || std::filesystem::exists(stagePath))
             throw std::runtime_error("GPU publication failure did not roll back installed KTX2");
-        app.renderer.waitIdle(); // Test owns the manually replaced sibling bindings.
+        if (app.backend_) app.backend_->waitIdle(); // Test owns the manually replaced sibling bindings.
         retired.clear();
     }
     try
     {
-        if (config.outputMode == rhi::vulkan::VulkanRenderer::OutputMode::Editor)
+        if (config.outputMode == render::OutputMode::Editor)
         {
             const render::ApplicationGuiTexture smokeTexturePreview =
                 app.guiRenderBridge.preview(
@@ -1672,7 +1682,7 @@ void AppSmokeTests::runRenderTest(
             app.window.pollEvents();
             app.imguiLayer.beginFrame();
             app.drawGui(gui);
-            if (config.outputMode == rhi::vulkan::VulkanRenderer::OutputMode::Editor)
+            if (config.outputMode == render::OutputMode::Editor)
             {
                 const render::ApplicationGuiTexture smokeTexturePreview =
                     app.guiRenderBridge.preview(
@@ -1693,20 +1703,20 @@ void AppSmokeTests::runRenderTest(
             {
                 validateVulkanDrawListCompilation(
                     renderFrame,
-                    app.renderAssets, app.renderer);
+                    app.renderAssets, vulkanBackend(app).renderer());
                 std::clog
                     << "[Render] Visible submesh draws="
                     << renderFrame.renderList.size()
                     << '\n';
                 validatedDrawList = true;
             }
-            const uint32_t renderSlot = app.renderer.currentFrameIndex();
-            const auto result = app.renderer.render(renderFrame, app.renderAssets, uiDrawData);
-            if (rhi::vulkan::VulkanRenderer::wasSubmitted(result))
+            const uint32_t renderSlot = vulkanBackend(app).renderer().currentFrameIndex();
+            const auto result = app.backend_->render(renderFrame, app.renderAssets, uiDrawData);
+            if (render::wasSubmitted(result))
             {
                 lastRenderedSlot = renderSlot;
                 ++renderedFrames;
-                if (rhi::vulkan::VulkanRenderer::needsResize(result)) ++submittedResizeFrames;
+                if (render::needsResize(result)) ++submittedResizeFrames;
                 // Capture the last submitted offscreen target below before any
                 // recreation replaces it. No fourth frame needs this swapchain.
                 if (renderedFrames == 3) break;
@@ -1715,24 +1725,24 @@ void AppSmokeTests::runRenderTest(
             {
                 ++acquireRetries;
             }
-            if (rhi::vulkan::VulkanRenderer::needsResize(result) || renderedFrames == 1)
+            if (render::needsResize(result) || renderedFrames == 1)
             {
                 // Hidden surfaces can be SUBOPTIMAL even after a successful
                 // submit. Rebuild registrations and obtain a fresh GUI overlay
                 // next attempt. The first submitted frame also forces a resize.
-                app.recreateSwapChain(gui);
+                app.reconfigurePresentation(gui);
             }
         }
         const auto framebuffer = app.window.framebufferExtent();
-        const auto swapchain = app.renderer.extent();
+        const auto swapchain = app.backend_->extent();
         std::clog << "[Render] Submitted frames=" << renderedFrames
                   << ", acquire retries=" << acquireRetries
                   << ", submitted resize frames=" << submittedResizeFrames
                   << ", framebuffer=" << framebuffer.width << 'x' << framebuffer.height
                   << ", swapchain=" << swapchain.width << 'x' << swapchain.height << '\n';
-        if (config.outputMode == rhi::vulkan::VulkanRenderer::OutputMode::Editor)
+        if (config.outputMode == render::OutputMode::Editor)
         {
-            const auto capture = app.renderer.captureEditorViewport(lastRenderedSlot);
+            const auto capture = vulkanBackend(app).renderer().captureEditorViewport(lastRenderedSlot);
             const size_t pixelCount = static_cast<size_t>(capture.width) * capture.height;
             if (pixelCount == 0 || capture.rgba.size() != pixelCount * 4)
                 throw std::runtime_error("editor smoke readback has invalid dimensions");
@@ -1750,12 +1760,12 @@ void AppSmokeTests::runRenderTest(
     }
     catch (...)
     {
-        app.renderer.waitIdle();
+        if (app.backend_) app.backend_->waitIdle();
         gui.detach();
         app.cleanup();
         throw;
     }
-    app.renderer.waitIdle();
+    if (app.backend_) app.backend_->waitIdle();
     gui.detach();
     app.cleanup();
 }

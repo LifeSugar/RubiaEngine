@@ -5,24 +5,24 @@
 namespace rubia::editor
 {
 
-void App::requestSwapChainRecreation()
+void App::requestPresentationReconfigure()
 {
-    swapChainRecreationRequested = true;
-    lastFramebufferResizeTime = rhi::vulkan::Window::time();
+    presentationReconfigureRequested_ = true;
+    lastFramebufferResizeTime = platform::glfw::Window::time();
 }
 
-bool App::isSwapChainRecreationDue() const
+bool App::isPresentationReconfigureDue() const
 {
-    const VkExtent2D extent = window.framebufferExtent();
+    const auto extent = window.framebufferExtent();
     return extent.width > 0 &&
         extent.height > 0 &&
-        rhi::vulkan::Window::time() - lastFramebufferResizeTime >=
-            kSwapChainResizeDebounceSeconds;
+        platform::glfw::Window::time() - lastFramebufferResizeTime >=
+            kPresentationResizeDebounceSeconds;
 }
 
-void App::recreateSwapChain(ApplicationGui&)
+void App::reconfigurePresentation(ApplicationGui&)
 {
-    VkExtent2D extent = window.framebufferExtent();
+    auto extent = window.framebufferExtent();
     while (extent.width == 0 || extent.height == 0)
     {
         if (window.shouldClose())
@@ -34,24 +34,25 @@ void App::recreateSwapChain(ApplicationGui&)
     }
 
     const bool recreateImGui = static_cast<bool>(imguiLayer);
-    renderer.waitIdle();
+    backend_->waitIdle();
     // Renderer recreation preserves editor commands, CPU workers and preparation tickets.
     guiRenderBridge.detach();
-    renderer.resize(extent);
+    backend_->resize(extent);
 
     if (recreateImGui)
     {
         imguiLayer.reconfigureRenderer();
     }
 
-    guiRenderBridge.attach(guiRenderHost, renderAssets, imguiLayer.rendererBackend());
+    if (recreateImGui)
+        guiRenderBridge.attach(backend_->guiHost(), renderAssets, imguiLayer.rendererBackend());
 
-    const VkExtent2D renderExtent = renderer.extent();
+    const auto renderExtent = backend_->extent();
     camera.setAspect(
         static_cast<float>(renderExtent.width) /
         static_cast<float>(renderExtent.height));
 
-    swapChainRecreationRequested = false;
+    presentationReconfigureRequested_ = false;
 }
 
 } // namespace rubia::editor

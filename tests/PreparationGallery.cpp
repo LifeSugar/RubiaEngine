@@ -1,4 +1,7 @@
 #include "AppSmokeTests.hpp"
+#include "backend/VulkanApplicationBackend.hpp"
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
 #include "EditorLayer.hpp"
 #include "content/EditorAssetController.hpp"
 #include "vulkan/VulkanDrawList.hpp"
@@ -49,23 +52,23 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
     editor::App::RunConfig config;
     config.windowWidth = 1600; config.windowHeight = 900;
     config.windowTitle = "Rubia - Preparation Gallery - Material Atelier";
-    config.outputMode = rhi::vulkan::VulkanRenderer::OutputMode::Editor;
+    config.outputMode = render::OutputMode::Editor;
     const auto folder = std::filesystem::path(PROJECT_SOURCE_DIR) / "assets/preparation_gallery";
     const auto artifacts = std::filesystem::current_path() / "gallery-results";
     std::filesystem::create_directories(artifacts);
     try
     {
         app.initWindow(config, interactive);
-        app.initVulkan(config);
+        app.initBackend(config);
         app.startEmptyScene(config);
         app.setupCamera();
         app.initImGui(config);
-        app.guiRenderBridge.attach(app.guiRenderHost, app.renderAssets, app.imguiLayer.rendererBackend());
+        app.guiRenderBridge.attach(app.backend_->guiHost(), app.renderAssets, app.imguiLayer.rendererBackend());
         awaitGallery([&] {
             app.resourcePreparation().advance(); app.updateContentLoading(); app.window.pollEvents();
             requireGallery(app.contentLoadStatus_.state != editor::ContentLoadState::Failed,
                            app.contentLoadStatus_.message);
-            return app.renderer.sceneReady();
+            return app.backend_->sceneReady();
         });
         auto& assets = app.assetManager;
         auto& preparation = app.resourcePreparation();
@@ -200,10 +203,10 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
         app.camera.setRotation(glm::vec3(-40,0,0));
         app.camera.setPosition(glm::vec3(0,1.9f,0)-app.camera.getForwardVector()*27.0f);
         app.camera.setAspect(16.0f/9.0f);
-        app.renderer.resizeEditorViewport({1600,900});
+        vulkanBackend(app).renderer().resizeEditorViewport({1600,900});
         auto frame=app.makeRenderFrame();
-        const auto beforeDraw=app.renderer.pipelineCacheStatistics();
-        auto draw=app.renderer.compileDrawList(frame.renderList,app.renderAssets);
+        const auto beforeDraw=vulkanBackend(app).renderer().pipelineCacheStatistics();
+        auto draw=vulkanBackend(app).renderer().compileDrawList(frame.renderList,app.renderAssets);
         requireGallery(draw.opaque.size()==33 && draw.transparent.size()==8,"expected 33 opaque/clip (including environment) and 8 transparent draws");
         const auto pipelineFor = [&](MaterialAssetHandle material) {
             const auto* gpu=&app.renderAssets.material(material);
@@ -224,13 +227,13 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
             for (uint32_t attempt = 0; attempt < 32; ++attempt) {
                 app.window.pollEvents();
                 if (resizeBeforeNextFrame) {
-                    app.recreateSwapChain(gui);
+                    app.reconfigurePresentation(gui);
                     resizeBeforeNextFrame = false;
                 }
-                const auto slot = app.renderer.currentFrameIndex();
-                const auto result = app.renderer.render(renderFrame, app.renderAssets);
-                resizeBeforeNextFrame = rhi::vulkan::VulkanRenderer::needsResize(result);
-                if (rhi::vulkan::VulkanRenderer::wasSubmitted(result))
+                const auto slot = vulkanBackend(app).renderer().currentFrameIndex();
+                const auto result = app.backend_->render(renderFrame, app.renderAssets);
+                resizeBeforeNextFrame = render::needsResize(result);
+                if (render::wasSubmitted(result))
                     return slot;
             }
             throw std::runtime_error("Preparation gallery: no frame submitted after swapchain retries");
@@ -239,8 +242,8 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
         for(int i=0;i<4;++i) {
             captureSlot=renderGalleryFrame(frame);
         }
-        requireGallery(app.renderer.pipelineCacheStatistics().creations==beforeDraw.creations,"draw created a PSO after prewarm");
-        const auto capture=app.renderer.captureEditorViewport(captureSlot);
+        requireGallery(vulkanBackend(app).renderer().pipelineCacheStatistics().creations==beforeDraw.creations,"draw created a PSO after prewarm");
+        const auto capture=vulkanBackend(app).renderer().captureEditorViewport(captureSlot);
         saveCapture(artifacts/"gallery.ppm",capture);
         size_t colored=0;
         for(size_t i=0;i<capture.rgba.size();i+=4) {
@@ -256,7 +259,7 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
             item.objectIndex=static_cast<uint32_t>(withoutGlass.renderList.objectData.size()-1);
         }
         const auto noGlassSlot=renderGalleryFrame(withoutGlass);
-        const auto backdrop=app.renderer.captureEditorViewport(noGlassSlot);
+        const auto backdrop=vulkanBackend(app).renderer().captureEditorViewport(noGlassSlot);
         saveCapture(artifacts/"gallery-without-glass.ppm",backdrop);
         size_t blendedPixels=0;
         for(size_t i=0;i<capture.rgba.size();i+=4) {
@@ -272,7 +275,7 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
         app.camera.setPosition(glm::vec3(2.35f,1.45f,3.8f)-app.camera.getForwardVector()*10.5f);
         const auto closeupFrame=app.makeRenderFrame();
         const auto closeupSlot=renderGalleryFrame(closeupFrame);
-        saveCapture(artifacts/"gallery-glass-closeup.ppm",app.renderer.captureEditorViewport(closeupSlot));
+        saveCapture(artifacts/"gallery-glass-closeup.ppm",vulkanBackend(app).renderer().captureEditorViewport(closeupSlot));
         app.camera.setRotation(overviewRotation); app.camera.setPosition(overviewPosition);
         // Replace one shared texture while frames continue rendering. Every subscriber
         // must switch descriptors without changing material UBOs or pipelines.
@@ -314,7 +317,7 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
             requireGallery(app.renderAssets.material(materials[i]).descriptorSet()!=oldSets[i-2],"dependent texture descriptor was not replaced");
             requireGallery(app.renderAssets.material(materials[i]).parameterBuffer()==oldBuffers[i-2],"texture replacement reallocated the material UBO");
         }
-        const auto updated=app.renderer.captureEditorViewport(captureSlot);
+        const auto updated=vulkanBackend(app).renderer().captureEditorViewport(captureSlot);
         saveCapture(artifacts/"gallery-updated.ppm",updated);
         size_t changedPixels=0;
         for(size_t i=0;i<capture.rgba.size();i+=4)
@@ -324,7 +327,7 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
         requireGallery(changedPixels>10000,"new texture revision was not visible in the rendered image");
         (void)assets.replaceTexture(texture,original);
         replaceAndRender();
-        requireGallery(app.renderer.pipelineCacheStatistics().creations==beforeDraw.creations,"texture update rebuilt PSOs");
+        requireGallery(vulkanBackend(app).renderer().pipelineCacheStatistics().creations==beforeDraw.creations,"texture update rebuilt PSOs");
         std::ofstream report(artifacts/"report.txt");
         report << "Visible glass-layer pixels=" << blendedPixels << "\n";
         report << "Live texture revision replacement + restore passed; 8 material descriptors rebound, UBOs and PSOs reused\n"
@@ -340,10 +343,10 @@ void AppSmokeTests::runPreparationGallery(bool interactive)
                   << " Started / " << shared << " Shared / " << cacheHits << " CacheHit; capture: " << artifacts << '\n';
         draw = {}; // Release retained pipeline owners before the device is destroyed.
         if(interactive) app.mainLoop(gui);
-        app.renderer.waitIdle();
+        if (app.backend_) app.backend_->waitIdle();
         oldSets = {}; oldBuffers = {};
         gui.detach(); app.cleanup();
     }
-    catch (...) {app.renderer.waitIdle(); gui.detach(); app.cleanup(); throw;}
+    catch (...) {if (app.backend_) app.backend_->waitIdle(); gui.detach(); app.cleanup(); throw;}
 }
 }

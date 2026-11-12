@@ -1,4 +1,7 @@
 #include "AppSmokeTests.hpp"
+#include "backend/VulkanApplicationBackend.hpp"
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
 #include "VulkanUploadTests.hpp"
 #include <imgui.h>
 
@@ -24,13 +27,13 @@ void AppSmokeTests::runStartupTest()
     editor::EditorLayer gui;
     editor::App app;
     editor::App::RunConfig config{};
-    config.outputMode = rhi::vulkan::VulkanRenderer::OutputMode::Editor;
+    config.outputMode = render::OutputMode::Editor;
     const auto start = std::chrono::steady_clock::now();
     app.initWindow(config, false);
-    app.initVulkan(config);
+    app.initBackend(config);
     app.setupCamera();
     app.initImGui(config);
-    app.guiRenderBridge.attach(app.guiRenderHost, app.renderAssets, app.imguiLayer.rendererBackend());
+    app.guiRenderBridge.attach(app.backend_->guiHost(), app.renderAssets, app.imguiLayer.rendererBackend());
     gui.attach({app.assetManager, app.scene, app.guiRenderBridge,
         &app.textureImports, &app.contentLoadStatus_});
     const auto draw = [&]
@@ -38,27 +41,27 @@ void AppSmokeTests::runStartupTest()
         app.window.pollEvents();
         app.imguiLayer.beginFrame();
         app.drawGui(gui);
-        if (rhi::vulkan::VulkanRenderer::needsResize(
-                app.renderer.renderGui(app.imguiLayer.endFrame())))
+        if (render::needsResize(
+                app.backend_->renderGui(app.imguiLayer.endFrame())))
         {
-            app.recreateSwapChain(gui);
+            app.reconfigurePresentation(gui);
         }
     };
     try
     {
         draw();
         const auto firstGui = std::chrono::steady_clock::now();
-        if (app.contentLoadFuture_.valid() || app.renderer.sceneReady())
+        if (app.contentLoadFuture_.valid() || app.backend_->sceneReady())
         {
             throw std::runtime_error("empty startup unexpectedly started content loading");
         }
-        app.recreateSwapChain(gui);
+        app.reconfigurePresentation(gui);
         draw();
 
-        runVulkanUploadTests(app.vulkanContext.device());
+        runVulkanUploadTests(vulkanBackend(app).context().device());
 #ifdef RUBIA_PIPELINE_STATE_TESTS
-        runGraphicsPipelineTests(app.vulkanContext.device());
-        runVulkanDrawListTests(app.vulkanContext.device());
+        runGraphicsPipelineTests(vulkanBackend(app).context().device());
+        runVulkanDrawListTests(vulkanBackend(app).context().device());
 #endif
 
         // Standalone incremental resource preparation: no model, material layout or pipeline.
@@ -118,7 +121,7 @@ void AppSmokeTests::runStartupTest()
                 }
                 draw();
             }
-            if (!app.renderAssets.tryTexture(first) || !app.renderAssets.tryTexture(second) || app.renderer.sceneReady())
+            if (!app.renderAssets.tryTexture(first) || !app.renderAssets.tryTexture(second) || app.backend_->sceneReady())
                 throw std::runtime_error("standalone texture preparation required a scene or did not publish");
             if (!app.renderAssets.tryMesh(meshHandle))
             {
@@ -132,9 +135,9 @@ void AppSmokeTests::runStartupTest()
             ImGui::Begin("Standalone texture upload test");
             ImGui::Image(ImTextureRef(static_cast<ImTextureID>(preview.textureId)), ImVec2(32, 32));
             ImGui::End();
-            const auto previewResult = app.renderer.renderGui(app.imguiLayer.endFrame());
-            if (rhi::vulkan::VulkanRenderer::needsResize(previewResult))
-                app.recreateSwapChain(gui);
+            const auto previewResult = app.backend_->renderGui(app.imguiLayer.endFrame());
+            if (render::needsResize(previewResult))
+                app.reconfigurePresentation(gui);
             app.resourcePreparation().release(a.ticket);
             app.resourcePreparation().release(b.ticket);
             auto hit = prepare(first);
@@ -198,7 +201,7 @@ void AppSmokeTests::runStartupTest()
             if (!released || app.renderAssets.tryTexture(pendingHandle) ||
                 app.renderAssets.texture(first).view() != firstView)
                 throw std::runtime_error("frontend shutdown leaked work or evicted resident resources");
-            app.renderer.waitIdle();
+            if (app.backend_) app.backend_->waitIdle();
             app.guiRenderBridge.invalidatePreview(first);
             app.renderAssets.reset();
         }
@@ -226,7 +229,7 @@ void AppSmokeTests::runStartupTest()
             draw();
         }
         if (app.contentLoadStatus_.state != editor::ContentLoadState::Failed ||
-            !app.renderer || !app.scene.nodes().empty())
+            (!app.backend_ || !app.backend_->ready()) || !app.scene.nodes().empty())
         {
             throw std::runtime_error("missing model did not leave a usable empty editor");
         }
@@ -243,13 +246,13 @@ void AppSmokeTests::runStartupTest()
                 throw std::runtime_error(app.contentLoadStatus_.message);
             }
             draw();
-            const auto status = app.renderer.scenePreparationStatus();
+            const auto status = app.backend_->scenePreparationStatus();
             if (status.state == ScenePreparationState::PreparingResources && status.total > status.completed)
             {
                 break;
             }
         }
-        const auto uploading = app.renderer.scenePreparationStatus();
+        const auto uploading = app.backend_->scenePreparationStatus();
         if (uploading.state != ScenePreparationState::PreparingResources || uploading.total <= uploading.completed)
         {
             throw std::runtime_error("scene cancellation test did not begin resource preparation");
@@ -258,30 +261,30 @@ void AppSmokeTests::runStartupTest()
         // of the App worker. The backend must not clear an existing operation.
         auto prepared = app.preparedContent_;
         bool duplicateRejected = false;
-        try { app.renderer.beginScenePreparation(app.renderAssets, {}); }
+        try { app.backend_->beginScenePreparation(app.renderAssets, {}); }
         catch (const std::logic_error&) { duplicateRejected = true; }
         if (!duplicateRejected ||
-            app.renderer.scenePreparationStatus().total != uploading.total)
+            app.backend_->scenePreparationStatus().total != uploading.total)
         {
             throw std::runtime_error("duplicate preparation replaced an in-flight operation");
         }
         app.discardContentLoading();
-        if (app.renderer.scenePreparationStatus().state != ScenePreparationState::Cancelled ||
+        if (app.backend_->scenePreparationStatus().state != ScenePreparationState::Cancelled ||
             !app.renderAssets.empty() ||
-            app.renderer.sceneReady() || !app.assetManager.textureHandles().empty())
+            app.backend_->sceneReady() || !app.assetManager.textureHandles().empty())
         {
             throw std::runtime_error("upload cancellation left partial scene resources");
         }
         draw();
 
-        runAssetPreparationTests(app.vulkanContext.device(), prepared->assets,
+        runAssetPreparationTests(vulkanBackend(app).context().device(), prepared->assets,
                                  prepared->content.model, prepared->content.presentProgram);
 
         // Exercise the actual Renderer submission boundary with weak owners.
         // A prepared shader needs no upload and makes retirement observable
         // without exposing frame internals or relying on GPU timing.
         {
-            rhi::vulkan::RenderAssetCache cache;
+            render::RenderAssetStore cache;
             const auto domain = std::make_shared<asset::AssetDomainTag>();
             const asset::ShaderAssetHandle handle{0, 1};
             const auto publish = [&](asset::AssetContentRevision revision)
@@ -289,33 +292,33 @@ void AppSmokeTests::runStartupTest()
                 const auto shader = prepared->assets.shaderProgram(prepared->content.presentProgram).shaders().front();
                 auto owner = std::make_shared<asset::ShaderAsset>(prepared->assets.shader(shader));
                 std::weak_ptr<const asset::ShaderAsset> weak = owner;
-                const auto result = app.renderer.prepareShader(
+                const auto result = vulkanBackend(app).renderer().prepareShader(
                     cache, {domain, {handle, revision}, std::move(owner)});
                 if (!result.accepted())
                     throw std::runtime_error("retirement probe preparation rejected");
                 const auto creationDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
-                while (!rhi::vulkan::resourcePreparationFinished(app.renderer.resourcePreparationStatus(result.ticket).state) &&
+                while (!rhi::vulkan::resourcePreparationFinished(vulkanBackend(app).renderer().resourcePreparationStatus(result.ticket).state) &&
                        std::chrono::steady_clock::now() < creationDeadline)
                 {
-                    app.renderer.advanceResourcePreparation();
+                    vulkanBackend(app).renderer().advanceResourcePreparation();
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
-                if (app.renderer.resourcePreparationStatus(result.ticket).state !=
+                if (vulkanBackend(app).renderer().resourcePreparationStatus(result.ticket).state !=
                     rhi::vulkan::ResourcePreparationState::Ready)
                     throw std::runtime_error("retirement probe was not published");
-                app.renderer.releaseResourcePreparation(result.ticket);
+                vulkanBackend(app).renderer().releaseResourcePreparation(result.ticket);
                 return weak;
             };
 
             const auto first = publish(1);
             const auto second = publish(2);
-            app.renderer.advanceResourcePreparation(); // No render submission yet.
+            vulkanBackend(app).renderer().advanceResourcePreparation(); // No render submission yet.
             if (first.expired())
                 throw std::runtime_error("unsubmitted retirement was released");
 
             // The first draw must not reclaim first using the slot's OLD fence.
             // Other slots completing must not reclaim it either.
-            for (uint32_t i = 0; i < app.renderer.frameCount(); ++i)
+            for (uint32_t i = 0; i < vulkanBackend(app).renderer().frameCount(); ++i)
             {
                 draw();
                 if (first.expired())
@@ -330,20 +333,20 @@ void AppSmokeTests::runStartupTest()
             const auto fourth = publish(4); // third is still pending submission.
             if (second.expired() || third.expired())
                 throw std::runtime_error("consecutive replacements retired prematurely");
-            app.recreateSwapChain(gui); // Idle recovery must drain BOTH categories.
+            app.reconfigurePresentation(gui); // Idle recovery must drain BOTH categories.
             if (!second.expired() || !third.expired() || fourth.expired())
                 throw std::runtime_error("idle retirement failed to preserve current resources");
 
             // With no updates, subsequent frame reuse must leave the resident alone.
-            for (uint32_t i = 0; i <= app.renderer.frameCount(); ++i)
+            for (uint32_t i = 0; i <= vulkanBackend(app).renderer().frameCount(); ++i)
                 draw();
             if (fourth.expired())
                 throw std::runtime_error("unchanged resident was retired");
         }
 
-        app.renderer.beginScenePreparation(app.renderAssets, {});
-        if (app.renderer.scenePreparationStatus().state != ScenePreparationState::Failed ||
-            app.renderer.scenePreparationStatus().error.empty() || !app.renderer)
+        app.backend_->beginScenePreparation(app.renderAssets, {});
+        if (app.backend_->scenePreparationStatus().state != ScenePreparationState::Failed ||
+            app.backend_->scenePreparationStatus().error.empty() || (!app.backend_ || !app.backend_->ready()))
         {
             throw std::runtime_error("invalid request did not return a recoverable failure");
         }
@@ -353,41 +356,41 @@ void AppSmokeTests::runStartupTest()
             return render::makeSceneResourceRequest(prepared->assets, {prepared->content.model},
                 prepared->content.materialTemplate, prepared->content.presentProgram);
         };
-        app.renderer.beginScenePreparation(app.renderAssets, makeRequest());
+        app.backend_->beginScenePreparation(app.renderAssets, makeRequest());
         deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
-        while (app.renderer.scenePreparationStatus().state != ScenePreparationState::Ready &&
+        while (app.backend_->scenePreparationStatus().state != ScenePreparationState::Ready &&
             std::chrono::steady_clock::now() < deadline)
         {
-            app.renderer.advanceResourcePreparation();
-            const auto status = app.renderer.scenePreparationStatus();
+            vulkanBackend(app).renderer().advanceResourcePreparation();
+            const auto status = app.backend_->scenePreparationStatus();
             if (status.state == ScenePreparationState::Failed)
                 throw std::runtime_error(status.error);
             if (status.completed > status.total ||
-                app.renderer.sceneReady())
+                app.backend_->sceneReady())
                 throw std::runtime_error("preparation exposed incomplete scene resources");
             draw();
         }
-        const auto ready = app.renderer.scenePreparationStatus();
+        const auto ready = app.backend_->scenePreparationStatus();
         if (ready.state != ScenePreparationState::Ready || ready.completed != ready.total)
             throw std::runtime_error("backend preparation did not finish all uploads and pipelines");
-        app.recreateSwapChain(gui);
+        app.reconfigurePresentation(gui);
         draw();
-        if (app.renderer.sceneReady())
+        if (app.backend_->sceneReady())
             throw std::runtime_error("resize activated a prepared scene");
-        app.renderer.cancelScenePreparation();
-        if (!app.renderAssets.empty() || app.renderer.sceneReady())
+        app.backend_->cancelScenePreparation();
+        if (!app.renderAssets.empty() || app.backend_->sceneReady())
             throw std::runtime_error("ready cancellation left scene resources alive");
 
         // The backend retains concrete snapshots without retaining the CPU scene bundle.
         std::weak_ptr<editor::App::PreparedContent> source = prepared;
         auto detachedRequest = makeRequest();
         std::weak_ptr<const asset::MeshAsset> meshSource = detachedRequest.meshes.front().data;
-        app.renderer.beginScenePreparation(app.renderAssets, std::move(detachedRequest));
+        app.backend_->beginScenePreparation(app.renderAssets, std::move(detachedRequest));
         prepared.reset();
         if (!source.expired() || meshSource.expired())
             throw std::runtime_error("backend retained CPU scene or lost concrete mesh snapshot");
-        app.renderer.advanceResourcePreparation();
-        const auto closing = app.renderer.scenePreparationStatus();
+        vulkanBackend(app).renderer().advanceResourcePreparation();
+        const auto closing = app.backend_->scenePreparationStatus();
         if (closing.state != ScenePreparationState::PreparingResources || closing.total <= closing.completed)
             throw std::runtime_error("scene shutdown test did not restart resource preparation");
         // Exercise the close path while generic asset preparations are pending.
@@ -395,7 +398,7 @@ void AppSmokeTests::runStartupTest()
         app.mainLoop(gui);
         app.discardContentLoading();
         if (!source.expired() || !meshSource.expired() ||
-            app.renderer.scenePreparationStatus().state != ScenePreparationState::Cancelled)
+            app.backend_->scenePreparationStatus().state != ScenePreparationState::Cancelled)
             throw std::runtime_error("cancellation retained the CPU upload source");
 
         // A callback failure happens after a real acquire and pass begin. It
@@ -412,30 +415,29 @@ void AppSmokeTests::runStartupTest()
         {
             auto pendingOwner = std::make_shared<int>(7);
             pendingProbe = pendingOwner;
-            app.renderer.retireExternalResource(std::move(pendingOwner));
+            vulkanBackend(app).renderer().retireExternalResource(std::move(pendingOwner));
             try
             {
-                const auto result = app.renderer.renderGui(&failingOverlay);
-                if (rhi::vulkan::VulkanRenderer::needsResize(result)) app.recreateSwapChain(gui);
+                const auto result = app.backend_->renderGui(&failingOverlay);
+                if (render::needsResize(result)) app.reconfigurePresentation(gui);
             }
             catch (const InjectedRecordingFailure&) { injected = true; }
         }
         if (!injected || pendingProbe.expired())
             throw std::runtime_error("recording failure did not preserve pending retirement");
         bool failedSessionRejected = false;
-        try { static_cast<void>(app.renderer.renderGui(nullptr)); }
+        try { static_cast<void>(app.backend_->renderGui(nullptr)); }
         catch (const std::logic_error&) { failedSessionRejected = true; }
         if (!failedSessionRejected)
             throw std::runtime_error("failed acquired session was reused");
-        app.renderer.drainRetiredResources();
+        vulkanBackend(app).renderer().drainRetiredResources();
         if (!pendingProbe.expired())
             throw std::runtime_error("failed recording owners were not reclaimed after idle");
 
-        app.renderer.waitIdle();
+        if (app.backend_) app.backend_->waitIdle();
         gui.detach();
         app.cleanup();
-        if (app.window || app.renderer ||
-            app.renderer.scenePreparationStatus().state != ScenePreparationState::Idle ||
+        if (app.window || app.backend_ ||
             app.contentLoadFuture_.valid())
         {
             throw std::runtime_error("startup shutdown left application resources alive");
@@ -447,7 +449,7 @@ void AppSmokeTests::runStartupTest()
     catch (...)
     {
         app.discardContentLoading();
-        app.renderer.waitIdle();
+        if (app.backend_) app.backend_->waitIdle();
         gui.detach();
         app.cleanup();
         throw;
