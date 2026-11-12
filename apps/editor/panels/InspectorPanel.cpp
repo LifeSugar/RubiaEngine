@@ -1,3 +1,4 @@
+#include "EditorTheme.hpp"
 #include "panels/InspectorPanel.hpp"
 #include "content/EditorAssetController.hpp"
 
@@ -38,7 +39,7 @@ namespace rubia::editor
         EditorSelection &selection,
         bool *open, EditorAssetController* controller)
     {
-        const bool visible = ImGui::Begin("Inspector", open);
+        const bool visible = beginEditorWindow("Inspector", open);
         if (!visible)
         {
             ImGui::End();

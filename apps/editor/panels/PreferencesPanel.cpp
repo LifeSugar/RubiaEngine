@@ -25,7 +25,7 @@ void drawPreferencesPanel(bool* open)
         std::min(560.0f * scale, viewport->WorkSize.x),
         std::min(660.0f * scale, viewport->WorkSize.y)), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (!ImGui::Begin("Preference", open, ImGuiWindowFlags_NoDocking))
+    if (!beginEditorWindow("Preference", open, ImGuiWindowFlags_NoDocking))
     {
         ImGui::End();
         return;
@@ -80,7 +80,7 @@ void drawPreferencesPanel(bool* open)
                 }
             }
             ImGui::Spacing();
-            if (ImGui::Button("Reset colors", ImVec2(-1.0f, 0.0f)))
+            if (editorButton("Reset colors", ImVec2(-1.0f, 0.0f)))
             {
                 *settings = makeEditorThemePreset(settings->preset);
                 changed = true;

@@ -6,18 +6,20 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 
 namespace rubia::editor
 {
 
 namespace
 {
-constexpr const char* kSettingsType = "RubiaTheme";
+// Version appearance separately from docking: old dark palettes must not override Platinum.
+constexpr const char* kSettingsType = "RubiaPlatinumTheme";
 
 void resetSettings(ImGuiContext*, ImGuiSettingsHandler* handler)
 {
     *static_cast<EditorThemeSettings*>(handler->UserData) =
-        makeEditorThemePreset(EditorThemePreset::Rubia);
+        makeEditorThemePreset(EditorThemePreset::Platinum);
 }
 
 void* openSettings(ImGuiContext*, ImGuiSettingsHandler* handler, const char* name)
@@ -81,45 +83,29 @@ EditorThemeSettings makeEditorThemePreset(EditorThemePreset preset)
 {
     EditorThemeSettings result;
     result.colors = {{
-        {{0.075f, 0.082f, 0.102f, 1.0f}},
-        {{0.105f, 0.114f, 0.137f, 1.0f}},
-        {{0.153f, 0.165f, 0.196f, 1.0f}},
-        {{0.208f, 0.220f, 0.267f, 1.0f}},
-        {{0.235f, 0.247f, 0.294f, 0.55f}},
-        {{0.655f, 0.608f, 0.961f, 1.0f}},
-        {{0.286f, 0.259f, 0.427f, 1.0f}},
-        {{0.89f, 0.90f, 0.93f, 1.0f}},
-        {{0.53f, 0.56f, 0.63f, 1.0f}}
+        {{0.95f, 0.95f, 0.93f, 1.0f}}, // Paper / content wells
+        {{0.80f, 0.80f, 0.78f, 1.0f}}, // Platinum window chrome
+        {{0.87f, 0.87f, 0.85f, 1.0f}}, // Raised controls
+        {{0.92f, 0.92f, 0.90f, 1.0f}},
+        {{0.43f, 0.44f, 0.43f, 1.0f}},
+        {{0.29f, 0.36f, 0.41f, 1.0f}}, // Graphite blue
+        {{0.67f, 0.74f, 0.78f, 1.0f}},
+        {{0.12f, 0.13f, 0.13f, 1.0f}},
+        {{0.35f, 0.36f, 0.35f, 1.0f}}
     }};
-    if (preset == EditorThemePreset::Midnight)
+    if (preset == EditorThemePreset::Slate)
     {
         result.preset = preset;
-        result.colors = {{
-            {{0.055f, 0.075f, 0.110f, 1.0f}},
-            {{0.080f, 0.110f, 0.155f, 1.0f}},
-            {{0.120f, 0.165f, 0.220f, 1.0f}},
-            {{0.170f, 0.235f, 0.310f, 1.0f}},
-            {{0.260f, 0.350f, 0.440f, 0.55f}},
-            {{0.380f, 0.720f, 0.980f, 1.0f}},
-            {{0.140f, 0.290f, 0.420f, 1.0f}},
-            {{0.87f, 0.92f, 0.97f, 1.0f}},
-            {{0.51f, 0.61f, 0.72f, 1.0f}}
-        }};
+        result.colors[static_cast<std::size_t>(EditorThemeColor::Panel)] = {{0.75f, 0.78f, 0.80f, 1.0f}};
+        result.colors[static_cast<std::size_t>(EditorThemeColor::Control)] = {{0.84f, 0.87f, 0.89f, 1.0f}};
     }
-    else if (preset == EditorThemePreset::Graphite)
+    else if (preset == EditorThemePreset::Parchment)
     {
         result.preset = preset;
-        result.colors = {{
-            {{0.080f, 0.080f, 0.085f, 1.0f}},
-            {{0.115f, 0.115f, 0.120f, 1.0f}},
-            {{0.170f, 0.170f, 0.180f, 1.0f}},
-            {{0.235f, 0.235f, 0.250f, 1.0f}},
-            {{0.330f, 0.330f, 0.350f, 0.55f}},
-            {{0.780f, 0.800f, 0.840f, 1.0f}},
-            {{0.290f, 0.300f, 0.330f, 1.0f}},
-            {{0.91f, 0.91f, 0.92f, 1.0f}},
-            {{0.57f, 0.57f, 0.60f, 1.0f}}
-        }};
+        result.colors[static_cast<std::size_t>(EditorThemeColor::Panel)] = {{0.83f, 0.81f, 0.76f, 1.0f}};
+        result.colors[static_cast<std::size_t>(EditorThemeColor::Background)] = {{0.97f, 0.96f, 0.91f, 1.0f}};
+        result.colors[static_cast<std::size_t>(EditorThemeColor::Control)] = {{0.90f, 0.88f, 0.82f, 1.0f}};
+        result.colors[static_cast<std::size_t>(EditorThemeColor::Selection)] = {{0.77f, 0.76f, 0.65f, 1.0f}};
     }
     return result;
 }
@@ -128,10 +114,10 @@ const char* editorThemePresetName(EditorThemePreset preset)
 {
     switch (preset)
     {
-    case EditorThemePreset::Rubia: return "Rubia Violet";
-    case EditorThemePreset::Midnight: return "Midnight Blue";
-    case EditorThemePreset::Graphite: return "Graphite";
-    default: return "Rubia Violet";
+    case EditorThemePreset::Platinum: return "Platinum";
+    case EditorThemePreset::Slate: return "Slate";
+    case EditorThemePreset::Parchment: return "Parchment";
+    default: return "Platinum";
     }
 }
 
@@ -143,34 +129,35 @@ EditorThemeSettings* currentEditorThemeSettings()
 
 void applyEditorTheme(EditorThemeSettings& settings)
 {
-    settings = makeEditorThemePreset(EditorThemePreset::Rubia);
-    ImGui::StyleColorsDark();
+    settings = makeEditorThemePreset(EditorThemePreset::Platinum);
+    ImGui::StyleColorsLight();
     ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowPadding = ImVec2(14.0f, 12.0f);
-    style.FramePadding = ImVec2(10.0f, 6.0f);
-    style.ItemSpacing = ImVec2(10.0f, 8.0f);
+    style.WindowPadding = ImVec2(10.0f, 10.0f);
+    style.FramePadding = ImVec2(8.0f, 4.0f);
+    style.ItemSpacing = ImVec2(8.0f, 6.0f);
     style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
-    style.CellPadding = ImVec2(8.0f, 5.0f);
+    style.CellPadding = ImVec2(6.0f, 4.0f);
     style.IndentSpacing = 18.0f;
-    style.ScrollbarSize = 12.0f;
+    style.ScrollbarSize = 15.0f;
     style.GrabMinSize = 10.0f;
-    style.WindowRounding = 8.0f;
-    style.ChildRounding = 6.0f;
-    style.FrameRounding = 5.0f;
-    style.PopupRounding = 7.0f;
-    style.ScrollbarRounding = 8.0f;
-    style.GrabRounding = 4.0f;
-    style.TabRounding = 5.0f;
+    style.WindowRounding = 0.0f;
+    style.ChildRounding = 0.0f;
+    style.FrameRounding = 1.0f;
+    style.PopupRounding = 0.0f;
+    style.ScrollbarRounding = 0.0f;
+    style.GrabRounding = 0.0f;
+    style.TabRounding = 1.0f;
     style.WindowBorderSize = 1.0f;
-    style.ChildBorderSize = 0.0f;
-    style.FrameBorderSize = 0.0f;
+    style.ChildBorderSize = 1.0f;
+    style.FrameBorderSize = 1.0f;
     style.PopupBorderSize = 1.0f;
-    style.TabBorderSize = 0.0f;
-    style.TabBarBorderSize = 0.0f;
-    style.TabBarOverlineSize = 2.0f;
+    style.TabBorderSize = 1.0f;
+    style.TabBarBorderSize = 1.0f;
+    style.TabBarOverlineSize = 0.0f;
     style.DockingSeparatorSize = 5.0f;
     style.SeparatorTextBorderSize = 1.0f;
     style.SeparatorTextPadding = ImVec2(0.0f, 10.0f);
+    style.WindowTitleAlign = ImVec2(0.5f, 0.5f);
     style.WindowMenuButtonPosition = ImGuiDir_None;
     style.TreeLinesFlags = ImGuiTreeNodeFlags_DrawLinesToNodes;
 
@@ -210,15 +197,15 @@ void applyEditorThemeColors(const EditorThemeSettings& settings)
     colors[ImGuiCol_PopupBg] = panel;
     colors[ImGuiCol_Border] = border;
     colors[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
-    colors[ImGuiCol_FrameBg] = raised;
+    colors[ImGuiCol_FrameBg] = base;
     colors[ImGuiCol_FrameBgHovered] = hover;
     colors[ImGuiCol_FrameBgActive] = selection;
-    colors[ImGuiCol_TitleBg] = base;
+    colors[ImGuiCol_TitleBg] = panel;
     colors[ImGuiCol_TitleBgActive] = raised;
     colors[ImGuiCol_TitleBgCollapsed] = base;
-    colors[ImGuiCol_MenuBarBg] = base;
-    colors[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
-    colors[ImGuiCol_ScrollbarGrab] = raised;
+    colors[ImGuiCol_MenuBarBg] = raised;
+    colors[ImGuiCol_ScrollbarBg] = panel;
+    colors[ImGuiCol_ScrollbarGrab] = border;
     colors[ImGuiCol_ScrollbarGrabHovered] = hover;
     colors[ImGuiCol_ScrollbarGrabActive] = accent;
     colors[ImGuiCol_CheckMark] = accent;
@@ -236,9 +223,9 @@ void applyEditorThemeColors(const EditorThemeSettings& settings)
     colors[ImGuiCol_ResizeGrip] = ImVec4(accent.x, accent.y, accent.z, 0.15f);
     colors[ImGuiCol_ResizeGripHovered] = accent;
     colors[ImGuiCol_ResizeGripActive] = accent;
-    colors[ImGuiCol_Tab] = base;
+    colors[ImGuiCol_Tab] = panel;
     colors[ImGuiCol_TabHovered] = hover;
-    colors[ImGuiCol_TabSelected] = raised;
+    colors[ImGuiCol_TabSelected] = base;
     colors[ImGuiCol_TabSelectedOverline] = accent;
     colors[ImGuiCol_TabDimmed] = base;
     colors[ImGuiCol_TabDimmedSelected] = panel;
@@ -249,10 +236,89 @@ void applyEditorThemeColors(const EditorThemeSettings& settings)
     colors[ImGuiCol_TableBorderStrong] = border;
     colors[ImGuiCol_TableBorderLight] = border;
     colors[ImGuiCol_TableRowBg] = ImVec4(0, 0, 0, 0);
-    colors[ImGuiCol_TableRowBgAlt] = ImVec4(1, 1, 1, 0.025f);
+    colors[ImGuiCol_TableRowBgAlt] = ImVec4(0, 0, 0, 0.035f);
     colors[ImGuiCol_TextSelectedBg] = selection;
     colors[ImGuiCol_NavCursor] = accent;
     colors[ImGuiCol_TreeLines] = border;
+}
+
+bool editorButton(const char* label, const ImVec2& size)
+{
+    if (ImGui::GetCurrentWindow()->SkipItems)
+        return false;
+    const bool clicked = ImGui::Button(label, size);
+    if (!ImGui::IsItemVisible())
+        return clicked;
+
+    // Paint only the inner bevel; Button owns input, focus, tooltips and navigation.
+    const bool pressed = ImGui::IsItemActive();
+    const float pixel = std::max(1.0f, ImGui::GetStyle().FontScaleDpi);
+    ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    a.x += pixel; a.y += pixel;
+    b.x -= pixel * 2; b.y -= pixel * 2;
+    if (b.x <= a.x || b.y <= a.y)
+        return clicked;
+    const ImVec4 face = ImGui::GetStyleColorVec4(ImGuiCol_Button);
+    const ImU32 light = ImGui::GetColorU32(ImLerp(face, ImVec4(1, 1, 1, 1), 0.8f));
+    const ImU32 dark = ImGui::GetColorU32(ImLerp(face, ImVec4(0, 0, 0, 1), 0.35f));
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddLine(a, ImVec2(b.x, a.y), pressed ? dark : light, pixel);
+    draw->AddLine(a, ImVec2(a.x, b.y), pressed ? dark : light, pixel);
+    draw->AddLine(ImVec2(a.x, b.y), b, pressed ? light : dark, pixel);
+    draw->AddLine(ImVec2(b.x, a.y), b, pressed ? light : dark, pixel);
+    return clicked;
+}
+
+bool beginEditorWindow(const char* title, bool* open, ImGuiWindowFlags flags)
+{
+    const bool visible = ImGui::Begin(title, open, flags);
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (!visible || (flags & ImGuiWindowFlags_NoTitleBar))
+        return visible;
+
+    ImRect bar = window->TitleBarRect();
+    const float pixel = std::max(1.0f, ImGui::GetStyle().FontScaleDpi);
+    float start = bar.Min.x + 24.0f * pixel;
+    float end = bar.Max.x - 24.0f * pixel;
+    if (window->DockIsActive)
+    {
+        // Only the visible tab paints, and only in the unused tail of the tab bar.
+        if (!window->DockTabIsVisible || !window->DockNode || !window->DockNode->TabBar)
+            return visible;
+        const ImGuiTabBar* tabs = window->DockNode->TabBar;
+        bar = tabs->BarRect;
+        start = bar.Min.x + tabs->WidthAllTabs + 12.0f * pixel;
+        end = bar.Max.x - 8.0f * pixel;
+    }
+    if (bar.GetHeight() <= 0 || end - start < 24.0f * pixel)
+        return visible;
+
+    const float titleWidth = ImGui::CalcTextSize(title, nullptr, true).x;
+    const float titleLeft = (bar.Min.x + bar.Max.x - titleWidth) * 0.5f - 8.0f * pixel;
+    const float titleRight = titleLeft + titleWidth + 16.0f * pixel;
+    ImDrawList* draw = window->DrawList;
+    draw->PushClipRect(bar.Min, bar.Max, false);
+    const ImVec4 face = ImGui::GetStyleColorVec4(ImGuiCol_TitleBgActive);
+    const ImU32 dark = ImGui::GetColorU32(ImLerp(face, ImVec4(0, 0, 0, 1), 0.18f));
+    const ImU32 light = ImGui::GetColorU32(ImLerp(face, ImVec4(1, 1, 1, 1), 0.65f));
+    const auto stripe = [&](float left, float right, float y)
+    {
+        if (right <= left) return;
+        draw->AddLine(ImVec2(left, y), ImVec2(right, y), dark, pixel);
+        draw->AddLine(ImVec2(left, y + pixel), ImVec2(right, y + pixel), light, pixel);
+    };
+    for (float y = bar.Min.y + 6.0f * pixel; y < bar.Max.y - 4.0f * pixel; y += 4.0f * pixel)
+    {
+        if (window->DockIsActive)
+            stripe(start, end, y);
+        else
+        {
+            stripe(start, std::min(end, titleLeft), y);
+            stripe(std::max(start, titleRight), end, y);
+        }
+    }
+    draw->PopClipRect();
+    return visible;
 }
 
 } // namespace rubia::editor

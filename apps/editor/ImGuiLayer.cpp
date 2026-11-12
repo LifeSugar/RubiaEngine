@@ -8,6 +8,8 @@
 #include <imgui_impl_glfw.h>
 
 #include <filesystem>
+#include <cstdlib>
+#include <cstdio>
 #include <iostream>
 #include <stdexcept>
 
@@ -18,28 +20,37 @@ namespace
 
 void loadEditorFont(ImGuiIO& io)
 {
-    constexpr float fontSize = 16.0f;
-    const std::filesystem::path relativePath =
-        "assets/fonts/FiraCode/FiraCode-Regular.ttf";
-    const std::filesystem::path candidates[] = {
-        relativePath,
-        std::filesystem::path(PROJECT_SOURCE_DIR) / relativePath};
-
+    constexpr float fontSize = 15.0f;
     ImFontConfig fontConfig;
     fontConfig.Flags |= ImFontFlags_NoLoadError;
+    // Use a compact proportional UI face. Do not redistribute platform fonts.
+    const char* windowsDirectory = std::getenv("WINDIR");
+    const std::filesystem::path candidates[] = {
+        windowsDirectory ? std::filesystem::path(windowsDirectory) / "Fonts/tahoma.ttf" : std::filesystem::path{},
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"};
     for (const auto& path : candidates)
     {
-        if (ImFont* font = io.Fonts->AddFontFromFileTTF(
-                path.u8string().c_str(), fontSize, &fontConfig))
+        std::error_code error;
+        if (path.empty() || !std::filesystem::is_regular_file(path, error)) continue;
+        if (ImFont* font = io.Fonts->AddFontFromFileTTF(path.u8string().c_str(), fontSize, &fontConfig))
         {
             io.FontDefault = font;
-            return;
+            break;
         }
     }
+    if (!io.FontDefault)
+    {
+        fontConfig.SizePixels = fontSize;
+        io.FontDefault = io.Fonts->AddFontDefault(&fontConfig);
+    }
 
-    std::cerr << "[ImGui] Could not load Fira Code; using the default font\n";
-    fontConfig.SizePixels = fontSize;
-    io.FontDefault = io.Fonts->AddFontDefault(&fontConfig);
+    const std::filesystem::path relativeMonoPath = "assets/fonts/FiraCode/FiraCode-Regular.ttf";
+    const std::filesystem::path monoPaths[] = {
+        relativeMonoPath, std::filesystem::path(PROJECT_SOURCE_DIR) / relativeMonoPath};
+    std::snprintf(fontConfig.Name, sizeof(fontConfig.Name), "Rubia Console");
+    for (const auto& path : monoPaths)
+        if (io.Fonts->AddFontFromFileTTF(path.u8string().c_str(), 14.0f, &fontConfig)) break;
 }
 
 } // namespace

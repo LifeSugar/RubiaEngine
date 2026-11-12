@@ -1,3 +1,4 @@
+#include "EditorTheme.hpp"
 #include "panels/SceneHierarchyPanel.hpp"
 
 #include "asset/AssetManager.hpp"
@@ -259,7 +260,7 @@ void SceneHierarchyPanel::draw(
     EditorSelection& selection,
     bool* open, EditorAssetController* controller)
 {
-    const bool visible = ImGui::Begin("Scene Hierarchy", open);
+    const bool visible = beginEditorWindow("Scene Hierarchy", open);
     if (!visible)
     {
         ImGui::End();

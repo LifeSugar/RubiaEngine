@@ -1,3 +1,4 @@
+#include "EditorTheme.hpp"
 #include "inspectors/TextureInspector.hpp"
 
 #include "asset/AssetManager.hpp"
@@ -147,7 +148,7 @@ bool drawUIntSlider(
 
 void drawValidationMessage(const char* message)
 {
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.25f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.60f, 0.27f, 0.08f, 1.0f));
     ImGui::TextWrapped("%s", message);
     ImGui::PopStyleColor();
 }
@@ -479,7 +480,7 @@ std::optional<importer::texture::TextureReimportRequest> TextureInspector::draw(
         importRecord != nullptr && importRecord->reimporting;
     ImGui::BeginDisabled(
         importRecord == nullptr || invalidSettings || reimporting);
-    const bool reimport = ImGui::Button(
+    const bool reimport = editorButton(
         reimporting ? "Cooking..." : "Reimport",
         ImVec2(-1.0f, 0.0f));
     ImGui::EndDisabled();

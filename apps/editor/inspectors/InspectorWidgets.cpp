@@ -1,3 +1,4 @@
+#include "EditorTheme.hpp"
 #include "inspectors/InspectorWidgets.hpp"
 
 #include "asset/TextureAsset.hpp"
@@ -77,7 +78,7 @@ bool drawReference(const char* label, const char* value, int id)
 {
     ImGui::PushID(id);
     drawProperty(label, value);
-    const bool clicked = ImGui::Button("Inspect asset", ImVec2(-1.0f, 0.0f));
+    const bool clicked = editorButton("Inspect asset", ImVec2(-1.0f, 0.0f));
     ImGui::PopID();
     return clicked;
 }

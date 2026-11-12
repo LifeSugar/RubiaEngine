@@ -1,3 +1,4 @@
+#include "EditorTheme.hpp"
 #include "EditorLayer.hpp"
 #include "panels/PreferencesPanel.hpp"
 
@@ -200,7 +201,7 @@ void EditorLayer::drawDockSpace()
 std::optional<float> EditorLayer::drawSceneViewport(
     const ApplicationGuiContext& context)
 {
-    const bool visible = ImGui::Begin(
+    const bool visible = beginEditorWindow(
         "Scene Viewport",
         &showSceneViewport_,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -210,7 +211,7 @@ std::optional<float> EditorLayer::drawSceneViewport(
         return std::nullopt;
     }
 
-    if (ImGui::Button("Frame Scene")) assetController_.frameScene();
+    if (editorButton("Frame Scene")) assetController_.frameScene();
     ImGui::SameLine();
     ImGui::TextDisabled("SCENE");
     ImGui::SameLine();
@@ -271,7 +272,7 @@ std::optional<float> EditorLayer::drawSceneViewport(
 void EditorLayer::drawRendererStats(
     const ApplicationGuiContext& context)
 {
-    ImGui::Begin("Renderer Stats", &showRendererStats_);
+    beginEditorWindow("Renderer Stats", &showRendererStats_);
     static_cast<void>(context);
     const ImGuiIO& io = ImGui::GetIO();
     if (sceneViewportWidth_ > 0 && sceneViewportHeight_ > 0)

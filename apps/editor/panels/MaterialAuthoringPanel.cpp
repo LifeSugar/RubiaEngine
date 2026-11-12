@@ -1,3 +1,4 @@
+#include "EditorTheme.hpp"
 #include "panels/MaterialAuthoringPanel.hpp"
 #include <algorithm>
 #include <cstring>
@@ -104,7 +105,7 @@ void MaterialAuthoringPanel::draw(const asset::AssetManager &assets,
     shaderCombo("Vertex shader", assets, asset::ShaderStage::Vertex, vertex_);
     shaderCombo("Pixel shader", assets, asset::ShaderStage::Fragment, fragment_);
     ImGui::BeginDisabled(!vertex_ || !fragment_ || controller.busy());
-    if (ImGui::Button("Build Program"))
+    if (editorButton("Build Program"))
         controller.buildProgram(vertex_, fragment_);
     ImGui::EndDisabled();
     if (program_ != controller.draftProgram())
@@ -156,7 +157,7 @@ void MaterialAuthoringPanel::draw(const asset::AssetManager &assets,
         ImGui::PopID();
     }
     ImGui::BeginDisabled(controller.busy());
-    if (ImGui::Button("Generate Material Fields"))
+    if (editorButton("Generate Material Fields"))
     {
         asset::MaterialTemplateAsset::CreateInfo info;
         info.name = "Editor Material Template";
@@ -215,7 +216,7 @@ void MaterialAuthoringPanel::draw(const asset::AssetManager &assets,
     for (const auto &texture : material_.textures)
         missing |= !assets.contains(texture.texture);
     ImGui::BeginDisabled(controller.busy() || missing || name_[0] == '\0');
-    if (ImGui::Button("Create Material Asset"))
+    if (editorButton("Create Material Asset"))
     {
         material_.name = name_.data();
         controller.createMaterial(material_);

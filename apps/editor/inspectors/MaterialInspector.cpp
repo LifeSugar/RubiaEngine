@@ -1,3 +1,4 @@
+#include "EditorTheme.hpp"
 #include "inspectors/MaterialInspector.hpp"
 
 #include "asset/AssetManager.hpp"
@@ -357,7 +358,7 @@ MaterialInspectorOutput MaterialInspector::drawMaterialAsset(
         const bool reimportDisabled =
             reimportBatch.requests.empty() || reimportBatch.busy;
         ImGui::BeginDisabled(reimportDisabled);
-        if (ImGui::Button("Reimport All", ImVec2(-1.0f, 0.0f)))
+        if (editorButton("Reimport All", ImVec2(-1.0f, 0.0f)))
         {
             output.textureReimports = reimportBatch.requests;
         }

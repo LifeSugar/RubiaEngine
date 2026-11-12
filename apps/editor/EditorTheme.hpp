@@ -2,11 +2,12 @@
 
 #include <array>
 #include <cstddef>
+#include <imgui.h>
 
 namespace rubia::editor
 {
 
-enum class EditorThemePreset { Rubia, Midnight, Graphite, Count };
+enum class EditorThemePreset { Platinum, Slate, Parchment, Count };
 enum class EditorThemeColor
 {
     Background, Panel, Control, Hover, Border, Accent, Selection, Text, MutedText, Count
@@ -14,7 +15,7 @@ enum class EditorThemeColor
 
 struct EditorThemeSettings
 {
-    EditorThemePreset preset = EditorThemePreset::Rubia;
+    EditorThemePreset preset = EditorThemePreset::Platinum;
     std::array<std::array<float, 4>, static_cast<std::size_t>(EditorThemeColor::Count)> colors{};
 };
 
@@ -26,5 +27,9 @@ void applyEditorTheme(EditorThemeSettings& settings);
 // Runtime changes only affect colors, preserving geometry and font scaling.
 void applyEditorThemeColors(const EditorThemeSettings& settings);
 [[nodiscard]] EditorThemeSettings* currentEditorThemeSettings();
+
+// These preserve native ImGui interaction, navigation and item IDs.
+bool editorButton(const char* label, const ImVec2& size = ImVec2(0, 0));
+bool beginEditorWindow(const char* title, bool* open = nullptr, ImGuiWindowFlags flags = 0);
 
 } // namespace rubia::editor

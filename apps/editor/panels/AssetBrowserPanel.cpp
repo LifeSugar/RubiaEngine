@@ -1,3 +1,4 @@
+#include "EditorTheme.hpp"
 #include "panels/AssetBrowserPanel.hpp"
 
 #include "asset/AssetManager.hpp"
@@ -76,7 +77,7 @@ std::vector<importer::texture::TextureReimportRequest> AssetBrowserPanel::draw(
     bool* open, EditorAssetController* controller)
 {
     std::vector<importer::texture::TextureReimportRequest> reimports;
-    const bool visible = ImGui::Begin("Assets", open);
+    const bool visible = beginEditorWindow("Assets", open);
     if (!visible)
     {
         ImGui::End();
@@ -99,7 +100,7 @@ std::vector<importer::texture::TextureReimportRequest> AssetBrowserPanel::draw(
     ImGui::BeginDisabled(reimportDisabled);
     const std::string buttonLabel =
         "Reimport All (" + std::to_string(batch.requests.size()) + ")";
-    if (ImGui::Button(buttonLabel.c_str()))
+    if (editorButton(buttonLabel.c_str()))
     {
         reimports = batch.requests;
     }
@@ -261,11 +262,11 @@ std::vector<importer::texture::TextureReimportRequest> AssetBrowserPanel::draw(
 void AssetBrowserPanel::drawFiles(const asset::AssetManager&, EditorAssetController& controller)
 {
     ImGui::InputTextWithHint("##Directory", "Absolute directory path (any drive)", directory_.data(), directory_.size());
-    if (ImGui::Button("Open Directory")) controller.browse(std::filesystem::u8path(directory_.data()));
+    if (editorButton("Open Directory")) controller.browse(std::filesystem::u8path(directory_.data()));
     ImGui::SameLine();
-    if (ImGui::Button("Up") && !controller.directory().empty()) controller.browse(controller.directory().parent_path());
+    if (editorButton("Up") && !controller.directory().empty()) controller.browse(controller.directory().parent_path());
     ImGui::SameLine();
-    if (ImGui::Button("Refresh") && !controller.directory().empty()) controller.browse(controller.directory());
+    if (editorButton("Refresh") && !controller.directory().empty()) controller.browse(controller.directory());
     ImGui::TextWrapped("%s", controller.directory().string().c_str());
     ImGui::Combo("Shader stage", &shaderStage_, "Vertex (VS)\0Pixel (PS)\0");
     ImGui::InputText("Entry point", entryPoint_.data(), entryPoint_.size());

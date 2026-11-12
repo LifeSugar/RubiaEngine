@@ -78,19 +78,23 @@ int main()
             checkPresetRoundTrip(static_cast<EditorThemePreset>(index));
         }
         Session session;
-        const auto defaults = makeEditorThemePreset(EditorThemePreset::Rubia);
+        const auto defaults = makeEditorThemePreset(EditorThemePreset::Platinum);
         ImGui::LoadIniSettingsFromMemory(
-            "[RubiaTheme][Appearance]\nPreset=999\n"
+            "[RubiaPlatinumTheme][Appearance]\nPreset=999\n"
             "Color0=nan,0,0,1\nColor1=-1,0,0,1\nColor2=0,2,0,1\n"
             "Color3=0,0\nColor99=0,0,0,1\nColor4=0,0,0,1junk\n"
-            "[RubiaTheme][Unknown]\nColor5=1,0,0,1\n");
+            "[RubiaPlatinumTheme][Unknown]\nColor5=1,0,0,1\n");
         require(session.settings.colors == defaults.colors &&
             session.settings.preset == defaults.preset,
             "Invalid or unknown settings should retain safe defaults");
-        session.settings = makeEditorThemePreset(EditorThemePreset::Midnight);
+        session.settings = makeEditorThemePreset(EditorThemePreset::Slate);
         ImGui::LoadIniSettingsFromMemory("[Window][Old Layout]\nPos=10,10\n");
         require(session.settings.colors == defaults.colors,
             "Existing layout files without appearance settings must use defaults");
+        ImGui::LoadIniSettingsFromMemory(
+            "[RubiaTheme][Appearance]\nPreset=0\nColor5=0.655,0.608,0.961,1\n");
+        require(session.settings.colors == defaults.colors,
+            "Legacy dark appearance should migrate to Platinum");
         std::cout << "[OK] Theme persistence, invalid settings and DPI preservation passed\n";
         return 0;
     }
