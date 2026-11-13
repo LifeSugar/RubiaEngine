@@ -8,6 +8,7 @@
 #endif
 
 #include <optional>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -60,6 +61,13 @@ public:
     [[nodiscard]] VkPhysicalDevice physical() const noexcept { return physicalDevice_; }
     /// Returns the owned logical-device handle.
     [[nodiscard]] VkDevice get() const noexcept { return device_; }
+    /// Stable for this native device lifetime, shared by all RHI adapter facades.
+    [[nodiscard]] uint64_t lifetimeId() const noexcept { return lifetimeId_; }
+    /// Features actually enabled on this logical device, not merely supported.
+    [[nodiscard]] const VkPhysicalDeviceFeatures& enabledFeatures() const noexcept
+    {
+        return enabledFeatures_;
+    }
 #if VK_RENDERER_USE_VMA
     /// Returns the allocator associated with the logical device.
     [[nodiscard]] VmaAllocator allocator() const noexcept { return allocator_; }
@@ -115,6 +123,8 @@ private:
     VkPhysicalDevice physicalDevice_ = VK_NULL_HANDLE;
     /// Owned logical-device handle.
     VkDevice device_ = VK_NULL_HANDLE;
+    uint64_t lifetimeId_ = 0;
+    VkPhysicalDeviceFeatures enabledFeatures_{};
 #if VK_RENDERER_USE_VMA
     /// VMA allocator bound to the physical and logical device.
     VmaAllocator allocator_ = VK_NULL_HANDLE;

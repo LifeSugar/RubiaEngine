@@ -1,10 +1,12 @@
 #pragma once
+#include "rubia/ShaderArtifact.hpp"
 
 #include "EditorFwd.hpp"
 #include "asset/AssetFwd.hpp"
 #include "texture/TextureImportSettings.hpp"
 
 #include <filesystem>
+#include <functional>
 
 namespace rubia::editor
 {
@@ -19,6 +21,8 @@ struct DemoContent
     asset::ShaderAssetHandle pbrFragmentShader;
     asset::ShaderAssetHandle presentVertexShader;
     asset::ShaderAssetHandle presentFragmentShader;
+    asset::ShaderProgramAssetHandle pbrProgram;
+    asset::ShaderProgramAssetHandle presentProgram;
     asset::MaterialTemplateAssetHandle materialTemplate;
     asset::MaterialAssetHandle defaultMaterial;
     asset::ModelAssetHandle model;
@@ -50,13 +54,24 @@ public:
         std::filesystem::path presentFragmentShader;
         std::filesystem::path cookedAssetDirectory;
         TextureImportPolicy textureImportPolicy;
+        ShaderTarget shaderTarget;
     };
 
     [[nodiscard]] static DemoContent load(
         asset::AssetManager& assets,
         scene::Scene& scene,
         const CreateInfo& createInfo,
-        importer::texture::TextureImportRegistry* textureImports = nullptr);
+        importer::texture::TextureImportRegistry* textureImports = nullptr,
+        const std::function<void()>& checkpoint = {});
+
+    /// Renderer defaults can be prepared independently of any model file.
+    [[nodiscard]] static DemoContent loadBuiltins(
+        asset::AssetManager& assets, const CreateInfo& createInfo);
+    [[nodiscard]] static DemoContent loadModel(
+        asset::AssetManager& assets, scene::Scene& scene,
+        const CreateInfo& createInfo, DemoContent builtins,
+        importer::texture::TextureImportRegistry* textureImports = nullptr,
+        const std::function<void()>& checkpoint = {});
 };
 
 } // namespace rubia::editor

@@ -1,10 +1,25 @@
+# Primitive GPU implementation. It must build without Engine, Renderer, a window
+# toolkit, or GUI libraries. Native headers are intentionally exposed only here.
 add_library(rubia_rhi_vulkan STATIC
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanPresentation.cpp
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanPresentation.hpp
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanResourceDevice.cpp
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanResourceDevice.hpp
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanPipelineDevice.cpp
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanPipelineDevice.hpp
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/PipelineNativeDescription.cpp
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/PipelineNativeDescription.hpp
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/PipelineConversions.hpp
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanCommandEncoder.hpp
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanPass.hpp
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanCommandEncoder.cpp
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanPass.cpp
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanRenderEncoder.cpp
+    ${PROJECT_SOURCE_DIR}/rhi/vulkan/VulkanRenderEncoder.hpp
     Buffer.cpp
     Buffer.hpp
     CommandPool.cpp
     CommandPool.hpp
-    DefaultPipelineFactory.cpp
-    DefaultPipelineFactory.hpp
     DescriptorPool.cpp
     DescriptorPool.hpp
     DescriptorSetLayout.cpp
@@ -17,24 +32,20 @@ add_library(rubia_rhi_vulkan STATIC
     Framebuffer.hpp
     FrameContext.cpp
     FrameContext.hpp
-    FrameDataResources.cpp
-    FrameDataResources.hpp
-    GpuMaterial.cpp
-    GpuMaterial.hpp
-    GpuTexture.cpp
-    GpuTexture.hpp
     GraphicsPipeline.cpp
     GraphicsPipeline.hpp
+    GraphicsPipelineState.hpp
+    PipelineKeyData.hpp
+    GraphicsPipelineKey.cpp
+    GraphicsPipelineKey.hpp
+    GraphicsPipelineCache.cpp
+    GraphicsPipelineCache.hpp
     Image.cpp
     Image.hpp
     ImageView.cpp
     ImageView.hpp
-    Mesh.cpp
-    Mesh.hpp
     PerFrameBuffer.cpp
     PerFrameBuffer.hpp
-    RenderAssetCache.cpp
-    RenderAssetCache.hpp
     RenderPass.cpp
     RenderPass.hpp
     RenderTarget.cpp
@@ -47,39 +58,79 @@ add_library(rubia_rhi_vulkan STATIC
     Swapchain.hpp
     SwapchainResources.cpp
     SwapchainResources.hpp
-    TextureVkFormat.cpp
-    TextureVkFormat.hpp
+    "${PROJECT_SOURCE_DIR}/rhi/vulkan/SpirvCode.hpp"
+    UploadValidation.cpp
+    UploadValidation.hpp
     UploadContext.cpp
     UploadContext.hpp
-    VmaImplementation.cpp
-    VulkanApplicationGuiRenderBridge.cpp
-    VulkanApplicationGuiRenderBridge.hpp
-    VulkanContext.cpp
-    VulkanContext.hpp
-    VulkanDrawList.hpp
-    VulkanDrawListCompiler.cpp
-    VulkanDrawListCompiler.hpp
+    VulkanUploadTypes.hpp
+    VulkanUploadService.hpp
+    VulkanUploadService.cpp
     VulkanMemoryConfig.hpp
-    VulkanRenderer.cpp
-    VulkanRenderer.hpp
-    Window.cpp
-    Window.hpp
+    VmaImplementation.cpp
 )
 add_library(Rubia::RhiVulkan ALIAS rubia_rhi_vulkan)
-
 target_include_directories(rubia_rhi_vulkan PUBLIC
     "${PROJECT_SOURCE_DIR}/renderer"
+    "${PROJECT_SOURCE_DIR}/rhi"
+    "${PROJECT_SOURCE_DIR}/rhi/vulkan"
 )
 target_compile_definitions(rubia_rhi_vulkan PUBLIC
     VK_RENDERER_USE_VMA=$<BOOL:${VK_RENDERER_USE_VMA}>
 )
-target_link_libraries(rubia_rhi_vulkan
+target_link_libraries(rubia_rhi_vulkan PUBLIC
+    Rubia::Rhi
+    Vulkan::Vulkan
+    VulkanMemoryAllocator
+    rubia_project_options
+)
+
+# Temporary application/Renderer integration. Asset semantics, legacy facade
+# headers, presentation policy, and the GLFW composition root stay above RHI.
+add_library(rubia_renderer_vulkan STATIC
+    PipelineDescriptionAdapter.cpp
+    PipelineDescriptionAdapter.hpp
+    DefaultPipelineFactory.cpp
+    DefaultPipelineFactory.hpp
+    VulkanViewportCapture.cpp
+    FrameDataResources.hpp
+    GpuPreparedAssets.hpp
+    GpuMaterial.hpp
+    GpuTexture.cpp
+    GpuTexture.hpp
+    Mesh.hpp
+    RenderAssetCache.hpp
+    RetiredResources.hpp
+    TextureVkFormat.cpp
+    TextureVkFormat.hpp
+    TextureUploadBuilder.cpp
+    TextureUploadBuilder.hpp
+    VulkanApplicationGuiRenderBridge.hpp
+    VulkanContext.cpp
+    VulkanContext.hpp
+    VulkanDrawListRecorder.hpp
+    VulkanDrawListRecorder.cpp
+    VulkanPipelinePreparation.hpp
+    VulkanDrawList.hpp
+    VulkanDrawListCompiler.hpp
+    VulkanGuiCommandContext.hpp
+    VulkanRenderer.cpp
+    VulkanRenderer.hpp
+    IResourcePreparation.hpp
+    ResourcePreparationTypes.hpp
+    VulkanResourcePreparation.hpp
+    VulkanResourcePreparationBridge.hpp
+    VulkanScenePreparation.hpp
+    Window.cpp
+    Window.hpp
+)
+add_library(Rubia::RendererVulkan ALIAS rubia_renderer_vulkan)
+target_link_libraries(rubia_renderer_vulkan
     PUBLIC
-        Rubia::Engine
-        Vulkan::Vulkan
-        VulkanMemoryAllocator
+        Rubia::Renderer
+        Rubia::RhiVulkan
+        Rubia::PlatformGlfw
         glfw
-        rubia_project_options
     PRIVATE
-        imgui
+        Rubia::VulkanGlfw
 )

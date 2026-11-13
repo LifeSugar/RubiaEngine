@@ -3,6 +3,8 @@
 #include "vulkan/Swapchain.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <limits>
 #include <array>
 #include <iostream>
 #include <set>
@@ -14,6 +16,18 @@ namespace rubia::rhi::vulkan
 {
 namespace
 {
+
+uint64_t allocateDeviceLifetime()
+{
+    static std::atomic<uint64_t> next{1};
+    auto value = next.load(std::memory_order_relaxed);
+    do
+    {
+        if (value == std::numeric_limits<uint64_t>::max())
+            throw std::overflow_error("Vulkan device lifetime identity exhausted");
+    } while (!next.compare_exchange_weak(value, value + 1, std::memory_order_relaxed));
+    return value;
+}
 
 std::vector<const char*> requiredDeviceExtensions()
 {
@@ -47,6 +61,8 @@ Device::~Device()
 Device::Device(Device&& other) noexcept
     : physicalDevice_(std::exchange(other.physicalDevice_, VK_NULL_HANDLE)),
       device_(std::exchange(other.device_, VK_NULL_HANDLE)),
+      lifetimeId_(std::exchange(other.lifetimeId_, 0)),
+      enabledFeatures_(std::exchange(other.enabledFeatures_, VkPhysicalDeviceFeatures{})),
 #if VK_RENDERER_USE_VMA
       allocator_(std::exchange(other.allocator_, VK_NULL_HANDLE)),
 #endif
@@ -64,6 +80,8 @@ Device& Device::operator=(Device&& other) noexcept
         reset();
         physicalDevice_ = std::exchange(other.physicalDevice_, VK_NULL_HANDLE);
         device_ = std::exchange(other.device_, VK_NULL_HANDLE);
+        lifetimeId_ = std::exchange(other.lifetimeId_, 0);
+        enabledFeatures_ = std::exchange(other.enabledFeatures_, VkPhysicalDeviceFeatures{});
 #if VK_RENDERER_USE_VMA
         allocator_ = std::exchange(other.allocator_, VK_NULL_HANDLE);
 #endif
@@ -179,6 +197,7 @@ void Device::create(
     createInfo.ppEnabledExtensionNames = deviceExtensions.data();
     createInfo.pEnabledFeatures = &features;
 
+    const uint64_t newLifetime = allocateDeviceLifetime();
     VkDevice newDevice = VK_NULL_HANDLE;
     if (vkCreateDevice(selectedPhysicalDevice, &createInfo, nullptr, &newDevice) != VK_SUCCESS)
     {
@@ -215,6 +234,8 @@ void Device::create(
     reset();
     physicalDevice_ = selectedPhysicalDevice;
     device_ = newDevice;
+    lifetimeId_ = newLifetime;
+    enabledFeatures_ = features;
 #if VK_RENDERER_USE_VMA
     allocator_ = newAllocator;
 #endif
@@ -239,6 +260,8 @@ void Device::reset() noexcept
 
     physicalDevice_ = VK_NULL_HANDLE;
     device_ = VK_NULL_HANDLE;
+    lifetimeId_ = 0;
+    enabledFeatures_ = {};
 #if VK_RENDERER_USE_VMA
     allocator_ = VK_NULL_HANDLE;
 #endif

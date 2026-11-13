@@ -222,8 +222,6 @@ void Camera::recalculateProjectionMatrix() const
         m_config.nearPlane,
         m_config.farPlane
     );
-    // Vulkan NDC: Y axis points down (flip vs OpenGL)
-    m_projectionMatrix[1][1] *= -1.0f;
     m_isProjectionDirty = false;
 }
 

@@ -64,6 +64,9 @@ struct GLBTexture {
 // ── PBR 材质（兼容 glTF 2.0 metallic-roughness 工作流） ────────────────────
 struct GLBMaterial {
     std::string name;
+    std::string alphaMode = "OPAQUE";
+    float alphaCutoff = 0.5f;
+    bool doubleSided = false;
 
     // PBR 因子
     glm::vec4 baseColorFactor = glm::vec4(1);

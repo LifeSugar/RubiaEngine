@@ -1,3 +1,4 @@
+#include "EditorTheme.hpp"
 #include "inspectors/MaterialInspector.hpp"
 
 #include "asset/AssetManager.hpp"
@@ -304,7 +305,7 @@ MaterialInspectorOutput MaterialInspector::drawMaterialAsset(
                 0.32f);
             ImGui::TableHeadersRow();
 
-            for (asset::ShaderAssetHandle shaderHandle : materialTemplate->shaders())
+            for (asset::ShaderAssetHandle shaderHandle : assets.shaderProgram(materialTemplate->program()).shaders())
             {
                 ImGui::PushID(static_cast<int>(shaderHandle.index));
                 ImGui::TableNextRow();
@@ -357,7 +358,7 @@ MaterialInspectorOutput MaterialInspector::drawMaterialAsset(
         const bool reimportDisabled =
             reimportBatch.requests.empty() || reimportBatch.busy;
         ImGui::BeginDisabled(reimportDisabled);
-        if (ImGui::Button("Reimport All", ImVec2(-1.0f, 0.0f)))
+        if (editorButton("Reimport All", ImVec2(-1.0f, 0.0f)))
         {
             output.textureReimports = reimportBatch.requests;
         }
@@ -561,7 +562,7 @@ std::optional<InspectorTarget> MaterialInspector::drawMaterialTemplate(
         static_cast<uint32_t>(materialTemplate.textureSlots().size()));
     drawProperty(
         "Shaders",
-        static_cast<uint32_t>(materialTemplate.shaders().size()));
+        static_cast<uint32_t>(assets.shaderProgram(materialTemplate.program()).shaders().size()));
     return std::nullopt;
 }
 

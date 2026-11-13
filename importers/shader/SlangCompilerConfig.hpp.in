@@ -1,0 +1,5 @@
+#pragma once
+namespace rubia::importer::shader::detail
+{
+inline constexpr const char* slangCompilerExecutable = u8R"rubia(@SlangCompiler_EXECUTABLE@)rubia";
+}

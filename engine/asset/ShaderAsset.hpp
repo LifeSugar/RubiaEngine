@@ -1,6 +1,7 @@
 #pragma once
 
 #include "asset/ShaderInterface.hpp"
+#include "rubia/ShaderArtifact.hpp"
 
 #include <cstdint>
 #include <string>
@@ -9,7 +10,7 @@
 namespace rubia::asset
 {
 
-/// Source-independent ownership wrapper for SPIR-V shader bytecode.
+/// Source-independent ownership of compiled code and its target-specific reflection.
 class ShaderAsset final
 {
 public:
@@ -18,7 +19,7 @@ public:
         std::string name;
         ShaderStage stage = ShaderStage::Vertex;
         std::string entryPoint = "main";
-        std::vector<uint32_t> spirv;
+        ShaderArtifact artifact;
         ShaderInterface interface;
     };
 
@@ -31,18 +32,18 @@ public:
     [[nodiscard]] const std::string& name() const noexcept { return name_; }
     [[nodiscard]] ShaderStage stage() const noexcept { return stage_; }
     [[nodiscard]] const std::string& entryPoint() const noexcept { return entryPoint_; }
-    [[nodiscard]] const std::vector<uint32_t>& spirv() const noexcept { return spirv_; }
+    [[nodiscard]] const ShaderArtifact& artifact() const noexcept { return artifact_; }
     [[nodiscard]] const ShaderInterface& interface() const noexcept
     {
         return interface_;
     }
-    [[nodiscard]] explicit operator bool() const noexcept { return !spirv_.empty(); }
+    [[nodiscard]] explicit operator bool() const noexcept { return !artifact_.bytes.empty(); }
 
 private:
     std::string name_;
     ShaderStage stage_ = ShaderStage::Vertex;
     std::string entryPoint_ = "main";
-    std::vector<uint32_t> spirv_;
+    ShaderArtifact artifact_;
     ShaderInterface interface_;
 };
 

@@ -1,4 +1,5 @@
 #include "shader/SpirvReflection.hpp"
+#include "shader/ShaderInterfaceSignature.hpp"
 
 #include <spirv_cross.hpp>
 
@@ -29,6 +30,8 @@ namespace
 [[nodiscard]] asset::ShaderValueType valueType(
     const spirv_cross::SPIRType& type) noexcept
 {
+    if (!type.array.empty() || (type.width != 32 && type.basetype != spirv_cross::SPIRType::Boolean))
+        return asset::ShaderValueType::Unknown;
     using BaseType = spirv_cross::SPIRType::BaseType;
     if (type.columns == 4 && type.vecsize == 4 &&
         type.basetype == BaseType::Float)
@@ -117,6 +120,43 @@ void appendResource(
     });
 }
 
+// Hash physical layouts recursively, including array/matrix strides. Names and
+// SPIR-V IDs are deliberately excluded from compatibility checks.
+uint64_t physicalLayoutSignature(
+    const spirv_cross::Compiler& compiler, const spirv_cross::SPIRType& type)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    const auto add = [&](uint64_t value)
+    {
+        for (uint32_t i = 0; i < 8; ++i)
+        {
+            hash ^= static_cast<uint8_t>(value >> (i * 8));
+            hash *= UINT64_C(1099511628211);
+        }
+    };
+    add(type.basetype); add(type.width); add(type.vecsize); add(type.columns);
+    add(type.array.size());
+    for (std::size_t i = 0; i < type.array.size(); ++i)
+    {
+        if (i >= type.array_size_literal.size() || !type.array_size_literal[i])
+            throw std::invalid_argument("specialized buffer array lengths are unsupported");
+        add(type.array[i]);
+    }
+    if (!type.array.empty())
+        add(compiler.get_decoration(type.self, spv::DecorationArrayStride));
+    add(type.member_types.size());
+    for (uint32_t i = 0; i < type.member_types.size(); ++i)
+    {
+        add(compiler.type_struct_member_offset(type, i));
+        add(compiler.get_member_decoration(type.self, i, spv::DecorationMatrixStride));
+        add(compiler.has_member_decoration(type.self, i, spv::DecorationRowMajor));
+        const auto& member = compiler.get_type(type.member_types[i]);
+        if (!member.array.empty()) add(compiler.type_struct_member_array_stride(type, i));
+        add(physicalLayoutSignature(compiler, member));
+    }
+    return hash;
+}
+
 void appendParameterBlock(
     asset::ShaderInterface& result,
     const spirv_cross::Compiler& compiler,
@@ -133,6 +173,7 @@ void appendParameterBlock(
     block.byteSize = static_cast<uint32_t>(
         compiler.get_declared_struct_size(blockType));
     block.stage = result.stage;
+    block.layoutSignature = physicalLayoutSignature(compiler, blockType);
     block.members.reserve(blockType.member_types.size());
     for (uint32_t memberIndex = 0;
          memberIndex < static_cast<uint32_t>(blockType.member_types.size());
@@ -147,7 +188,10 @@ void appendParameterBlock(
             static_cast<uint32_t>(
                 compiler.get_declared_struct_member_size(
                     blockType,
-                    memberIndex))
+                    memberIndex)),
+            arrayCount(memberType),
+            memberType.columns > 1 ? compiler.type_struct_member_matrix_stride(blockType, memberIndex) : 0,
+            compiler.has_member_decoration(resource.base_type_id, memberIndex, spv::DecorationRowMajor)
         });
     }
     result.parameterBlocks.push_back(std::move(block));
@@ -169,87 +213,6 @@ void appendStageIo(
     });
 }
 
-void hashBytes(uint64_t& hash, const void* data, std::size_t size) noexcept
-{
-    constexpr uint64_t kFnvPrime = UINT64_C(1099511628211);
-    const auto* bytes = static_cast<const unsigned char*>(data);
-    for (std::size_t index = 0; index < size; ++index)
-    {
-        hash ^= bytes[index];
-        hash *= kFnvPrime;
-    }
-}
-
-template <typename Value>
-void hashValue(uint64_t& hash, const Value& value) noexcept
-{
-    hashBytes(hash, &value, sizeof(value));
-}
-
-void hashString(uint64_t& hash, const std::string& value) noexcept
-{
-    hashBytes(hash, value.data(), value.size());
-    const unsigned char terminator = 0;
-    hashBytes(hash, &terminator, 1);
-}
-
-[[nodiscard]] uint64_t interfaceSignature(const asset::ShaderInterface& interface)
-{
-    uint64_t hash = UINT64_C(14695981039346656037);
-    hashValue(hash, interface.stage);
-    hashString(hash, interface.entryPoint);
-
-    std::vector<asset::ShaderResourceDesc> resources = interface.resources;
-    std::sort(
-        resources.begin(),
-        resources.end(),
-        [](const auto& left, const auto& right)
-        {
-            return std::tie(
-                left.set,
-                left.binding,
-                left.type,
-                left.name) <
-                std::tie(
-                    right.set,
-                    right.binding,
-                    right.type,
-                    right.name);
-        });
-    for (const asset::ShaderResourceDesc& resource : resources)
-    {
-        hashString(hash, resource.name);
-        hashValue(hash, resource.set);
-        hashValue(hash, resource.binding);
-        hashValue(hash, resource.type);
-        hashValue(hash, resource.arrayCount);
-    }
-
-    std::vector<asset::ShaderParameterBlockDesc> blocks = interface.parameterBlocks;
-    std::sort(
-        blocks.begin(),
-        blocks.end(),
-        [](const auto& left, const auto& right)
-        {
-            return std::tie(left.set, left.binding, left.name) <
-                std::tie(right.set, right.binding, right.name);
-        });
-    for (const asset::ShaderParameterBlockDesc& block : blocks)
-    {
-        hashString(hash, block.name);
-        hashValue(hash, block.set);
-        hashValue(hash, block.binding);
-        hashValue(hash, block.byteSize);
-        for (const asset::ShaderBlockMemberDesc& member : block.members)
-        {
-            hashString(hash, member.name);
-            hashValue(hash, member.type);
-            hashValue(hash, member.offset);
-            hashValue(hash, member.size);
-        }
-    }
-    return hash;
-}
 
 } // namespace
 
@@ -290,6 +253,9 @@ asset::ShaderInterface SpirvReflection::reflect(
         result.entryPoint = entryPoint;
         const spirv_cross::ShaderResources resources =
             compiler.get_shader_resources();
+        if (!resources.storage_images.empty() || !resources.subpass_inputs.empty() ||
+            !resources.atomic_counters.empty() || !resources.acceleration_structures.empty())
+            throw std::invalid_argument("shader declares an unsupported resource kind");
 
         for (const spirv_cross::Resource& resource :
              resources.uniform_buffers)
@@ -309,6 +275,7 @@ asset::ShaderInterface SpirvReflection::reflect(
                 compiler,
                 resource,
                 asset::ShaderResourceType::StorageBuffer);
+            appendParameterBlock(result, compiler, resource);
         }
         for (const spirv_cross::Resource& resource :
              resources.separate_images)
@@ -350,15 +317,38 @@ asset::ShaderInterface SpirvReflection::reflect(
         {
             const spirv_cross::SPIRType& type =
                 compiler.get_type(resource.base_type_id);
+            uint32_t offset = 0;
+            if (!type.member_types.empty())
+            {
+                offset = std::numeric_limits<uint32_t>::max();
+                for (uint32_t i = 0; i < type.member_types.size(); ++i)
+                    offset = std::min(offset, compiler.type_struct_member_offset(type, i));
+            }
             result.pushConstants.push_back({
                 resourceName(compiler, resource),
                 static_cast<uint32_t>(
-                    compiler.get_declared_struct_size(type)),
-                stage
+                    compiler.get_declared_struct_size(type)) - offset,
+                stage,
+                offset
             });
+            auto& push = result.pushConstants.back();
+            for (uint32_t i = 0; i < type.member_types.size(); ++i)
+            {
+                const auto& member = compiler.get_type(type.member_types[i]);
+                push.members.push_back({
+                    compiler.get_member_name(resource.base_type_id, i), valueType(member),
+                    compiler.type_struct_member_offset(type, i),
+                    static_cast<uint32_t>(compiler.get_declared_struct_member_size(type, i)),
+                    arrayCount(member)});
+            }
+        }
+        for (const auto& constant : compiler.get_specialization_constants())
+        {
+            const auto& type = compiler.get_type(compiler.get_constant(constant.id).constant_type);
+            result.specializationConstants.push_back({constant.constant_id, valueType(type)});
         }
 
-        result.signature = interfaceSignature(result);
+        result.signature = shaderInterfaceSignature(result);
         return result;
     }
     catch (const spirv_cross::CompilerError& error)

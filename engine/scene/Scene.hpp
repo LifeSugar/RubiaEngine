@@ -28,6 +28,8 @@ struct SceneNode
     /// Controls whether renderables from this instance use bounds culling.
     render::BoundsCullingMode boundsCullingMode =
         render::BoundsCullingMode::Normal;
+    /// Optional instance-wide material; the shared ModelAsset stays unchanged.
+    asset::MaterialAssetHandle materialOverride;
 };
 
 /// Runtime hierarchy that instances model assets without owning their data.
@@ -45,6 +47,8 @@ public:
 
     void create(CreateInfo createInfo);
     void reset() noexcept;
+    [[nodiscard]] uint32_t addNode(SceneNode node);
+    void setMaterialOverride(uint32_t nodeIndex, asset::MaterialAssetHandle material);
     void setLocalTransform(uint32_t nodeIndex, const glm::mat4& transform);
     void setLayerMask(uint32_t nodeIndex, render::LayerMask layerMask);
     void setBoundsCullingMode(

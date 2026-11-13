@@ -1,4 +1,5 @@
 #pragma once
+// LEGACY: precompiled SPIR-V compatibility only. Source shaders use Slang.
 
 #include "asset/ShaderInterface.hpp"
 

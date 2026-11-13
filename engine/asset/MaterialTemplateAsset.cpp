@@ -9,14 +9,14 @@
 namespace rubia::asset
 {
 
-MaterialTemplateAsset::MaterialTemplateAsset(CreateInfo createInfo)
+MaterialTemplateAsset::MaterialTemplateAsset(CompiledCreateInfo createInfo)
 {
     create(std::move(createInfo));
 }
 
-void MaterialTemplateAsset::create(CreateInfo createInfo)
+void MaterialTemplateAsset::create(CompiledCreateInfo createInfo)
 {
-    if (createInfo.shaderInterfaceSignature == 0)
+    if (createInfo.programInterfaceSignature == 0)
     {
         throw std::invalid_argument(
             "material template requires a validated shader interface");
@@ -108,23 +108,27 @@ void MaterialTemplateAsset::create(CreateInfo createInfo)
     }
 
     name_ = std::move(createInfo.name);
-    shaders_ = std::move(createInfo.shaders);
+    program_ = createInfo.program;
     parameterBlock_ = createInfo.parameterBlock;
     parameterDataSize_ = createInfo.parameterDataSize;
     parameters_ = std::move(createInfo.parameters);
     textureSlots_ = std::move(createInfo.textureSlots);
-    shaderInterfaceSignature_ = createInfo.shaderInterfaceSignature;
+    programInterfaceSignature_ = createInfo.programInterfaceSignature;
+    bindings_ = std::move(createInfo.bindings);
+    schemaSignature_ = createInfo.schemaSignature;
 }
 
 void MaterialTemplateAsset::reset() noexcept
 {
     name_.clear();
-    shaders_.clear();
+    program_ = {};
     parameterBlock_ = {};
     parameterDataSize_ = 0;
     parameters_.clear();
     textureSlots_.clear();
-    shaderInterfaceSignature_ = 0;
+    programInterfaceSignature_ = 0;
+    bindings_.clear();
+    schemaSignature_ = 0;
 }
 
 uint32_t MaterialTemplateAsset::valueSize(MaterialValueType type) noexcept

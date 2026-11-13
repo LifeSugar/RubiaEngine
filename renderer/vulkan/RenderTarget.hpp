@@ -1,7 +1,7 @@
 #pragma once
 
 #include "vulkan/Framebuffer.hpp"
-#include "vulkan/Image.hpp"
+#include "rhi/Resources.hpp"
 #include "vulkan/ImageView.hpp"
 
 #include <vulkan/vulkan.h>
@@ -71,6 +71,8 @@ public:
         return attachments_.size();
     }
 
+    [[nodiscard]] const rhi::TextureRef& texture(std::size_t attachmentIndex) const;
+    [[nodiscard]] const rhi::TextureViewRef& view(std::size_t attachmentIndex) const;
     [[nodiscard]] VkImage image(std::size_t attachmentIndex) const;
     [[nodiscard]] VkImageView imageView(std::size_t attachmentIndex) const;
     [[nodiscard]] const AttachmentInfo& attachmentInfo(
@@ -85,8 +87,8 @@ private:
     struct AttachmentResources
     {
         AttachmentInfo info;
-        Image image;
-        ImageView view;
+        rhi::TextureRef image;
+        rhi::TextureViewRef view;
     };
 
     [[nodiscard]] const AttachmentResources& attachment(

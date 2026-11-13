@@ -17,7 +17,7 @@ struct Plane final
     float distance = 0.0f;
 };
 
-/// Six clipping planes extracted from a Vulkan zero-to-one view projection.
+/// Six clipping planes extracted from a logical zero-to-one view projection.
 class Frustum final
 {
 public:

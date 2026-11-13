@@ -149,6 +149,7 @@ GLBModelImporter::Result GLBModelImporter::import(
             "GLBModelImporter requires an AssetManager");
     }
 
+    if (createInfo.checkpoint) createInfo.checkpoint();
     Result result{};
 
     const std::vector<asset::TextureColorSpace> textureColorSpaces =
@@ -166,6 +167,7 @@ GLBModelImporter::Result GLBModelImporter::import(
         source.textures,
         textureInfo);
 
+    if (createInfo.checkpoint) createInfo.checkpoint();
     if (!source.materials.empty())
     {
         GLBMaterialImporter::CreateInfo materialInfo{};
@@ -182,12 +184,14 @@ GLBModelImporter::Result GLBModelImporter::import(
             materialInfo);
     }
 
+    if (createInfo.checkpoint) createInfo.checkpoint();
     GLBMeshImporter::CreateInfo meshInfo{};
     meshInfo.assets = createInfo.assets;
     meshInfo.materials = &result.materials;
     meshInfo.fallbackMaterial = createInfo.fallbackMaterial;
     result.meshes = GLBMeshImporter{}.import(source.meshes, meshInfo);
 
+    if (createInfo.checkpoint) createInfo.checkpoint();
     asset::ModelAsset::CreateInfo modelInfo{};
     modelInfo.name = source.name;
     appendNode(

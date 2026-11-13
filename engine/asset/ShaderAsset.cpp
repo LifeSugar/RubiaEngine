@@ -13,14 +13,14 @@ ShaderAsset::ShaderAsset(CreateInfo createInfo)
 
 void ShaderAsset::create(CreateInfo createInfo)
 {
-    constexpr uint32_t kSpirvMagic = 0x07230203u;
     if (createInfo.entryPoint.empty())
     {
         throw std::invalid_argument("shader entry point must not be empty");
     }
-    if (createInfo.spirv.empty() || createInfo.spirv.front() != kSpirvMagic)
+    if (createInfo.artifact.bytes.empty() ||
+        !compatibleShaderFormat(createInfo.artifact.target.backend, createInfo.artifact.format))
     {
-        throw std::invalid_argument("shader bytecode is not valid SPIR-V");
+        throw std::invalid_argument("shader artifact is empty or incompatible with its target");
     }
     if (createInfo.interface.signature == 0 ||
         createInfo.interface.stage != createInfo.stage ||
@@ -33,7 +33,7 @@ void ShaderAsset::create(CreateInfo createInfo)
     name_ = std::move(createInfo.name);
     stage_ = createInfo.stage;
     entryPoint_ = std::move(createInfo.entryPoint);
-    spirv_ = std::move(createInfo.spirv);
+    artifact_ = std::move(createInfo.artifact);
     interface_ = std::move(createInfo.interface);
 }
 
@@ -42,7 +42,7 @@ void ShaderAsset::reset() noexcept
     name_.clear();
     stage_ = ShaderStage::Vertex;
     entryPoint_ = "main";
-    spirv_.clear();
+    artifact_ = {};
     interface_ = {};
 }
 

@@ -3,6 +3,7 @@
 // ── Assimp 头文件仅在此 .cpp 中引入（pimpl） ────────────────────────────────
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
+#include <assimp/GltfMaterial.h>
 #include <assimp/postprocess.h>
 #include <assimp/matrix4x4.h>
 
@@ -58,7 +59,7 @@ std::unique_ptr<GLBModel> GLBLoader::load(const std::string& filePath)
     }
 
     // 提取各项数据
-    m_model->name = std::filesystem::path(filePath).filename().string();
+    m_model->name = std::filesystem::u8path(filePath).filename().u8string();
     extractTextures(scene);
     extractMaterials(scene);
     extractMeshes(scene);
@@ -222,6 +223,14 @@ void GLBLoader::extractMaterials(const void* aiScenePtr)
         if (src->Get(AI_MATKEY_NAME, aiName) == AI_SUCCESS) {
             mat.name = aiName.C_Str();
         }
+
+        aiString alphaMode;
+        if (src->Get(AI_MATKEY_GLTF_ALPHAMODE, alphaMode) == AI_SUCCESS)
+            mat.alphaMode = alphaMode.C_Str();
+        src->Get(AI_MATKEY_GLTF_ALPHACUTOFF, mat.alphaCutoff);
+        int doubleSided = 0;
+        if (src->Get(AI_MATKEY_TWOSIDED, doubleSided) == AI_SUCCESS)
+            mat.doubleSided = doubleSided != 0;
 
         // ── PBR 因子 ────────────────────────────────────────────────────
         aiColor4D color;

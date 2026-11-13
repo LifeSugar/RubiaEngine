@@ -11,13 +11,13 @@ class EditorApp final
 {
 public:
     void run();
-    void runRenderTest();
 
-private:
     [[nodiscard]] static App::RunConfig makeRunConfig();
 
-    App app_;
+private:
+    // App joins content workers before EditorLayer releases its log capture.
     EditorLayer editorLayer_;
+    App app_;
 };
 
 } // namespace rubia::editor

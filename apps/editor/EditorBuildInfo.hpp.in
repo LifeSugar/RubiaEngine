@@ -1,0 +1,7 @@
+#pragma once
+
+namespace rubia::editor
+{
+inline constexpr char kEngineVersion[] = "@PROJECT_VERSION@";
+inline constexpr char kEditorTitle[] = "Rubia Engine [@PROJECT_VERSION@]";
+} // namespace rubia::editor

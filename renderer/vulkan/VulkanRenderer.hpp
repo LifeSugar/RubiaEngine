@@ -1,46 +1,52 @@
 #pragma once
+#include "render/ResourcePreparation.hpp"
+#include "core/FrameScheduler.hpp"
+#include "core/RenderResult.hpp"
+#include "core/TextureOutput.hpp"
+#include "resources/ResourcePreparationSession.hpp"
 
-#include "vulkan/DescriptorPool.hpp"
-#include "vulkan/DescriptorSetLayout.hpp"
-#include "vulkan/FrameContext.hpp"
-#include "vulkan/FrameDataResources.hpp"
-#include "vulkan/GraphicsPipeline.hpp"
+#include "asset/AssetSnapshot.hpp"
 #include "render/RenderFrame.hpp"
+#include "render/SceneResourcePreparation.hpp"
+#include "render/ResourcePreparationOptions.hpp"
+#include "vulkan/VulkanPresentation.hpp"
+#include "core/FrameBindings.hpp"
+#include "passes/FramePipeline.hpp"
+#include "passes/OutputBindings.hpp"
+#include "vulkan/VulkanResourceDevice.hpp"
+#include "vulkan/GraphicsPipeline.hpp"
+#include "pipeline/PipelineLibrary.hpp"
+#include "resources/RenderAssetStore.hpp"
+#include "core/PreparedDrawList.hpp"
+#include "resources/ScenePreparationSession.hpp"
+#include "vulkan/VulkanPipelineDevice.hpp"
+#include "pipeline/PipelinePreparation.hpp"
 #include "vulkan/RenderPass.hpp"
 #include "vulkan/RenderTarget.hpp"
-#include "vulkan/Sampler.hpp"
-#include "vulkan/SwapchainResources.hpp"
+#include "vulkan/ResourcePreparationTypes.hpp"
+#include "vulkan/RetiredResources.hpp"
+#include "vulkan/VulkanUploadService.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
-struct ImDrawData;
+#include "render/GuiOverlay.hpp"
 
 namespace rubia::rhi::vulkan
 {
 
-class Mesh;
-class RenderAssetCache;
 class VulkanContext;
-struct VulkanDrawList;
 
 // Owns the Vulkan objects and synchronization needed to execute one render
-// target. Scene objects and asset ownership stay outside this class.
-class VulkanRenderer final
+// target. Live scene assets stay outside; replaced GPU owners are retained here
+// until the graphics submission protecting them has completed.
+class VulkanRenderer final : public render::ResourcePreparationHost
 {
 public:
-    enum class OutputMode
-    {
-        Runtime,
-        Editor
-    };
+    using OutputMode = render::OutputMode;
 
-    struct EditorViewportOutput
-    {
-        VkImageView imageView = VK_NULL_HANDLE;
-        VkExtent2D extent{};
-        uint64_t revision = 0;
-    };
+    using EditorViewportOutput = render::TextureOutput;
 
     /// Parameters used to create the renderer and its frame resources.
     struct CreateInfo
@@ -55,25 +61,23 @@ public:
         uint32_t maxRenderObjects = 1024;
         /// Selects direct runtime presentation or an ImGui-sampled LDR output.
         OutputMode outputMode = OutputMode::Runtime;
+        /// Session-wide defaults; currently controls material parameter buffers only.
+        render::ResourcePreparationOptions resourcePreparation;
 
         // renderPass and descriptorSetLayouts are supplied by VulkanRenderer.
-        /// Caller-supplied graphics pipeline settings.
+        /// Bootstrap scene pipeline and pass defaults. Draws resolve their own resident
+        /// shader/layout and override material blend/cull/depth state.
         GraphicsPipeline::CreateInfo graphicsPipeline;
         /// Caller-supplied final presentation pipeline settings.
         GraphicsPipeline::CreateInfo presentPipeline;
     };
 
-    /// Outcome of a render attempt.
-    enum class RenderResult
-    {
-        /// The frame was submitted successfully.
-        Rendered,
-        /// The swapchain must be resized before rendering can continue.
-        NeedsResize
-    };
+    using RenderResult = render::RenderResult;
+    static constexpr bool wasSubmitted(RenderResult result) noexcept { return render::wasSubmitted(result); }
+    static constexpr bool needsResize(RenderResult result) noexcept { return render::needsResize(result); }
 
     /// Creates an empty renderer.
-    VulkanRenderer() = default;
+    VulkanRenderer();
     /// Creates a renderer from the supplied settings.
     VulkanRenderer(const CreateInfo& createInfo);
     /// Releases all renderer-owned resources.
@@ -88,10 +92,82 @@ public:
 
     /// Creates or replaces all renderer-owned resources.
     void create(const CreateInfo& createInfo);
+    /// Creates a GUI-capable swapchain without any scene assets or shaders.
+    void createPresentation(const CreateInfo& createInfo);
+    /// Main-thread-only preparation into an empty scene/cache. The cache must
+    /// outlive this renderer and remain untouched during preparation. CPU assets
+    /// are retained until activation, cancellation, or failure.
+    void beginScenePreparation(
+        render::RenderAssetStore& renderAssets, render::SceneResourceRequest request);
+    // Called once per frame, including when no scene is loading.
+    void advanceResourcePreparation() override;
+    bool canPrepareResources() const noexcept override;
+    render::ResourcePreparationService& resourcePreparationService() override;
+    /// Synchronous prewarm and normal creation share this device-scoped cache.
+    /// Returned ownership must be retained until any submitted GPU use completes.
+    rhi::PipelineRef preparePipeline(const GraphicsPipeline::CreateInfo& info);
+    render::PipelineLibrary::Statistics pipelineCacheStatistics() const;
+    /// Captures resident material versions for the current scene pass. No PSO creation here.
+    render::PipelinePreparationResult prewarmScenePipelines(const render::RenderAssetStore& resources,
+        const std::vector<asset::MaterialAssetHandle>& materials) override;
+    render::PipelinePreparationStatus pipelinePreparationStatus(render::PipelinePreparationTicket ticket) const override;
+    void cancelPipelinePreparation(render::PipelinePreparationTicket ticket) override;
+    void releasePipelinePreparation(render::PipelinePreparationTicket ticket) override;
+    /// Resolves resident draws and synchronously warms missing pipelines for the scene pass.
+    /// The result borrows mesh/material residency and must be consumed before publication.
+    [[nodiscard]] render::PreparedDrawList compileDrawList(const render::RenderList& source,
+                                                const render::RenderAssetStore& resources);
+    // Versioned asset/dependency preparation; call before recording frame commands. Cache
+    // must outlive the ticket and all published GPU uses. Replaced owners and
+    // texture binding versions retire via frame fences.
+    ResourcePreparationResult prepareTexture(render::RenderAssetStore& cache,
+                                             asset::AssetSnapshot<asset::TextureAsset> source);
+    ResourcePreparationResult prepareMesh(render::RenderAssetStore& cache,
+                                          asset::AssetSnapshot<asset::MeshAsset> source);
+    ResourcePreparationResult prepareShader(render::RenderAssetStore& cache,
+                                            asset::AssetSnapshot<asset::ShaderAsset> source);
+    ResourcePreparationResult prepareShaderProgram(
+        render::RenderAssetStore& cache, asset::AssetSnapshot<asset::ShaderProgramAsset> source);
+    ResourcePreparationResult prepareMaterialTemplate(
+        render::RenderAssetStore& cache, asset::AssetSnapshot<asset::MaterialTemplateAsset> source);
+    ResourcePreparationResult prepareMaterial(render::RenderAssetStore& cache,
+                                              asset::AssetSnapshot<asset::MaterialAsset> source);
+
+    // Attach an exclusive main-thread transaction before creation is dispatched.
+    // Its final commit brackets ordinary asynchronous preparation publication.
+    void setResourcePublicationTransaction(ResourcePreparationTicket,
+        std::shared_ptr<render::ResourcePublicationTransaction>);
+    ResourcePreparationStatus resourcePreparationStatus(ResourcePreparationTicket ticket) const;
+    void cancelResourcePreparation(ResourcePreparationTicket ticket);
+    void releaseResourcePreparation(ResourcePreparationTicket ticket);
+
+    [[nodiscard]] render::ScenePreparationStatus scenePreparationStatus() const;
+    /// Publishes ready GPU resources; caller then publishes matching CPU content.
+    void activatePreparedScene();
+    /// Cancels pending/ready work and safely releases its partial resources.
+    /// May wait for in-flight uploads. Activated scene resources are unaffected.
+    void cancelScenePreparation() noexcept;
+    /// Adds scene rendering to an existing presentation session.
+    void createSceneResources(
+        const GraphicsPipeline::CreateInfo& graphicsPipeline,
+        const GraphicsPipeline::CreateInfo& presentPipeline,
+        uint32_t maxRenderObjects = 1024);
+    void createPreparedSceneResources(std::shared_ptr<const render::PreparedMaterialTemplate>,
+        std::shared_ptr<const render::PreparedShaderProgram>, uint32_t maxRenderObjects) override;
+    void releasePreparedSceneResources() noexcept override;
+    /// Releases scene resources while keeping the GUI presentation alive.
+    void resetSceneResources() noexcept;
+    [[nodiscard]] bool sceneReady() const noexcept;
     /// Releases all renderer-owned resources and cached frame data.
     void reset() noexcept;
     /// Waits until all device work has completed.
     void waitIdle() const;
+    /// Retains a backend-owned registration until a future frame fence completes.
+    /// Call outside command recording, before any future use switches to its replacement.
+    void retireExternalResource(std::shared_ptr<const void> resource);
+    /// Explicit blocking drain, required before shutting down an external backend
+    /// (e.g. ImGui) whose registrations are awaiting retirement here.
+    void drainRetiredResources();
 
     /// Rebuilds resources that depend on the framebuffer size.
     void resize(VkExtent2D framebufferExtent);
@@ -100,23 +176,25 @@ public:
     /// Records, submits, and presents one scene snapshot.
     [[nodiscard]] RenderResult render(
         const render::RenderFrame& frame,
-        const RenderAssetCache& renderAssets,
-        ImDrawData* uiDrawData = nullptr);
+        const render::RenderAssetStore& renderAssets,
+        const render::GuiOverlay* uiDrawData = nullptr);
+    [[nodiscard]] RenderResult renderGui(const render::GuiOverlay* uiDrawData);
 
     /// Returns the current swapchain extent.
     [[nodiscard]] VkExtent2D extent() const noexcept
     {
-        return swapchainResources_.extent();
+        const auto output = presentation_ ? presentation_->output() : rhi::OutputDescription{};
+        return {output.width, output.height};
     }
     /// Returns the render pass used to write the presentation image.
     [[nodiscard]] VkRenderPass presentRenderPass() const noexcept
     {
-        return swapchainResources_.renderPass();
+        return presentation_ ? presentation_->renderPass() : VK_NULL_HANDLE;
     }
     /// Returns the number of images in the current presentation swapchain.
     [[nodiscard]] uint32_t swapchainImageCount() const noexcept
     {
-        return static_cast<uint32_t>(swapchainResources_.imageCount());
+        return presentation_ ? presentation_->imageCount() : 0;
     }
     /// Returns the frame slot that will be used by the next render call.
     [[nodiscard]] uint32_t currentFrameIndex() const noexcept
@@ -125,7 +203,7 @@ public:
     }
     [[nodiscard]] uint32_t frameCount() const noexcept
     {
-        return static_cast<uint32_t>(frameContexts_.size());
+        return presentation_ ? presentation_->slotCount() : 0;
     }
     [[nodiscard]] OutputMode outputMode() const noexcept
     {
@@ -134,12 +212,26 @@ public:
     /// Returns one Editor LDR image suitable for ImGui texture registration.
     [[nodiscard]] EditorViewportOutput editorViewportOutput(
         uint32_t frameIndex) const;
-    /// Returns whether the renderer is fully initialized.
+    struct ViewportCapture
+    {
+        uint32_t width = 0, height = 0;
+        std::vector<uint8_t> rgba;
+    };
+    /// Blocking tooling readback. Main thread, outside recording; frameIndex must
+    /// have rendered since the last viewport resize. Restores the sampling layout.
+    [[nodiscard]] ViewportCapture captureEditorViewport(uint32_t frameIndex);
+    /// Returns whether base presentation is initialized; sceneReady is separate.
     [[nodiscard]] explicit operator bool() const noexcept;
 
 private:
-    /// Creates one reusable command and synchronization context per frame slot.
-    void createFrameContexts(uint32_t frameCount);
+    [[nodiscard]] bool hasSceneResources() const noexcept;
+    void releaseSceneResources() noexcept;
+    [[nodiscard]] RenderResult renderFrame(
+        const render::RenderFrame* frame,
+        const render::RenderAssetStore* renderAssets,
+        const render::GuiOverlay* uiDrawData);
+    /// Requires device idle; resets recorded uses before releasing retired owners.
+    void collectRetiredResourcesAfterIdle();
     /// Completes pipeline settings with renderer-owned layouts and render pass.
     [[nodiscard]] GraphicsPipeline::CreateInfo makePipelineCreateInfo() const;
     /// Completes final presentation pipeline settings.
@@ -159,38 +251,13 @@ private:
     void updateFrameData(uint32_t frameIndex, const render::RenderFrame& frame);
     /// Records all draw commands for one acquired swapchain image.
     void recordCommandBuffer(
-        VkCommandBuffer commandBuffer,
+        rhi::AcquiredFrame& presentation,
+        rhi::CommandEncoder& commands,
         uint32_t frameIndex,
-        uint32_t imageIndex,
-        VkDescriptorSet descriptorSet,
-        const VulkanDrawList& drawList,
-        ImDrawData* uiDrawData);
-    /// Records all scene draws into the offscreen target for one frame slot.
-    void recordScenePass(
-        VkCommandBuffer commandBuffer,
-        uint32_t frameIndex,
-        VkDescriptorSet descriptorSet,
-        const VulkanDrawList& drawList);
-    /// Makes offscreen color writes visible to the presentation shader.
-    void transitionSceneColorForSampling(
-        VkCommandBuffer commandBuffer,
-        uint32_t frameIndex);
-    /// Records the full-screen draw into one acquired swapchain image.
-    void recordPresentPass(
-        VkCommandBuffer commandBuffer,
-        uint32_t frameIndex,
-        uint32_t imageIndex,
-        ImDrawData* uiDrawData);
-    /// Tone maps the current HDR scene into the Editor LDR target.
-    void recordEditorViewportPass(
-        VkCommandBuffer commandBuffer,
-        uint32_t frameIndex);
-    /// Clears the Editor swapchain and renders only ImGui draw data.
-    void recordEditorUiPass(
-        VkCommandBuffer commandBuffer,
-        uint32_t imageIndex,
-        ImDrawData* uiDrawData);
-
+        const rhi::BindingSetRef& descriptorSet,
+        const render::PreparedDrawList& drawList,
+        const render::GuiOverlay* uiDrawData,
+        bool drawScene);
     // Declaration order encodes destruction dependencies:
     // frames -> pipelines -> present descriptors -> scene targets
     // -> scene render pass -> swapchain -> frame-data resources.
@@ -202,9 +269,10 @@ private:
     GraphicsPipeline::CreateInfo presentPipelineCreateInfo_;
     OutputMode outputMode_ = OutputMode::Runtime;
     /// Per-frame descriptors and camera/object buffers.
-    FrameDataResources frameDataResources_;
-    /// Swapchain and all resources tied to its images.
-    SwapchainResources swapchainResources_;
+    std::unique_ptr<VulkanResourceDevice> resourceDevice_;
+    render::FrameBindings frameDataResources_;
+    /// Owns native presentation and submission behind backend-neutral interfaces.
+    std::unique_ptr<VulkanPresentation> presentation_;
     /// Render pass describing the offscreen linear-color and depth outputs.
     RenderPass sceneRenderPass_;
     /// One independently reusable offscreen framebuffer per frame slot.
@@ -219,28 +287,31 @@ private:
     std::vector<RenderTarget> editorViewportTargets_;
     VkFormat editorViewportFormat_ = VK_FORMAT_UNDEFINED;
     uint64_t editorViewportRevision_ = 0;
-    /// Linear clamp sampler used by the presentation shader.
-    Sampler presentSampler_;
-    /// Descriptor interface used to sample one offscreen color image.
-    DescriptorSetLayout presentDescriptorSetLayout_;
-    /// Owns the per-frame presentation descriptor sets.
-    DescriptorPool presentDescriptorPool_;
-    /// Non-owning sets allocated from presentDescriptorPool_, indexed by F.
-    std::vector<VkDescriptorSet> presentDescriptorSets_;
+    render::OutputBindings outputBindings_;
     /// Graphics pipeline used to record scene draws.
-    GraphicsPipeline graphicsPipeline_;
+    rhi::PipelineRef graphicsPipeline_;
     /// Full-screen pipeline used to write the acquired swapchain image.
-    GraphicsPipeline presentPipeline_;
+    rhi::PipelineRef presentPipeline_;
+    std::unique_ptr<VulkanPipelineDevice> pipelineDevice_;
+    std::unique_ptr<render::PipelineLibrary> pipelineCache_;
+    rhi::GraphicsPipelineDesc scenePipelineDescription_;
+    std::unique_ptr<render::PipelinePreparation> pipelinePreparation_;
     /// Shader output transfer selected from swapchain format and color space.
     uint32_t presentOutputTransferFunction_ = 0;
-    /// Reusable command and synchronization resources for in-flight frames.
-    std::vector<FrameContext> frameContexts_;
+    /// Generic scheduler owns retirement independently of presentation images.
+    std::unique_ptr<render::FrameScheduler> scheduler_;
+    bool recordingFrame_ = false;
     /// Frame slot selected for the next submission.
     uint32_t currentFrame_ = 0;
     /// Identity of the view whose GPU payload is currently staged.
     render::RenderViewId stagedViewId_{};
     /// Revision of the currently staged view GPU payload.
     uint64_t stagedViewGpuDataRevision_ = 0;
+    // Destroy/cancel before scene objects, frame contexts, cache, or device.
+    std::unique_ptr<VulkanUploadService> uploads_;
+    std::unique_ptr<VulkanUploadAdapter> resourceUploads_;
+    std::unique_ptr<render::ResourcePreparationService> resourcePreparation_;
+    std::unique_ptr<render::ScenePreparationSession> scenePreparation_;
 };
 
 } // namespace rubia::rhi::vulkan

@@ -125,7 +125,7 @@ asset::TextureAsset::CreateInfo StbImageDecoder::decodeFile(
     return decodeRgba8(
         encodedBytes.data(),
         encodedBytes.size(),
-        name.empty() ? path.filename().string() : name);
+        name.empty() ? path.filename().u8string() : name);
 }
 
 } // namespace rubia::importer::texture

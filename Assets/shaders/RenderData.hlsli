@@ -1,7 +1,10 @@
 #ifndef LEARN_VULKAN_RENDER_DATA_HLSLI
 #define LEARN_VULKAN_RENDER_DATA_HLSLI
 
+// Slang receives the same layout explicitly through its compiler options.
+#ifndef __SLANG__
 #pragma pack_matrix(column_major)
+#endif
 
 struct CameraGpuData
 {
@@ -26,6 +29,7 @@ struct DrawPushConstants
 {
     uint cameraIndex;
     uint objectIndex;
+    float alphaClipThreshold;
 };
 
 // set 0 / binding 0 is reserved for future per-frame constants.

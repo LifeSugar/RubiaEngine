@@ -1,38 +1,61 @@
 #include "ImGuiLayer.hpp"
+#include "EditorTheme.hpp"
 
-#include "vulkan/VulkanContext.hpp"
-#include "vulkan/Window.hpp"
 
 #include <imgui.h>
-#include <imgui_impl_glfw.h>
-#include <imgui_impl_vulkan.h>
 
+#include <filesystem>
+#include <cstdlib>
+#include <cstdio>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 
 namespace rubia::editor
 {
 namespace
 {
 
-constexpr uint32_t kImGuiDescriptorCapacity = 64;
-
-void reportVulkanResult(VkResult result)
+void loadEditorFont(ImGuiIO& io)
 {
-    if (result != VK_SUCCESS)
+    constexpr float fontSize = 15.0f;
+    ImFontConfig fontConfig;
+    fontConfig.Flags |= ImFontFlags_NoLoadError;
+    // Use a compact proportional UI face. Do not redistribute platform fonts.
+    const char* windowsDirectory = std::getenv("WINDIR");
+    const std::filesystem::path candidates[] = {
+        windowsDirectory ? std::filesystem::path(windowsDirectory) / "Fonts/tahoma.ttf" : std::filesystem::path{},
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"};
+    for (const auto& path : candidates)
     {
-        std::cerr
-            << "[ImGui][Vulkan] VkResult = "
-            << static_cast<int>(result)
-            << '\n';
+        std::error_code error;
+        if (path.empty() || !std::filesystem::is_regular_file(path, error)) continue;
+        if (ImFont* font = io.Fonts->AddFontFromFileTTF(path.u8string().c_str(), fontSize, &fontConfig))
+        {
+            io.FontDefault = font;
+            break;
+        }
     }
+    if (!io.FontDefault)
+    {
+        fontConfig.SizePixels = fontSize;
+        io.FontDefault = io.Fonts->AddFontDefault(&fontConfig);
+    }
+
+    const std::filesystem::path relativeMonoPath = "assets/fonts/FiraCode/FiraCode-Regular.ttf";
+    const std::filesystem::path monoPaths[] = {
+        relativeMonoPath, std::filesystem::path(PROJECT_SOURCE_DIR) / relativeMonoPath};
+    std::snprintf(fontConfig.Name, sizeof(fontConfig.Name), "Rubia Console");
+    for (const auto& path : monoPaths)
+        if (io.Fonts->AddFontFromFileTTF(path.u8string().c_str(), 14.0f, &fontConfig)) break;
 }
 
 } // namespace
 
-ImGuiLayer::ImGuiLayer(const CreateInfo& createInfo)
+ImGuiLayer::ImGuiLayer(CreateInfo createInfo)
 {
-    create(createInfo);
+    create(std::move(createInfo));
 }
 
 ImGuiLayer::~ImGuiLayer()
@@ -40,20 +63,14 @@ ImGuiLayer::~ImGuiLayer()
     reset();
 }
 
-void ImGuiLayer::create(const CreateInfo& createInfo)
+void ImGuiLayer::create(CreateInfo createInfo)
 {
-    if (createInfo.window == nullptr || !*createInfo.window ||
-        createInfo.context == nullptr || !*createInfo.context ||
-        createInfo.renderPass == VK_NULL_HANDLE ||
-        createInfo.minImageCount < 2 ||
-        createInfo.imageCount < createInfo.minImageCount)
-    {
-        throw std::invalid_argument("ImGuiLayer create info is incomplete");
-    }
+    if (!createInfo.platform || !createInfo.renderer)
+        throw std::invalid_argument("ImGuiLayer requires platform and renderer backends");
 
     reset();
-    context_ = createInfo.context;
-    minImageCount_ = createInfo.minImageCount;
+    platformBackend_ = std::move(createInfo.platform);
+    rendererBackend_ = std::move(createInfo.renderer);
     iniFilename_ = createInfo.iniFilename;
 
     try
@@ -71,29 +88,19 @@ void ImGuiLayer::create(const CreateInfo& createInfo)
         io.IniFilename = iniFilename_.empty()
             ? nullptr
             : iniFilename_.c_str();
-        ImGui::StyleColorsDark();
+        applyEditorTheme(themeSettings_);
+        loadEditorFont(io);
 
-        if (!ImGui_ImplGlfw_InitForVulkan(
-                createInfo.window->nativeHandle(),
-                true))
-        {
-            throw std::runtime_error(
-                "failed to initialize Dear ImGui GLFW backend");
-        }
+        platformBackend_->initialize(imguiContext_);
         platformBackendInitialized_ = true;
-
-        const float contentScale =
-            ImGui_ImplGlfw_GetContentScaleForWindow(
-                createInfo.window->nativeHandle());
+        const float contentScale = platformBackend_->contentScale();
         if (contentScale > 0.0f && contentScale != 1.0f)
         {
             ImGui::GetStyle().ScaleAllSizes(contentScale);
             ImGui::GetStyle().FontScaleDpi = contentScale;
         }
 
-        initializeRendererBackend(
-            createInfo.renderPass,
-            createInfo.imageCount);
+        rendererBackend_->initialize(imguiContext_);
     }
     catch (...)
     {
@@ -105,22 +112,22 @@ void ImGuiLayer::create(const CreateInfo& createInfo)
 void ImGuiLayer::reset() noexcept
 {
     makeContextCurrent();
-    shutdownRendererBackend();
+    if (rendererBackend_) rendererBackend_->shutdown();
+    rendererBackend_.reset();
 
     if (platformBackendInitialized_)
     {
-        ImGui_ImplGlfw_Shutdown();
+        platformBackend_->shutdown();
         platformBackendInitialized_ = false;
     }
+    platformBackend_.reset();
     if (imguiContext_ != nullptr)
     {
         ImGui::DestroyContext(imguiContext_);
         imguiContext_ = nullptr;
     }
 
-    context_ = nullptr;
     iniFilename_.clear();
-    minImageCount_ = 2;
 }
 
 void ImGuiLayer::beginFrame()
@@ -131,12 +138,12 @@ void ImGuiLayer::beginFrame()
     }
 
     makeContextCurrent();
-    ImGui_ImplVulkan_NewFrame();
-    ImGui_ImplGlfw_NewFrame();
+    rendererBackend_->newFrame();
+    platformBackend_->newFrame();
     ImGui::NewFrame();
 }
 
-ImDrawData* ImGuiLayer::endFrame()
+const render::GuiOverlay* ImGuiLayer::endFrame()
 {
     if (!*this)
     {
@@ -145,78 +152,26 @@ ImDrawData* ImGuiLayer::endFrame()
 
     makeContextCurrent();
     ImGui::Render();
-    return ImGui::GetDrawData();
+    rendererBackend_->prepare(ImGui::GetDrawData());
+    return rendererBackend_.get();
 }
 
-void ImGuiLayer::shutdownRendererBackend() noexcept
+void ImGuiLayer::reconfigureRenderer()
 {
+    if (!*this) throw std::logic_error("cannot reconfigure an uninitialized GUI layer");
     makeContextCurrent();
-    if (rendererBackendInitialized_)
-    {
-        ImGui_ImplVulkan_Shutdown();
-        rendererBackendInitialized_ = false;
-    }
+    rendererBackend_->reconfigure();
 }
 
-void ImGuiLayer::initializeRendererBackend(
-    VkRenderPass renderPass,
-    uint32_t imageCount)
+integration::imgui::GuiRendererBackend& ImGuiLayer::rendererBackend()
 {
-    if (imguiContext_ == nullptr || context_ == nullptr || !*context_ ||
-        !platformBackendInitialized_ || rendererBackendInitialized_ ||
-        renderPass == VK_NULL_HANDLE || imageCount < minImageCount_)
-    {
-        throw std::logic_error(
-            "cannot initialize Dear ImGui Vulkan backend");
-    }
-
-    makeContextCurrent();
-    const rhi::vulkan::Device& device = context_->device();
-
-    ImGui_ImplVulkan_InitInfo initInfo{};
-    initInfo.ApiVersion = VK_API_VERSION_1_3;
-    initInfo.Instance = context_->instance();
-    initInfo.PhysicalDevice = device.physical();
-    initInfo.Device = device.get();
-    initInfo.QueueFamily = device.graphicsQueueFamily();
-    initInfo.Queue = device.graphicsQueue();
-    initInfo.DescriptorPoolSize = kImGuiDescriptorCapacity;
-    initInfo.MinImageCount = minImageCount_;
-    initInfo.ImageCount = imageCount;
-    initInfo.PipelineInfoMain.RenderPass = renderPass;
-    initInfo.PipelineInfoMain.Subpass = 0;
-    initInfo.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-    initInfo.CheckVkResultFn = reportVulkanResult;
-    initInfo.MinAllocationSize = 1024 * 1024;
-
-    if (!ImGui_ImplVulkan_Init(&initInfo))
-    {
-        throw std::runtime_error(
-            "failed to initialize Dear ImGui Vulkan backend");
-    }
-    rendererBackendInitialized_ = true;
-}
-
-void ImGuiLayer::recreateRendererPipeline(VkRenderPass renderPass)
-{
-    if (!*this || renderPass == VK_NULL_HANDLE)
-    {
-        throw std::logic_error(
-            "cannot recreate Dear ImGui Vulkan pipeline");
-    }
-
-    makeContextCurrent();
-    ImGui_ImplVulkan_PipelineInfo pipelineInfo{};
-    pipelineInfo.RenderPass = renderPass;
-    pipelineInfo.Subpass = 0;
-    pipelineInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-    ImGui_ImplVulkan_CreateMainPipeline(&pipelineInfo);
+    if (!*this) throw std::logic_error("GUI renderer backend is unavailable");
+    return *rendererBackend_;
 }
 
 ImGuiLayer::operator bool() const noexcept
 {
-    return context_ != nullptr && imguiContext_ != nullptr &&
-        platformBackendInitialized_ && rendererBackendInitialized_;
+    return imguiContext_ && platformBackendInitialized_ && rendererBackend_ && rendererBackend_->ready();
 }
 
 void ImGuiLayer::makeContextCurrent() const noexcept

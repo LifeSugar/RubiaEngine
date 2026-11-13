@@ -49,7 +49,7 @@ Frustum Frustum::fromViewProjection(
         normalizedPlane(row3 - row0), // Right:  w - x >= 0
         normalizedPlane(row3 + row1), // Bottom: y + w >= 0
         normalizedPlane(row3 - row1), // Top:    w - y >= 0
-        normalizedPlane(row2),        // Near:   z >= 0 (Vulkan ZO)
+        normalizedPlane(row2),        // Near:   z >= 0 (zero-to-one depth)
         normalizedPlane(row3 - row2)  // Far:    w - z >= 0
     };
     return frustum;

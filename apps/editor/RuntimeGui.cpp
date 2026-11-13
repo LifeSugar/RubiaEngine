@@ -24,7 +24,9 @@ ApplicationGuiFrameOutput RuntimeGui::draw(
         "Frame: %.3f ms (%.1f FPS)",
         io.Framerate > 0.0f ? 1000.0f / io.Framerate : 0.0f,
         io.Framerate);
-    ImGui::Text("Draws: scene + present + UI overlay");
+    ImGui::TextUnformatted(context.contentLoading &&
+        context.contentLoading->state != ContentLoadState::Ready
+        ? "Draws: UI" : "Draws: scene + present + UI overlay");
     ImGui::End();
     return {};
 }

@@ -1,4 +1,5 @@
 #include "panels/TransformPanel.hpp"
+#include "inspectors/InspectorWidgets.hpp"
 
 #include <imgui.h>
 
@@ -45,9 +46,7 @@ void TransformPanel::draw(
         return;
     }
 
-    ImGui::TextDisabled("Space");
-    ImGui::SameLine(120.0f);
-    ImGui::TextUnformatted(
+    widgets::drawProperty("Space",
         space == Space::World ? "World" : "Local (Parent)");
 
     glm::vec3 scale{};

@@ -1,8 +1,10 @@
+#include "EditorTheme.hpp"
 #include "panels/ConsolePanel.hpp"
 
 #include <imgui.h>
 
 #include <iostream>
+#include <cstring>
 
 namespace rubia::editor
 {
@@ -108,14 +110,14 @@ ConsolePanel::~ConsolePanel()
 
 void ConsolePanel::draw(bool* open)
 {
-    const bool visible = ImGui::Begin("Console", open);
+    const bool visible = beginEditorWindow("Console", open);
     if (!visible)
     {
         ImGui::End();
         return;
     }
 
-    if (ImGui::SmallButton("Clear"))
+    if (editorButton("Clear"))
     {
         log_.clear();
     }
@@ -135,8 +137,12 @@ void ConsolePanel::draw(bool* open)
     ImGui::BeginChild(
         "##ConsoleLog",
         ImVec2(0.0f, 0.0f),
-        ImGuiChildFlags_Borders,
+        ImGuiChildFlags_AlwaysUseWindowPadding,
         ImGuiWindowFlags_HorizontalScrollbar);
+    ImFont* logFont = ImGui::GetIO().FontDefault;
+    for (ImFont* font : ImGui::GetIO().Fonts->Fonts)
+        if (std::strcmp(font->GetDebugName(), "Rubia Console") == 0) logFont = font;
+    ImGui::PushFont(logFont, 0.0f);
     if (cachedText_.empty())
     {
         ImGui::TextDisabled("No log messages");
@@ -147,6 +153,7 @@ void ConsolePanel::draw(bool* open)
             cachedText_.data(),
             cachedText_.data() + cachedText_.size());
     }
+    ImGui::PopFont();
     if (changed && autoScroll_)
     {
         ImGui::SetScrollHereY(1.0f);

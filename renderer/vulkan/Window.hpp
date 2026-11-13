@@ -1,6 +1,12 @@
 #pragma once
 
-#define GLFW_INCLUDE_VULKAN
+#include "glfw/Window.hpp"
+
+#include <vulkan/vulkan.h>
+
+#ifndef GLFW_INCLUDE_NONE
+#define GLFW_INCLUDE_NONE
+#endif
 #include <GLFW/glfw3.h>
 
 #include <cstdint>
@@ -10,7 +16,7 @@
 namespace rubia::rhi::vulkan
 {
 
-/// Owns a GLFW window and its share of the GLFW runtime.
+/// Compatibility facade. New platform callers use platform::glfw::Window.
 class Window final
 {
 public:
@@ -68,21 +74,17 @@ public:
     [[nodiscard]] static double time() noexcept;
 
     /// Returns the non-owning native handle used by platform integrations.
-    [[nodiscard]] GLFWwindow* nativeHandle() const noexcept { return handle_; }
+    [[nodiscard]] GLFWwindow* nativeHandle() const noexcept { return window_.nativeHandle(); }
+    [[nodiscard]] const platform::glfw::Window& platformWindow() const noexcept
+    {
+        return window_;
+    }
 
     /// Returns whether a window is currently owned.
     [[nodiscard]] explicit operator bool() const noexcept;
 
 private:
-    /// Records framebuffer size changes reported by GLFW.
-    static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
-
-    /// Owned GLFW window handle.
-    GLFWwindow* handle_ = nullptr;
-    /// Whether this object holds a reference to the shared GLFW runtime.
-    bool ownsGlfwRuntime_ = false;
-    /// Whether an unconsumed framebuffer resize has occurred.
-    bool framebufferResized_ = false;
+    platform::glfw::Window window_;
 };
 
 } // namespace rubia::rhi::vulkan

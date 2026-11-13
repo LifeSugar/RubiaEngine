@@ -1,59 +1,24 @@
 #include "vulkan/GpuTexture.hpp"
 
 #include "vulkan/Device.hpp"
-#include "vulkan/TextureVkFormat.hpp"
 
 #include <algorithm>
 #include <cstddef>
-#include <limits>
 #include <stdexcept>
 #include <utility>
-#include <vector>
 
 namespace rubia::rhi::vulkan
 {
 namespace
 {
 
-VkFilter textureFilter(asset::TextureFilter filter)
+VkImageSubresourceRange resolveViewRange(VkImageSubresourceRange range, uint32_t mipLevels,
+                                         uint32_t arrayLayers)
 {
-    return filter == asset::TextureFilter::Nearest
-        ? VK_FILTER_NEAREST
-        : VK_FILTER_LINEAR;
-}
-
-VkSamplerMipmapMode mipFilter(asset::TextureFilter filter)
-{
-    return filter == asset::TextureFilter::Nearest
-        ? VK_SAMPLER_MIPMAP_MODE_NEAREST
-        : VK_SAMPLER_MIPMAP_MODE_LINEAR;
-}
-
-VkSamplerAddressMode addressMode(asset::TextureAddressMode mode)
-{
-    switch (mode)
-    {
-    case asset::TextureAddressMode::Repeat:
-        return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    case asset::TextureAddressMode::MirroredRepeat:
-        return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
-    case asset::TextureAddressMode::ClampToEdge:
-        return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    }
-    return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-}
-
-VkImageSubresourceRange resolveViewRange(
-    VkImageSubresourceRange range,
-    uint32_t mipLevels,
-    uint32_t arrayLayers)
-{
-    if (range.aspectMask == 0 ||
-        range.baseMipLevel >= mipLevels ||
+    if (range.aspectMask == 0 || range.baseMipLevel >= mipLevels ||
         range.baseArrayLayer >= arrayLayers)
     {
-        throw std::invalid_argument(
-            "GpuTexture view range starts outside the image");
+        throw std::invalid_argument("GpuTexture view range starts outside the image");
     }
 
     if (range.levelCount == VK_REMAINING_MIP_LEVELS)
@@ -64,191 +29,100 @@ VkImageSubresourceRange resolveViewRange(
     {
         range.layerCount = arrayLayers - range.baseArrayLayer;
     }
-    if (range.levelCount == 0 ||
-        range.levelCount > mipLevels - range.baseMipLevel ||
-        range.layerCount == 0 ||
-        range.layerCount > arrayLayers - range.baseArrayLayer)
+    if (range.levelCount == 0 || range.levelCount > mipLevels - range.baseMipLevel ||
+        range.layerCount == 0 || range.layerCount > arrayLayers - range.baseArrayLayer)
     {
-        throw std::invalid_argument(
-            "GpuTexture view range exceeds the image");
+        throw std::invalid_argument("GpuTexture view range exceeds the image");
     }
     return range;
 }
 
 } // namespace
 
-GpuTexture::GpuTexture(
-    const Device& device,
-    UploadContext& uploadContext,
-    const CreateInfo& createInfo)
+struct GpuTexture::State
 {
-    create(device, uploadContext, createInfo);
+    VkDevice device_ = VK_NULL_HANDLE;
+    VkFormat format_ = VK_FORMAT_UNDEFINED;
+    Image image_;
+    ImageView view_;
+    VkSampler sampler_ = VK_NULL_HANDLE;
+    ~State()
+    {
+        if (sampler_)
+            vkDestroySampler(device_, sampler_, nullptr);
+        // Member destruction releases view before image.
+    }
+};
+GpuTexture::~GpuTexture() = default;
+GpuTexture::GpuTexture(GpuTexture &&) noexcept = default;
+GpuTexture &GpuTexture::operator=(GpuTexture &&) noexcept = default;
+GpuTexture GpuTexture::snapshot() const noexcept
+{
+    GpuTexture result;
+    result.state_ = state_;
+    return result;
+}
+const Image &GpuTexture::image() const noexcept
+{
+    static const Image empty;
+    return state_ ? state_->image_ : empty;
+}
+VkFormat GpuTexture::format() const noexcept
+{
+    return state_ ? state_->format_ : VK_FORMAT_UNDEFINED;
+}
+VkImageView GpuTexture::view() const noexcept
+{
+    return state_ ? state_->view_.get() : VK_NULL_HANDLE;
+}
+VkSampler GpuTexture::sampler() const noexcept
+{
+    return state_ ? state_->sampler_ : VK_NULL_HANDLE;
+}
+GpuTexture::operator bool() const noexcept
+{
+    return state_ && state_->format_ != VK_FORMAT_UNDEFINED && state_->image_ && state_->view_ &&
+           state_->sampler_;
 }
 
-GpuTexture::~GpuTexture()
+void GpuTexture::allocate(const Device &device, const CreateInfo &createInfo)
 {
-    reset();
-}
-
-GpuTexture::GpuTexture(GpuTexture&& other) noexcept
-    : device_(std::exchange(other.device_, VK_NULL_HANDLE)),
-      format_(std::exchange(other.format_, VK_FORMAT_UNDEFINED)),
-      image_(std::move(other.image_)),
-      view_(std::move(other.view_)),
-      sampler_(std::exchange(other.sampler_, VK_NULL_HANDLE))
-{
-}
-
-GpuTexture& GpuTexture::operator=(GpuTexture&& other) noexcept
-{
-    if (this != &other)
+    if (!device || createInfo.image.format == VK_FORMAT_UNDEFINED ||
+        createInfo.sampler.sType != VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO)
     {
-        reset();
-        device_ = std::exchange(other.device_, VK_NULL_HANDLE);
-        format_ = std::exchange(other.format_, VK_FORMAT_UNDEFINED);
-        image_ = std::move(other.image_);
-        view_ = std::move(other.view_);
-        sampler_ = std::exchange(other.sampler_, VK_NULL_HANDLE);
+        throw std::invalid_argument("cannot create GpuTexture from incomplete inputs");
     }
-    return *this;
-}
+    const auto &imageInfo = createInfo.image;
+    const VkFormat format = device.findSupportedFormat({imageInfo.format}, imageInfo.tiling,
+                                                       VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+    auto replacement = std::make_shared<State>();
+    replacement->device_ = device.get();
+    replacement->format_ = format;
+    replacement->image_.create(device, imageInfo);
 
-void GpuTexture::create(
-    const Device& device,
-    UploadContext& uploadContext,
-    const CreateInfo& createInfo)
-{
-    if (!device || createInfo.asset == nullptr ||
-        !*createInfo.asset || createInfo.asset->mipLevels().empty())
-    {
-        throw std::invalid_argument(
-            "cannot create GpuTexture from incomplete inputs");
-    }
-    const asset::TextureAsset& asset = *createInfo.asset;
-
-    if (asset.mipLevels().size() >
-        std::numeric_limits<uint32_t>::max())
-    {
-        throw std::overflow_error(
-            "GpuTexture mip count exceeds the Vulkan limit");
-    }
-
-    const uint32_t mipCount =
-        static_cast<uint32_t>(asset.mipLevels().size());
-    std::vector<VkBufferImageCopy> copyRegions;
-    copyRegions.reserve(mipCount);
-    for (uint32_t mipIndex = 0; mipIndex < mipCount; ++mipIndex)
-    {
-        const asset::TextureMipLevel& mip = asset.mipLevels()[mipIndex];
-        const uint32_t expectedWidth =
-            std::max(1u, asset.width() >> std::min(mipIndex, 31u));
-        const uint32_t expectedHeight =
-            std::max(1u, asset.height() >> std::min(mipIndex, 31u));
-        if (mip.width != expectedWidth || mip.height != expectedHeight)
-        {
-            throw std::invalid_argument(
-                "GpuTexture mip dimensions do not match the base image");
-        }
-
-        VkBufferImageCopy region{};
-        region.bufferOffset = static_cast<VkDeviceSize>(mip.byteOffset);
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.mipLevel = mipIndex;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent = {mip.width, mip.height, 1};
-        copyRegions.push_back(region);
-    }
-
-    if (asset.payload().size() >
-        std::numeric_limits<VkDeviceSize>::max())
-    {
-        throw std::overflow_error(
-            "GpuTexture payload exceeds the Vulkan address range");
-    }
-
-    const VkFormat format = device.findSupportedFormat(
-        {textureVkFormat(asset.format(), asset.colorSpace())},
-        VK_IMAGE_TILING_OPTIMAL,
-        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
-    GpuTexture replacement;
-    replacement.device_ = device.get();
-    replacement.format_ = format;
-    Image::CreateInfo imageInfo{};
-    imageInfo.extent = {
-        asset.width(),
-        asset.height(),
-        1};
-    imageInfo.mipLevels = mipCount;
-    imageInfo.format = format;
-    imageInfo.usage =
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    imageInfo.memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    replacement.image_.create(device, imageInfo);
-
-    const VkImageSubresourceRange viewRange = resolveViewRange(
-        createInfo.viewRange,
-        imageInfo.mipLevels,
-        imageInfo.arrayLayers);
-
-    UploadContext::ImageUploadInfo uploadInfo{};
-    uploadInfo.sourceData = asset.payload().data();
-    uploadInfo.sourceSize =
-        static_cast<VkDeviceSize>(asset.payload().size());
-    uploadInfo.destination.image = replacement.image_.get();
-    uploadInfo.destination.format = format;
-    uploadInfo.destination.extent = imageInfo.extent;
-    uploadInfo.destination.mipLevels = mipCount;
-    uploadInfo.destination.arrayLayers = imageInfo.arrayLayers;
-    uploadInfo.copyRegions = std::move(copyRegions);
-    uploadInfo.destinationRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    uploadInfo.destinationRange.levelCount = mipCount;
-    uploadInfo.destinationRange.layerCount = 1;
-    uploadContext.uploadImage(uploadInfo);
+    const VkImageSubresourceRange viewRange =
+        resolveViewRange(createInfo.viewRange, imageInfo.mipLevels, imageInfo.arrayLayers);
 
     ImageView::CreateInfo viewInfo{};
-    viewInfo.image = replacement.image_.get();
+    viewInfo.image = replacement->image_.get();
     viewInfo.type = createInfo.viewType;
     viewInfo.format = format;
     viewInfo.components = createInfo.components;
     viewInfo.subresourceRange = viewRange;
-    replacement.view_.create(device.get(), viewInfo);
+    replacement->view_.create(device.get(), viewInfo);
 
-    const asset::TextureSamplerDesc& sourceSampler = asset.sampler();
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = textureFilter(sourceSampler.magFilter);
-    samplerInfo.minFilter = textureFilter(sourceSampler.minFilter);
-    samplerInfo.mipmapMode = mipFilter(sourceSampler.mipFilter);
-    samplerInfo.addressModeU = addressMode(sourceSampler.addressU);
-    samplerInfo.addressModeV = addressMode(sourceSampler.addressV);
-    samplerInfo.addressModeW = addressMode(sourceSampler.addressW);
-    samplerInfo.anisotropyEnable = VK_FALSE;
-    samplerInfo.maxAnisotropy = 1.0f;
-    samplerInfo.minLod = 0.0f;
-    samplerInfo.maxLod = static_cast<float>(viewRange.levelCount - 1);
-    if (vkCreateSampler(
-            device.get(),
-            &samplerInfo,
-            nullptr,
-            &replacement.sampler_) != VK_SUCCESS)
+    VkSamplerCreateInfo samplerInfo = createInfo.sampler;
+    samplerInfo.maxLod = std::min(samplerInfo.maxLod, static_cast<float>(viewRange.levelCount - 1));
+    if (vkCreateSampler(device.get(), &samplerInfo, nullptr, &replacement->sampler_) != VK_SUCCESS)
     {
         throw std::runtime_error("failed to create a texture sampler");
     }
 
-    *this = std::move(replacement);
+    state_ = std::move(replacement);
 }
 
 void GpuTexture::reset() noexcept
 {
-    if (device_ != VK_NULL_HANDLE && sampler_ != VK_NULL_HANDLE)
-    {
-        vkDestroySampler(device_, sampler_, nullptr);
-    }
-    sampler_ = VK_NULL_HANDLE;
-    view_.reset();
-    image_.reset();
-    format_ = VK_FORMAT_UNDEFINED;
-    device_ = VK_NULL_HANDLE;
+    state_.reset();
 }
-
 } // namespace rubia::rhi::vulkan

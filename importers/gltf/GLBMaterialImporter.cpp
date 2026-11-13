@@ -91,6 +91,16 @@ std::vector<asset::MaterialAssetHandle> GLBMaterialImporter::import(
         asset::MaterialAsset::CreateInfo materialInfo{};
         materialInfo.name = material.name;
         materialInfo.materialTemplate = createInfo.mapping.materialTemplate;
+        if (material.alphaMode == "BLEND")
+            materialInfo.renderState = asset::makeTransparentMaterialState();
+        else if (material.alphaMode == "MASK")
+        {
+            materialInfo.renderState.alphaClipEnabled = true;
+            materialInfo.renderState.alphaClipThreshold = material.alphaCutoff;
+        }
+        else if (material.alphaMode != "OPAQUE")
+            throw std::invalid_argument("unsupported glTF material alpha mode: " + material.alphaMode);
+        materialInfo.renderState.doubleSided = material.doubleSided;
 
         if (!createInfo.mapping.baseColorParameter.empty())
         {
